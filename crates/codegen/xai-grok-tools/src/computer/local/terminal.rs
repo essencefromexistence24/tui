@@ -508,6 +508,7 @@ struct LocalTerminalActor {
     /// Whether persistent shell state is enabled.
     persistent_shell: bool,
 
+    #[allow(dead_code)]
     login_shell_capture: bool,
 
     /// Per-backend `find`→`bfs` / `grep`→`ugrep` shadow enable state, resolved
@@ -2322,9 +2323,9 @@ impl LocalTerminalBackend {
                 cancel_token_clone,
                 cgroup_guard,
                 memory_monitor,
-                persistent_shell,
-                login_shell_capture,
-                search_shadows,
+            persistent_shell,
+            login_shell_capture,
+            search_shadows,
                 completed_task_ttl,
                 foreground_block_budget,
                 output_file_cap,
@@ -3010,7 +3011,7 @@ fn spawn_shell_command(
     };
 
     #[cfg(not(unix))]
-    let mut build_cmd = |with_breakaway: bool| {
+    let build_cmd = |with_breakaway: bool| {
         use windows::Win32::System::Threading::{
             CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
         };

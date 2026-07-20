@@ -4319,11 +4319,19 @@ pub fn resolve_credentials(model: &ModelEntry, session_key: Option<&str>) -> Res
             xai_chat_state::AuthType::ApiKey,
         )
     } else if let Some(key) = session_key {
-        (
-            Some(key.to_owned()),
-            info.base_url.clone(),
-            xai_chat_state::AuthType::SessionToken,
-        )
+        if crate::util::is_xai_api_url(&info.base_url) {
+            (
+                Some(key.to_owned()),
+                info.base_url.clone(),
+                xai_chat_state::AuthType::SessionToken,
+            )
+        } else {
+            (
+                None,
+                info.base_url.clone(),
+                xai_chat_state::AuthType::ApiKey,
+            )
+        }
     } else if let Ok(key) = crate::agent::auth_method::read_xai_api_key_env() {
         let url = model
             .api_base_url
