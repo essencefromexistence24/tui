@@ -3388,7 +3388,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
         count = entries.len(),
         "loaded default models from embedded JSON"
     );
-    entries
+    let mut map: IndexMap<String, ModelEntryConfig> = entries
         .into_iter()
         .map(|m| {
             assert!(
@@ -3436,7 +3436,16 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
             };
             (key, config)
         })
-        .collect()
+        .collect();
+
+    // Inject built-in community (free) models. These appear in the model
+    // picker without any user config. Remote prefetched models and user
+    // [model."..."] overrides still win for the same key.
+    for (key, entry) in super::community_models::builtin_community_models() {
+        map.entry(key).or_insert(entry);
+    }
+
+    map
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelEntryConfig {
