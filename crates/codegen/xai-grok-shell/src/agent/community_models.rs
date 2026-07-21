@@ -19,17 +19,56 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     }
 
     let models = [
-        ModelSpec { key: "big-pickle", name: "Big Pickle", model_id: "big-pickle", ctx: 200_000, title_header: Some("opencode") },
-        ModelSpec { key: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free", model_id: "deepseek-v4-flash-free", ctx: 200_000, title_header: None },
-        ModelSpec { key: "mimo-v2.5-free", name: "MiMo V2.5 Free", model_id: "mimo-v2.5-free", ctx: 131_000, title_header: None },
-        ModelSpec { key: "hy3-free", name: "HY3 Free", model_id: "hy3-free", ctx: 131_000, title_header: None },
-        ModelSpec { key: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra Free", model_id: "nemotron-3-ultra-free", ctx: 1_000_000, title_header: None },
-        ModelSpec { key: "north-mini-code-free", name: "North Mini Code Free", model_id: "north-mini-code-free", ctx: 131_000, title_header: None },
+        ModelSpec {
+            key: "big-pickle",
+            name: "Big Pickle",
+            model_id: "big-pickle",
+            ctx: 200_000,
+            title_header: Some("opencode"),
+        },
+        ModelSpec {
+            key: "deepseek-v4-flash-free",
+            name: "DeepSeek V4 Flash Free",
+            model_id: "deepseek-v4-flash-free",
+            ctx: 200_000,
+            title_header: None,
+        },
+        ModelSpec {
+            key: "mimo-v2.5-free",
+            name: "MiMo V2.5 Free",
+            model_id: "mimo-v2.5-free",
+            ctx: 131_000,
+            title_header: None,
+        },
+        ModelSpec {
+            key: "hy3-free",
+            name: "HY3 Free",
+            model_id: "hy3-free",
+            ctx: 131_000,
+            title_header: None,
+        },
+        ModelSpec {
+            key: "nemotron-3-ultra-free",
+            name: "Nemotron 3 Ultra Free",
+            model_id: "nemotron-3-ultra-free",
+            ctx: 1_000_000,
+            title_header: None,
+        },
+        ModelSpec {
+            key: "north-mini-code-free",
+            name: "North Mini Code Free",
+            model_id: "north-mini-code-free",
+            ctx: 131_000,
+            title_header: None,
+        },
     ];
 
     for m in &models {
         let mut extra_headers = IndexMap::new();
-        extra_headers.insert("HTTP-Referer".to_string(), "https://opencode.ai/".to_string());
+        extra_headers.insert(
+            "HTTP-Referer".to_string(),
+            "https://opencode.ai/".to_string(),
+        );
         if let Some(title) = m.title_header {
             extra_headers.insert("X-Title".to_string(), title.to_string());
         }

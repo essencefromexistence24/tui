@@ -286,6 +286,10 @@ pub enum ActiveModal {
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
+    /// Provider connect modal (/connect).
+    ProviderConnect {
+        state: Box<crate::views::provider_connect::ProviderConnectState>,
+    },
     /// Settings modal (F2, /settings, palette). Boxed — large state.
     Settings {
         state: Box<crate::views::settings_modal::SettingsModalState>,
@@ -612,7 +616,8 @@ impl ActiveModal {
             | ActiveModal::ShortcutsHelp { .. }
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
-            | ActiveModal::RememberNoteReview { .. } => vec![],
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::ProviderConnect { .. } => vec![],
         }
     }
     pub fn message(&self, drain_blocked: bool) -> &str {
@@ -643,6 +648,7 @@ impl ActiveModal {
             ActiveModal::Settings { .. } => crate::views::settings_modal::MODAL_TITLE,
             ActiveModal::ResetSettingsConfirm { .. } => "Reset setting?",
             ActiveModal::RememberNoteReview { .. } => "Memory Note",
+            ActiveModal::ProviderConnect { .. } => "AI Provider Connect",
         }
     }
 }

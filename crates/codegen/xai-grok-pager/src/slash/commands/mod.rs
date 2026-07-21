@@ -43,6 +43,7 @@ pub mod personas;
 pub mod plan;
 pub mod plugin;
 pub mod privacy;
+pub mod provider_connect;
 pub mod queue;
 pub mod recap;
 pub mod release_notes;
@@ -79,7 +80,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
         Arc::new(new::NewCommand),
-        
         Arc::new(fork::ForkCommand),
         Arc::new(compact::CompactCommand),
         Arc::new(copy::CopyCommand),
@@ -117,7 +117,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(mcps::McpsCommand),
         Arc::new(btw::BtwCommand),
         Arc::new(recap::RecapCommand),
-        
         Arc::new(terminal_setup::TerminalSetupCommand),
         Arc::new(voice::VoiceCommand),
         Arc::new(loop_cmd::LoopCommand),
@@ -128,6 +127,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(privacy::PrivacyCommand),
+        Arc::new(provider_connect::ConnectCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),
         Arc::new(login::LoginCommand),

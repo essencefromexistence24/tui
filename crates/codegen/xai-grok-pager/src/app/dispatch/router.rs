@@ -1157,6 +1157,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             vec![]
         }
+        Action::OpenProviderConnect => {
+            use crate::views::modal::ActiveModal;
+            use crate::views::provider_connect::ProviderConnectState;
+
+            if let crate::app::app_view::ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                agent.active_modal = Some(ActiveModal::ProviderConnect {
+                    state: Box::new(ProviderConnectState::new()),
+                });
+            }
+            vec![]
+        }
         Action::OpenGboom => dispatch_open_gboom(app),
         Action::SuspendForEditor {
             path,

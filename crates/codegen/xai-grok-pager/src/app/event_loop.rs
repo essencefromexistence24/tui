@@ -535,6 +535,7 @@ fn restore_after_child(
 /// Each attempt uses a bounded safe-handoff wait; timeout leaves the one-shot
 /// request pending, reports once, and gates the next attempt behind a deferred
 /// timer so the feedback frame cannot trigger an immediate blocking retry.
+#[allow(clippy::too_many_arguments)]
 fn run_pending_suspends(
     app: &mut AppView,
     terminal: &mut PagerTerminal,
@@ -1643,6 +1644,18 @@ pub(crate) async fn run(
             // Defer to the `AuthComplete` handler (mirrors
             // the deferred session/prompt owner).
             app.deferred_startup.open_dashboard = true;
+        }
+    }
+
+    // `grok connect` startup: open the provider connect modal immediately.
+    if std::env::var("GROK_OPEN_CONNECT_AT_STARTUP").as_deref() == Ok("1") {
+        unsafe { std::env::remove_var("GROK_OPEN_CONNECT_AT_STARTUP") };
+        if app.session_startup_allowed() {
+            let effs = dispatch::dispatch(Action::OpenProviderConnect, &mut app);
+            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                return Ok(make_run_result(&app));
+            }
+            presenter.request_presentation(&mut app, terminal, false);
         }
     }
 

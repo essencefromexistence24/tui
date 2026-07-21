@@ -1470,6 +1470,18 @@ fn flag_dashboard_at_startup_if_requested(args: &mut PagerArgs) -> Result<()> {
     unsafe { std::env::set_var("GROK_OPEN_DASHBOARD_AT_STARTUP", "1") };
     Ok(())
 }
+
+/// Sets `GROK_OPEN_CONNECT_AT_STARTUP=1` when the user runs `grok connect`,
+/// and clears `args.command` so the regular subcommand match doesn't try to
+/// handle it. The env var is read during TUI startup to open the provider
+/// connect modal immediately.
+fn flag_connect_at_startup_if_requested(args: &mut PagerArgs) {
+    if !matches!(args.command, Some(Command::Connect)) {
+        return;
+    }
+    args.command = None;
+    unsafe { std::env::set_var("GROK_OPEN_CONNECT_AT_STARTUP", "1") };
+}
 const RUNTIME_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 /// A plain runtime drop blocks forever on an uncancellable in-flight blocking
 /// task; `shutdown_timeout` abandons it after `grace` so exit can't hang.
@@ -1735,6 +1747,7 @@ async fn async_main() -> Result<()> {
         args.cwd.as_deref(),
     );
     flag_dashboard_at_startup_if_requested(&mut args)?;
+    flag_connect_at_startup_if_requested(&mut args);
     let is_interactive = args.command.is_none()
         && args.single.is_none()
         && args.prompt_json.is_none()
@@ -1746,6 +1759,7 @@ async fn async_main() -> Result<()> {
     });
     let update_config = build_update_config();
     if let Some(command) = args.command.take() {
+        #[allow(unreachable_patterns)]
         match command {
             Command::Version { json } => {
                 if json {
@@ -1927,6 +1941,26 @@ async fn async_main() -> Result<()> {
             Command::Dashboard => {
                 args.command = Some(Command::Dashboard);
                 flag_dashboard_at_startup_if_requested(&mut args)?;
+            }
+            Command::Connect
+            | Command::Models
+            | Command::Inspect { .. }
+            | Command::Leader(_)
+            | Command::Setup { .. }
+            | Command::Worktree(_)
+            | Command::Sessions(_)
+            | Command::Export(_)
+            | Command::Trace(_)
+            | Command::Memory(_)
+            | Command::Update { .. }
+            | Command::Mcp(_)
+            | Command::Plugin(_)
+            | Command::Login { .. }
+            | Command::Logout
+            | Command::Wrap(_)
+            | Command::Completions { .. }
+            | Command::Share(_) => {
+                unreachable!("already handled above")
             }
         }
     }
