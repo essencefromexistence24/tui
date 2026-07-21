@@ -5,20 +5,23 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Widget};
 
 use crate::theme::Theme;
 use crate::views::modal_window::{self, ModalContentArea, ModalSizing, ModalWindowConfig, Shortcut};
-use crate::views::picker;
+use crate::views::picker::{self, PickerEntry, PickerRow};
 
-use super::{ConnectMode, ProviderConnectState};
+use super::{ConnectMode, ProviderConnectState, TAB_LABELS};
 
 pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut ProviderConnectState) {
     let theme = Theme::current();
+    let active_tab = state.active_tab.index();
     let cfg = ModalWindowConfig {
         title: "AI Provider Connect",
-        tabs: None,
+        tabs: Some(&TAB_LABELS),
         shortcuts: &[
+            Shortcut { label: "Tab tabs", clickable: false, id: 0 },
             Shortcut { label: "j/k nav", clickable: false, id: 0 },
             Shortcut { label: "/ search", clickable: false, id: 0 },
             Shortcut { label: "Enter configure", clickable: false, id: 0 },
             Shortcut { label: "Esc close", clickable: false, id: 0 },
+            Shortcut { label: "Space toggle accordion", clickable: false, id: 0 },
         ],
         sizing: ModalSizing {
             width_pct: 0.85, max_width: 120, min_width: 50,
@@ -31,6 +34,8 @@ pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut Provide
         modal_window::render_modal_window(buf, area, &mut state.window, &cfg, &theme)
     else { return; };
 
+    state.window.active_tab = active_tab;
+
     match &state.mode {
         ConnectMode::Browse => render_browse_list(buf, content_area, inner_x, inner_width, state, &theme),
         ConnectMode::KeyInput { provider_id, input_buffer, set_default, .. } =>
@@ -42,10 +47,11 @@ fn render_browse_list(
     buf: &mut Buffer, area: Rect, inner_x: u16, inner_width: u16,
     state: &mut ProviderConnectState, theme: &Theme,
 ) {
-    // Extract search status first to avoid borrow conflicts
     let searching = state.picker.search_active;
-    let (entries, non_sel) = crate::views::provider_connect::ProviderConnectState::picker_entries(
+    let query = state.picker.query().to_string();
+    let data = ProviderConnectState::picker_entry_data(
         &state.free_providers, &state.providers, &state.configured_ids,
+        state.active_tab, &query,
     );
 
     picker::render_picker_search_bar(buf, area.x, area.y, area.width, theme,
@@ -59,10 +65,37 @@ fn render_browse_list(
     let esy = sep_y + 1;
     let ea = Rect { x: area.x, y: esy, width: area.width, height: area.height.saturating_sub(esy.saturating_sub(area.y)) };
 
-    picker::render_picker_content_with_scrollbar_x(
-        buf, ea, theme, &mut state.picker, &entries, &non_sel, &[],
+    let empty: &[&str] = &[];
+    let entries: Vec<PickerEntry<'_>> = data.labels.iter().enumerate().map(|(i, label)| {
+        PickerEntry::Row(PickerRow {
+            label: label.as_str(),
+            right_label: "",
+            selected: false,
+            expanded: false,
+            fields: &[],
+            description_lines: empty,
+            summary_lines: empty,
+            dimmed: data.dimmed[i],
+            indent: data.indents[i],
+            collapsible: data.collapsible[i],
+            badge: data.badges[i],
+            badge_color: data.badge_colors[i],
+            underline_last_desc: false,
+        })
+    }).collect();
+
+    let content_hit = picker::render_picker_content_with_scrollbar_x(
+        buf, ea, theme, &mut state.picker, &entries, &data.non_sel, &[],
         Some(theme.bg_base), false, inner_x + inner_width - 1,
     );
+    state.picker.hit_areas = Some(picker::PickerHitAreas {
+        close_button: Rect::default(),
+        search_bar: Rect::new(area.x, area.y, area.width, 1),
+        item_rects: content_hit.item_rects,
+        entry_indices: content_hit.entry_indices,
+        tab_rects: vec![],
+        filter_rect: None,
+    });
 }
 
 fn render_key_input(
@@ -70,7 +103,6 @@ fn render_key_input(
     provider_id: &str, input_buffer: &str, _set_default: bool,
     state: &ProviderConnectState, theme: &Theme,
 ) {
-    // Fill background with theme color to avoid black/cleared behind content
     let bg_style = Style::default().bg(theme.bg_base);
     for y in area.y..area.y + area.height {
         for x in area.x..area.x + area.width {
@@ -93,7 +125,7 @@ fn render_key_input(
 
     let all: Vec<_> = state.free_providers.iter().chain(state.providers.iter()).collect();
     let pvd = all.iter().find(|p| p.id == provider_id).copied();
-    let pn = pvd.map(|p| p.name.as_str()).unwrap_or(provider_id);
+    let pn = pvd.map(|p| p.display_name()).unwrap_or(provider_id);
     let free = pvd.is_some_and(|p| p.auth_type == "none" || p.auth_type == "optional" || p.free == "true");
 
     let pt = if free {

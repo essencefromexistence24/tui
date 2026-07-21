@@ -1,8 +1,10 @@
-use ratatui::crossterm::event::{KeyCode, KeyEvent, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent};
 
 use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
 
-use super::{ConnectMode, ProviderConnectState};
+use super::{
+    categorize, fuzzy_matches, ConnectMode, ProviderConnectState, ProviderDef, ProviderTab, TAB_LABELS,
+};
 
 pub enum ConnectOutcome {
     Close,
@@ -19,139 +21,206 @@ pub fn handle_provider_connect_key(state: &mut ProviderConnectState, key: KeyEve
 }
 
 pub fn handle_provider_connect_mouse(state: &mut ProviderConnectState, mouse: MouseEvent) -> ConnectOutcome {
-    if !matches!(state.mode, ConnectMode::Browse) { return ConnectOutcome::Unchanged; }
+    if !matches!(state.mode, ConnectMode::Browse) {
+        return ConnectOutcome::Unchanged;
+    }
+    let query = state.picker.query().to_string();
+    let data = ProviderConnectState::picker_entry_data(
+        &state.free_providers,
+        &state.providers,
+        &state.configured_ids,
+        state.active_tab,
+        &query,
+    );
 
-    match mouse.kind {
-        MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(ref hits) = state.picker.hit_areas {
-                let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
-                for (vi, rect) in hits.item_rects.iter().enumerate() {
-                    if rect.contains(pos) {
-                        if let Some(&ei) = hits.entry_indices.get(vi) {
-                            return handle_click(state, ei);
-                        }
-                    }
-                }
+    let cfg = make_config(&data.non_sel, state.active_tab.index());
+    let ev = Event::Mouse(mouse);
+    let entry_count = data.len();
+    let outcome = handle_picker_input(&ev, &mut state.picker, entry_count, &cfg);
+
+    handle_picker_outcome(state, outcome, &data)
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn make_config<'a>(non_sel: &'a [bool], active_tab: usize) -> PickerConfig<'a> {
+    PickerConfig {
+        title: None,
+        show_search_hint: true,
+        expandable: false,
+        esc_clears_query: true,
+        shortcuts: None,
+        pending_hint: None,
+        non_selectable: non_sel,
+        non_selectable_clickable: &[],
+        shortcuts_area: None,
+        tabs: Some(&TAB_LABELS),
+        active_tab,
+        filter_label: None,
+        filter_key_hint: None,
+        filter_active: false,
+        action_keys: &[],
+        disable_search: false,
+        compact_bottom_bar: false,
+        search_only_on_slash: false,
+        vim_normal_first: false,
+    }
+}
+
+fn handle_picker_outcome(
+    state: &mut ProviderConnectState,
+    outcome: PickerOutcome,
+    data: &super::PickerEntryData,
+) -> ConnectOutcome {
+    match outcome {
+        PickerOutcome::Closed => ConnectOutcome::Close,
+        PickerOutcome::TabChanged(idx) => {
+            if let Some(tab) = ProviderTab::from_index(idx) {
+                state.switch_tab(tab);
             }
             ConnectOutcome::Unchanged
         }
-        MouseEventKind::ScrollDown => {
-            let (entries, non_sel) = ProviderConnectState::picker_entries(
-                &state.free_providers, &state.providers, &state.configured_ids,
-            );
-            if !entries.is_empty() {
-                let mut sel = state.picker.selected;
-                let mut next = sel + 1;
-                while next < entries.len() && non_sel.get(next).copied().unwrap_or(true) {
-                    next += 1;
-                }
-                if next < entries.len() {
-                    state.picker.selected = next;
-                }
-                drop((entries, non_sel));
-            }
-            ConnectOutcome::Unchanged
-        }
-        MouseEventKind::ScrollUp => {
-            let (entries, non_sel) = ProviderConnectState::picker_entries(
-                &state.free_providers, &state.providers, &state.configured_ids,
-            );
-            if !entries.is_empty() {
-                let mut prev = state.picker.selected.saturating_sub(1);
-                while prev > 0 && non_sel.get(prev).copied().unwrap_or(true) {
-                    prev = prev.saturating_sub(1);
-                }
-                if prev < entries.len() && !non_sel.get(prev).copied().unwrap_or(true) {
-                    state.picker.selected = prev;
-                }
-                drop((entries, non_sel));
-            }
-            ConnectOutcome::Unchanged
-        }
+        PickerOutcome::Selected(idx) => handle_selection(state, idx, data),
         _ => ConnectOutcome::Unchanged,
     }
 }
 
-fn handle_click(state: &mut ProviderConnectState, idx: usize) -> ConnectOutcome {
-    let (entries, non_sel) = ProviderConnectState::picker_entries(
-        &state.free_providers, &state.providers, &state.configured_ids,
-    );
-    if idx >= entries.len() || non_sel.get(idx).copied().unwrap_or(true) {
+/// Count how many selectable provider entries appear before `idx`.
+fn provider_count_before(idx: usize, data: &super::PickerEntryData) -> usize {
+    data.non_sel
+        .iter()
+        .take(idx)
+        .filter(|&&ns| !ns)
+        .count()
+}
+
+/// Map a picker entry index to a provider and open KeyInput mode.
+fn handle_selection(
+    state: &mut ProviderConnectState,
+    idx: usize,
+    data: &super::PickerEntryData,
+) -> ConnectOutcome {
+    // Skip non-selectable entries (category headers).
+    if data.non_sel.get(idx).copied().unwrap_or(true) {
         return ConnectOutcome::Unchanged;
     }
-    let fc = state.free_providers.len();
-    let di = idx.saturating_sub(1);
-    let pid = if di < fc {
-        state.free_providers.get(di).map(|p| p.id.clone())
-    } else {
-        state.providers.get(di.saturating_sub(fc)).map(|p| p.id.clone())
-    };
-    drop((entries, non_sel));
-    if let Some(pid) = pid {
-        state.mode = ConnectMode::KeyInput { provider_id: pid, input_buffer: String::new(), set_default: true };
+
+    let prov_n = provider_count_before(idx, data);
+
+    // Rebuild the provider list in the same order as picker_entry_data.
+    let all: Vec<_> = state.free_providers.iter().chain(state.providers.iter()).collect();
+    let mut cat: Vec<&ProviderDef> = all
+        .into_iter()
+        .filter(|p| match state.active_tab {
+            ProviderTab::All => true,
+            ProviderTab::Free => categorize(p) == ProviderTab::Free,
+            tab => categorize(p) == tab,
+        })
+        .collect();
+    let query = state.picker.query().to_string();
+    cat.retain(|p| fuzzy_matches(p.display_name(), &query));
+    cat.sort_by(|a, b| a.display_name().cmp(b.display_name()));
+
+    if let Some(p) = cat.get(prov_n) {
+        state.mode = ConnectMode::KeyInput {
+            provider_id: p.id.clone(),
+            input_buffer: String::new(),
+            set_default: true,
+        };
         state.error_message = None;
     }
     ConnectOutcome::Unchanged
 }
 
-/// Translate a picker selection outcome into opening the KeyInput modal.
-fn handle_selection(state: &mut ProviderConnectState, outcome: PickerOutcome) -> ConnectOutcome {
-    match outcome {
-        PickerOutcome::Selected(idx) | PickerOutcome::Expand(idx) => handle_click(state, idx),
-        PickerOutcome::Closed => ConnectOutcome::Close,
-        _ => ConnectOutcome::Unchanged,
-    }
-}
-
-fn make_config<'a>(non_sel: &'a [bool]) -> PickerConfig<'a> {
-    PickerConfig {
-        title: None, show_search_hint: true, expandable: false, esc_clears_query: true,
-        shortcuts: None, pending_hint: None, non_selectable: non_sel, non_selectable_clickable: &[],
-        shortcuts_area: None, tabs: None, active_tab: 0,
-        filter_label: None, filter_key_hint: None, filter_active: false,
-        action_keys: &[], disable_search: false, compact_bottom_bar: false,
-        search_only_on_slash: false, vim_normal_first: false,
-    }
-}
+// ---------------------------------------------------------------------------
+// Keyboard handling (Browse mode)
+// ---------------------------------------------------------------------------
 
 fn handle_browse_key(state: &mut ProviderConnectState, key: KeyEvent) -> ConnectOutcome {
-    let outcome = {
-        let (entries, non_sel) = ProviderConnectState::picker_entries(
-            &state.free_providers, &state.providers, &state.configured_ids,
-        );
-        let cfg = make_config(&non_sel);
-        let ev = ratatui::crossterm::event::Event::Key(key);
-        handle_picker_input(&ev, &mut state.picker, entries.len(), &cfg)
-    };
-    handle_selection(state, outcome)
+    let query = state.picker.query().to_string();
+    let data = ProviderConnectState::picker_entry_data(
+        &state.free_providers,
+        &state.providers,
+        &state.configured_ids,
+        state.active_tab,
+        &query,
+    );
+
+    let cfg = make_config(&data.non_sel, state.active_tab.index());
+    let ev = Event::Key(key);
+    let entry_count = data.len();
+    let outcome = handle_picker_input(&ev, &mut state.picker, entry_count, &cfg);
+
+    handle_picker_outcome(state, outcome, &data)
 }
 
+// ---------------------------------------------------------------------------
+// Keyboard handling (KeyInput mode)
+// ---------------------------------------------------------------------------
+
 fn handle_key_input(
-    state: &mut ProviderConnectState, key: KeyEvent,
-    provider_id: &str, input_buffer: &str, set_default: bool,
+    state: &mut ProviderConnectState,
+    key: KeyEvent,
+    provider_id: &str,
+    input_buffer: &str,
+    set_default: bool,
 ) -> ConnectOutcome {
-    let all: Vec<_> = state.free_providers.iter().chain(state.providers.iter()).collect();
-    let free = all.iter().find(|p| p.id == provider_id)
-        .is_some_and(|p| p.auth_type == "none" || p.auth_type == "optional" || p.free == "true");
+    let all: Vec<_> = state
+        .free_providers
+        .iter()
+        .chain(state.providers.iter())
+        .collect();
+    let free = all
+        .iter()
+        .find(|p| p.id == provider_id)
+        .is_some_and(|p| {
+            p.auth_type == "none" || p.auth_type == "optional" || p.free == "true"
+        });
 
     match key.code {
-        KeyCode::Esc => { state.mode = ConnectMode::Browse; state.error_message = None; ConnectOutcome::Unchanged }
+        KeyCode::Esc => {
+            state.mode = ConnectMode::Browse;
+            state.error_message = None;
+            ConnectOutcome::Unchanged
+        }
         KeyCode::Enter => {
-            if free { ConnectOutcome::Configure { provider_id: provider_id.into(), api_key: None, set_default } }
-            else if input_buffer.trim().is_empty() {
-                state.error_message = Some("API key cannot be empty.".into()); ConnectOutcome::Unchanged
+            if free {
+                ConnectOutcome::Configure {
+                    provider_id: provider_id.into(),
+                    api_key: None,
+                    set_default,
+                }
+            } else if input_buffer.trim().is_empty() {
+                state.error_message = Some("API key cannot be empty.".into());
+                ConnectOutcome::Unchanged
             } else {
-                ConnectOutcome::Configure { provider_id: provider_id.into(), api_key: Some(input_buffer.trim().into()), set_default }
+                ConnectOutcome::Configure {
+                    provider_id: provider_id.into(),
+                    api_key: Some(input_buffer.trim().into()),
+                    set_default,
+                }
             }
         }
         KeyCode::Char(c) => {
-            let mut nb = input_buffer.to_string(); nb.push(c);
-            state.mode = ConnectMode::KeyInput { provider_id: provider_id.into(), input_buffer: nb, set_default };
+            let mut nb = input_buffer.to_string();
+            nb.push(c);
+            state.mode = ConnectMode::KeyInput {
+                provider_id: provider_id.into(),
+                input_buffer: nb,
+                set_default,
+            };
             ConnectOutcome::Unchanged
         }
         KeyCode::Backspace => {
-            let mut nb = input_buffer.to_string(); nb.pop();
-            state.mode = ConnectMode::KeyInput { provider_id: provider_id.into(), input_buffer: nb, set_default };
+            let mut nb = input_buffer.to_string();
+            nb.pop();
+            state.mode = ConnectMode::KeyInput {
+                provider_id: provider_id.into(),
+                input_buffer: nb,
+                set_default,
+            };
             ConnectOutcome::Unchanged
         }
         _ => ConnectOutcome::Unchanged,

@@ -5,7 +5,7 @@ use serde::Deserialize;
 use toml_edit::{DocumentMut, Value};
 use xai_grok_tools::util::grok_home::grok_home;
 
-use crate::views::picker::{PickerEntry, PickerRow, PickerState};
+use crate::views::picker::PickerState;
 
 // ---------------------------------------------------------------------------
 // Tab enumeration
@@ -181,7 +181,29 @@ pub struct ProviderConnectState {
     pub error_message: Option<String>,
     pub window: crate::views::modal_window::ModalWindowState,
     pub active_tab: ProviderTab,
-    pub collapsed_groups: std::collections::HashSet<String>,
+}
+
+/// Owned entry data returned by [`ProviderConnectState::picker_entry_data`].
+/// Callers convert to `Vec<PickerEntry<'_>>` by calling [`PickerEntryData::into_entries`].
+pub struct PickerEntryData {
+    pub labels: Vec<String>,
+    pub badges: Vec<&'static str>,
+    pub badge_colors: Vec<Option<ratatui::style::Color>>,
+    pub non_sel: Vec<bool>,
+    pub group_keys: Vec<Option<String>>,
+    pub collapsible: Vec<bool>,
+    pub indents: Vec<u8>,
+    pub dimmed: Vec<bool>,
+}
+
+impl PickerEntryData {
+    pub fn len(&self) -> usize {
+        self.labels.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.labels.is_empty()
+    }
 }
 
 impl Default for ProviderConnectState {
@@ -204,14 +226,6 @@ impl ProviderConnectState {
         }
         free_providers.sort_by(|a, b| a.display_name().cmp(b.display_name()));
         api_providers.sort_by(|a, b| a.display_name().cmp(b.display_name()));
-        // Seed collapsed: collapse everything except the first section with items.
-        let mut collapsed = std::collections::HashSet::new();
-        for tab in &ProviderTab::ALL[1..] {
-            let has_any = api_providers.iter().any(|p| categorize(p) == *tab);
-            if *tab != ProviderTab::Free && has_any {
-                collapsed.insert(tab.label().to_string());
-            }
-        }
         Self {
             providers: api_providers,
             free_providers,
@@ -226,7 +240,6 @@ impl ProviderConnectState {
             error_message: None,
             window: crate::views::modal_window::ModalWindowState::new(),
             active_tab: ProviderTab::All,
-            collapsed_groups: collapsed,
         }
     }
 
@@ -243,164 +256,110 @@ impl ProviderConnectState {
         self.status_message = None;
     }
 
-    pub fn is_group_expanded(&self, group_key: &str) -> bool {
-        let searching = !self.picker.query().is_empty();
-        searching || !self.collapsed_groups.contains(group_key)
-    }
-
-    /// Build picker entries filtered by the active tab and search query.
-    /// Returns (entries, non_selectable_mask, group_keys).
-    pub fn picker_entries<'a>(
-        free_providers: &'a [ProviderDef],
-        providers: &'a [ProviderDef],
+    /// Build picker entry data (owned label strings + metadata).
+    /// Callers use these to build `PickerEntry` rows in their own scope.
+    pub fn picker_entry_data(
+        free_providers: &[ProviderDef],
+        providers: &[ProviderDef],
         configured_ids: &[String],
         active_tab: ProviderTab,
         query: &str,
-        collapsed_groups: &std::collections::HashSet<String>,
-    ) -> (Vec<PickerEntry<'a>>, Vec<bool>, Vec<Option<String>>) {
-        let mut entries: Vec<PickerEntry<'a>> = Vec::new();
+    ) -> PickerEntryData {
+        let mut labels: Vec<String> = Vec::new();
+        let mut badges: Vec<&'static str> = Vec::new();
+        let mut badge_colors: Vec<Option<ratatui::style::Color>> = Vec::new();
         let mut non_sel: Vec<bool> = Vec::new();
         let mut group_keys: Vec<Option<String>> = Vec::new();
-        let empty: &[&str] = &[];
-        let searching = !query.is_empty();
+        let mut collapsible: Vec<bool> = Vec::new();
+        let mut indents: Vec<u8> = Vec::new();
+        let mut dimmed: Vec<bool> = Vec::new();
+        let dim = ratatui::style::Color::DarkGray;
+        let grn = ratatui::style::Color::Green;
+        let ylw = ratatui::style::Color::Yellow;
 
-        match active_tab {
-            ProviderTab::All => {
-                // Group providers by category, show collapsible section headers.
-                for tab in &ProviderTab::ALL[1..] {
-                    let cat_providers: Vec<&ProviderDef> = free_providers.iter()
-                        .chain(providers.iter())
-                        .filter(|p| categorize(p) == *tab && fuzzy_matches(p.display_name(), query))
-                        .collect();
-                    if cat_providers.is_empty() && !searching {
-                        continue;
-                    }
-                    if cat_providers.is_empty() {
-                        // During search, show a collapsed section only if refiltering would re-add it.
-                        continue;
-                    }
-                    let group_key = tab.label().to_string();
-                    let section_collapsed = !searching && collapsed_groups.contains(&group_key);
+        let cat: Vec<&ProviderDef> = match active_tab {
+            ProviderTab::All => free_providers.iter().chain(providers.iter()).collect(),
+            ProviderTab::Free => free_providers.iter()
+                .chain(providers.iter())
+                .filter(|p| categorize(p) == ProviderTab::Free)
+                .collect(),
+            tab => free_providers.iter()
+                .chain(providers.iter())
+                .filter(|p| categorize(p) == tab)
+                .collect(),
+        };
 
-                    // Section header
-                    let label = format!("{} ({})", tab.label(), cat_providers.len());
-                    entries.push(PickerEntry::Row(PickerRow {
-                        label: &label,
-                        right_label: "",
-                        selected: false, expanded: false,
-                        fields: &[], description_lines: empty, summary_lines: empty,
-                        dimmed: false, indent: 0, collapsible: true,
-                        badge: "", badge_color: None, underline_last_desc: false,
-                    }));
-                    non_sel.push(true);
-                    group_keys.push(Some(group_key.clone()));
+        let mut matched: Vec<&ProviderDef> = cat.into_iter()
+            .filter(|p| fuzzy_matches(p.display_name(), query))
+            .collect();
+        matched.sort_by(|a, b| a.display_name().cmp(b.display_name()));
 
-                    if section_collapsed {
-                        continue;
-                    }
-
-                    for p in &cat_providers {
-                        let status = p.status(configured_ids);
-                        let (badge, bc) = match &status {
-                            ProviderStatus::Free => ("Free", Some(ratatui::style::Color::DarkGray)),
-                            ProviderStatus::Configured => ("Configured", Some(ratatui::style::Color::Green)),
-                            ProviderStatus::NotConfigured => ("Configure", Some(ratatui::style::Color::Yellow)),
-                        };
-                        entries.push(PickerEntry::Row(PickerRow {
-                            label: p.display_name(),
-                            right_label: "",
-                            selected: false, expanded: false,
-                            fields: &[], description_lines: empty, summary_lines: empty,
-                            dimmed: false, indent: 1, collapsible: false,
-                            badge, badge_color: bc, underline_last_desc: false,
-                        }));
-                        non_sel.push(false);
-                        group_keys.push(Some(group_key.clone()));
-                    }
-                }
-
-                if entries.is_empty() {
-                    entries.push(PickerEntry::Row(PickerRow {
-                        label: "No providers match your search",
-                        right_label: "",
-                        selected: false, expanded: false,
-                        fields: &[], description_lines: empty, summary_lines: empty,
-                        dimmed: true, indent: 0, collapsible: false,
-                        badge: "", badge_color: None, underline_last_desc: false,
-                    }));
-                    non_sel.push(true);
-                    group_keys.push(None);
-                }
-            }
-            _ => {
-                // Single category tab.
-                let cat_providers: Vec<&ProviderDef> = free_providers.iter()
-                    .chain(providers.iter())
-                    .filter(|p| {
-                        if active_tab == ProviderTab::Free {
-                            categorize(p) == ProviderTab::Free
-                        } else {
-                            categorize(p) == active_tab
-                        }
-                    })
-                    .collect();
-
-                let mut matched: Vec<&&ProviderDef> = cat_providers.iter()
-                    .filter(|p| fuzzy_matches(p.display_name(), query))
-                    .collect();
-                matched.sort_by(|a, b| a.display_name().cmp(b.display_name()));
-
-                if matched.is_empty() {
-                    entries.push(PickerEntry::Row(PickerRow {
-                        label: if query.is_empty() {
-                            "No providers in this category"
-                        } else {
-                            "No providers match your search"
-                        },
-                        right_label: "",
-                        selected: false, expanded: false,
-                        fields: &[], description_lines: empty, summary_lines: empty,
-                        dimmed: true, indent: 0, collapsible: false,
-                        badge: "", badge_color: None, underline_last_desc: false,
-                    }));
-                    non_sel.push(true);
-                    group_keys.push(None);
+        if matched.is_empty() {
+            let msg = if query.is_empty() {
+                if active_tab == ProviderTab::All {
+                    "No providers available"
                 } else {
-                    let header_label = format!("{} ({})", active_tab.label(), matched.len());
-                    entries.push(PickerEntry::Row(PickerRow {
-                        label: &header_label,
-                        right_label: "",
-                        selected: false, expanded: false,
-                        fields: &[], description_lines: empty, summary_lines: empty,
-                        dimmed: false, indent: 0, collapsible: false,
-                        badge: "", badge_color: None, underline_last_desc: false,
-                    }));
-                    non_sel.push(true);
-                    group_keys.push(None);
-
-                    for p in matched {
-                        let status = p.status(configured_ids);
-                        let (badge, bc) = match &status {
-                            ProviderStatus::Free => ("Free", Some(ratatui::style::Color::DarkGray)),
-                            ProviderStatus::Configured => ("Configured", Some(ratatui::style::Color::Green)),
-                            ProviderStatus::NotConfigured => ("Configure", Some(ratatui::style::Color::Yellow)),
-                        };
-                        entries.push(PickerEntry::Row(PickerRow {
-                            label: p.display_name(),
-                            right_label: "",
-                            selected: false, expanded: false,
-                            fields: &[], description_lines: empty, summary_lines: empty,
-                            dimmed: false, indent: 1, collapsible: false,
-                            badge, badge_color: bc, underline_last_desc: false,
-                        }));
-                        non_sel.push(false);
-                        group_keys.push(None);
-                    }
+                    "No providers in this category"
                 }
+            } else {
+                "No providers match your search"
+            };
+            labels.push(msg.to_string());
+            badges.push("");
+            badge_colors.push(None);
+            non_sel.push(true);
+            group_keys.push(None);
+            collapsible.push(false);
+            indents.push(0);
+            dimmed.push(true);
+        } else if active_tab != ProviderTab::All {
+            // Single-category tab: show a header row then the providers.
+            labels.push(active_tab.label().to_string());
+            badges.push("");
+            badge_colors.push(None);
+            non_sel.push(true);
+            group_keys.push(None);
+            collapsible.push(false);
+            indents.push(0);
+            dimmed.push(false);
+
+            for p in &matched {
+                let st = p.status(configured_ids);
+                let (b, bc) = match &st {
+                    ProviderStatus::Free => ("Free", Some(dim)),
+                    ProviderStatus::Configured => ("Configured", Some(grn)),
+                    ProviderStatus::NotConfigured => ("Configure", Some(ylw)),
+                };
+                labels.push(p.display_name().to_string());
+                badges.push(b);
+                badge_colors.push(bc);
+                non_sel.push(false);
+                group_keys.push(None);
+                collapsible.push(false);
+                indents.push(1);
+                dimmed.push(false);
+            }
+        } else {
+            // "All" tab: flat list of every provider, no category headers.
+            for p in &matched {
+                let st = p.status(configured_ids);
+                let (b, bc) = match &st {
+                    ProviderStatus::Free => ("Free", Some(dim)),
+                    ProviderStatus::Configured => ("Configured", Some(grn)),
+                    ProviderStatus::NotConfigured => ("Configure", Some(ylw)),
+                };
+                labels.push(p.display_name().to_string());
+                badges.push(b);
+                badge_colors.push(bc);
+                non_sel.push(false);
+                group_keys.push(None);
+                collapsible.push(false);
+                indents.push(0);
+                dimmed.push(false);
             }
         }
 
-        (entries, non_sel, group_keys)
+        PickerEntryData { labels, badges, badge_colors, non_sel, group_keys, collapsible, indents, dimmed }
     }
 }
 

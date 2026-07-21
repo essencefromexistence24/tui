@@ -1623,6 +1623,13 @@ impl AgentView {
                     self.active_modal = None;
                     return InputOutcome::Changed;
                 }
+                ModalWindowOutcome::TabChanged(idx) => {
+                    if let Some(tab) = crate::views::provider_connect::ProviderTab::from_index(idx) {
+                        state.switch_tab(tab);
+                        state.window.tabs_focused = true;
+                    }
+                    return InputOutcome::Changed;
+                }
                 ModalWindowOutcome::Handled => return InputOutcome::Changed,
                 ModalWindowOutcome::Unhandled => {
                     let out = crate::views::provider_connect::input::handle_provider_connect_mouse(
