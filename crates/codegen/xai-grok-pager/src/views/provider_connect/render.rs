@@ -86,7 +86,7 @@ fn render_browse_list(
 
     let content_hit = picker::render_picker_content_with_scrollbar_x(
         buf, ea, theme, &mut state.picker, &entries, &data.non_sel, &[],
-        Some(theme.bg_base), false, inner_x + inner_width - 1,
+        Some(theme.bg_base), false, 0, inner_x + inner_width - 1,
     );
     state.picker.hit_areas = Some(picker::PickerHitAreas {
         close_button: Rect::default(),

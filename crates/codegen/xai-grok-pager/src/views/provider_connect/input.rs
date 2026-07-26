@@ -61,6 +61,7 @@ fn make_config<'a>(non_sel: &'a [bool], active_tab: usize) -> PickerConfig<'a> {
         filter_label: None,
         filter_key_hint: None,
         filter_active: false,
+        header_note: None,
         action_keys: &[],
         disable_search: false,
         compact_bottom_bar: false,

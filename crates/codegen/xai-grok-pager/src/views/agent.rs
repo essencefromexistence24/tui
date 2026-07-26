@@ -102,7 +102,7 @@ pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {
 /// prompt height + todo height. Shared widgets use these rects to render into.
 pub struct AgentViewLayout {
     pub status_bar: Rect,
-    /// Startup terminal-warning banner.
+    /// Startup terminal-warning banner (between status bar and bg tasks/scrollback).
     pub startup_warnings: Rect,
     pub tasks: Rect,
     pub catalog: Rect,
@@ -123,8 +123,6 @@ pub struct AgentViewLayout {
     pub voice_recording: Rect,
     pub prompt: Rect,
     pub shortcuts: Rect,
-    /// Single compact row below the prompt: turn status | shortcuts | agent status.
-    pub bottom_chrome: Rect,
     /// Scrollback area narrowed for scrollbar (content rendering uses this).
     pub scrollback_content: Rect,
     /// Scrollbar track position (x coordinate).
@@ -179,7 +177,11 @@ impl AgentViewLayout {
         compact: bool,
     ) -> Self {
         let outer_vpad = layout_cfg.eff_outer_vpad(compact);
-        let bottom_vpad = outer_vpad;
+        let bottom_vpad = if area.height <= SHORT_TERMINAL_ROWS {
+            0
+        } else {
+            outer_vpad
+        };
         let cta_height = if area.height <= SHORT_TERMINAL_ROWS {
             0
         } else {
@@ -198,7 +200,9 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
-        let mut constraints = vec![Constraint::Length(0)];
+        let mut constraints = vec![
+            Constraint::Length(1), // StatusBar
+        ];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
@@ -215,6 +219,8 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(todo_height));
         }
+        let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
+        constraints.push(Constraint::Length(status_gap));
         constraints.push(Constraint::Min(5));
         if btw_height > 0 {
             constraints.push(Constraint::Length(1));
@@ -247,15 +253,11 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(voice_recording_height));
         }
         constraints.push(Constraint::Length(prompt_height));
-        let shortcuts_gap = if bottom_vpad == 0 || shortcuts_height == 0 { 0u16 } else { 1 };
+        let shortcuts_gap = if bottom_vpad == 0 { 0u16 } else { 1 };
         if shortcuts_gap > 0 {
             constraints.push(Constraint::Length(shortcuts_gap));
         }
-        if shortcuts_height > 0 {
-            constraints.push(Constraint::Length(shortcuts_height));
-        }
-        // Bottom chrome row (1 row, always rendered).
-        constraints.push(Constraint::Length(1));
+        constraints.push(Constraint::Length(shortcuts_height));
         let chunks = Layout::vertical(constraints).split(inner_area);
         let mut i = 0;
         let status_bar = chunks[i];
@@ -291,6 +293,7 @@ impl AgentViewLayout {
         } else {
             Rect::default()
         };
+        i += 1;
         let scrollback = chunks[i];
         i += 1;
         let btw = if btw_height > 0 {
@@ -356,14 +359,7 @@ impl AgentViewLayout {
         if shortcuts_gap > 0 {
             i += 1;
         }
-        let shortcuts = if shortcuts_height > 0 {
-            let r = chunks[i];
-            i += 1;
-            r
-        } else {
-            Rect::default()
-        };
-        let bottom_chrome = chunks[i];
+        let shortcuts = chunks[i];
         let scrollbar_x = area.right().saturating_sub(scrollbar_cfg.gap_right + 1);
         let timeline_width = if scrollbar_cfg.enabled {
             timeline_width
@@ -405,7 +401,6 @@ impl AgentViewLayout {
             scrollbar_x,
             timeline_x,
             timeline_width,
-            bottom_chrome,
         }
     }
     /// Inner area width (for prompt height computation before full layout).
@@ -932,6 +927,7 @@ pub fn build_hints(
     vim_mode: bool,
     is_subagent_view: bool,
     is_turn_running: bool,
+    esc_would_cancel_turn: bool,
     has_queued_follow_up: bool,
     selected_is_user_prompt: bool,
     selected_is_agent_message: bool,
@@ -1196,7 +1192,11 @@ pub fn build_hints(
         }
     };
     if is_turn_running && let Some(def) = registry.find(ActionId::CancelTurn) {
-        hints.push(def.hint());
+        let mut hint = def.hint();
+        if esc_would_cancel_turn {
+            hint.keys = vec![crate::key!(Esc)];
+        }
+        hints.push(hint);
     }
     let has_composer_payload = !prompt.text().trim().is_empty() || is_editing_queued;
     if matches!(active_pane, ActivePane::Prompt)
@@ -1205,8 +1205,11 @@ pub fn build_hints(
     {
         hints.push(def.hint());
     }
-    if can_demote {
-        hints.push(HintItem::new(crate::key!('g', CONTROL), "send to bg"));
+    if can_demote
+        && !is_subagent_view
+        && let Some(key) = registry.key_for(ActionId::SendToBackground)
+    {
+        hints.push(HintItem::new(key, "send to bg"));
     }
     hints
 }
@@ -1263,6 +1266,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             selected_is_user_prompt,
             selected_is_agent_message,
             false,
@@ -1272,6 +1276,41 @@ mod tests {
     }
     fn first_two_labels(hints: &[HintItem]) -> Vec<&str> {
         hints.iter().take(2).map(|h| h.label.as_ref()).collect()
+    }
+    #[test]
+    fn demotion_hint_uses_registered_ctrl_b_binding() {
+        let registry = ActionRegistry::defaults();
+        let hints = build_hints(
+            ActivePane::Scrollback,
+            &PromptWidget::default(),
+            &registry,
+            false,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            true,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        let hint = hints
+            .iter()
+            .find(|hint| hint.label == "send to bg")
+            .expect("running Execute should advertise demotion");
+        assert_eq!(hint.keys, vec![crate::key!('b', CONTROL)]);
     }
     #[test]
     fn group_header_shows_enter_toggle_hint_instead_of_open_and_fold() {
@@ -1292,6 +1331,7 @@ mod tests {
             false,
             false,
             true,
+            false,
             false,
             false,
             false,
@@ -1463,6 +1503,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             Some(&search),
         )
     }
@@ -1566,6 +1607,7 @@ mod tests {
             false,
             false,
             false,
+            false,
             None,
         );
         assert!(
@@ -1605,6 +1647,7 @@ mod tests {
             true,
             false,
             is_turn_running,
+            false,
             false,
             false,
             false,
@@ -1664,6 +1707,7 @@ mod tests {
                 true,
                 false,
                 true,
+                false,
                 true,
                 false,
                 false,
@@ -1678,6 +1722,159 @@ mod tests {
                  (multiline={multiline}); got {labels:?}"
             );
         }
+    }
+    /// Running-turn cancel hint key tracks `esc_would_cancel_turn` — the
+    /// input-routing predicate computed by the caller: Esc when a bare press
+    /// would reach the policy's mid-turn cancel, the registry Ctrl+C binding
+    /// otherwise. (The predicate itself — gate, panes, and higher-priority
+    /// Esc consumers — is pinned by `esc_would_cancel_turn_tests` in
+    /// `agent_view::input`.)
+    #[test]
+    fn running_turn_cancel_hint_key_tracks_esc_predicate() {
+        let prompt = PromptWidget::default();
+        let registry = ActionRegistry::defaults();
+        for (esc_would_cancel_turn, expected) in
+            [(true, crate::key!(Esc)), (false, crate::key!('c', CONTROL))]
+        {
+            let hints = build_hints(
+                ActivePane::Prompt,
+                &prompt,
+                &registry,
+                false,
+                None,
+                None,
+                "expand thinking",
+                false,
+                false,
+                None,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                esc_would_cancel_turn,
+                false,
+                false,
+                false,
+                false,
+                false,
+                None,
+            );
+            let cancel = hints
+                .iter()
+                .find(|h| h.label == "cancel")
+                .expect("running turn must surface the cancel hint");
+            assert_eq!(
+                cancel.keys,
+                vec![expected],
+                "cancel hint key for esc_would_cancel_turn={esc_would_cancel_turn}"
+            );
+        }
+    }
+    /// Running turn + open scrollback search: the search's own `Esc cancel`
+    /// hint stays the ONLY Esc hint — the CancelTurn hint keeps Ctrl+C (the
+    /// caller's predicate is false while the search would steal Esc), so the
+    /// bar never shows two different `Esc cancel` meanings at once.
+    #[test]
+    fn running_turn_with_scrollback_search_keeps_ctrl_c_cancel_hint() {
+        let registry = ActionRegistry::defaults();
+        let search = ScrollbackSearchState::open();
+        let hints = build_hints(
+            ActivePane::Scrollback,
+            &PromptWidget::default(),
+            &registry,
+            false,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            Some(&search),
+        );
+        let esc_cancels: Vec<&HintItem> = hints
+            .iter()
+            .filter(|h| h.label == "cancel" && h.keys == vec![crate::key!(Esc)])
+            .collect();
+        assert_eq!(
+            esc_cancels.len(),
+            1,
+            "exactly one Esc:cancel hint (the search's own dismiss)"
+        );
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.label == "cancel" && h.keys == vec![crate::key!('c', CONTROL)]),
+            "CancelTurn hint must stay on Ctrl+C while the search owns Esc"
+        );
+    }
+    /// Running turn + editing a queued prompt: the edit's own `Esc cancel`
+    /// (discard) hint is the ONLY Esc-keyed row — the CancelTurn hint keeps
+    /// Ctrl+C (the caller's predicate is false while the edit owns Esc), so
+    /// the bar never shows two contradictory `Esc cancel` rows.
+    #[test]
+    fn running_turn_editing_queued_keeps_ctrl_c_cancel_hint() {
+        let registry = ActionRegistry::defaults();
+        let mut prompt = PromptWidget::default();
+        prompt.textarea.insert_str("edited row");
+        let hints = build_hints(
+            ActivePane::Prompt,
+            &prompt,
+            &registry,
+            true,
+            None,
+            None,
+            "expand thinking",
+            false,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            false,
+            false,
+            false,
+            false,
+            None,
+        );
+        let esc_rows: Vec<&HintItem> = hints
+            .iter()
+            .filter(|h| h.keys.contains(&crate::key!(Esc)))
+            .collect();
+        assert_eq!(
+            esc_rows.len(),
+            1,
+            "exactly one Esc-keyed hint (the edit's discard), got {:?}",
+            hints.iter().map(|h| h.label.as_ref()).collect::<Vec<_>>()
+        );
+        assert_eq!(esc_rows[0].label, "cancel");
+        assert!(
+            hints
+                .iter()
+                .any(|h| h.label == "cancel" && h.keys == vec![crate::key!('c', CONTROL)]),
+            "CancelTurn hint must stay on Ctrl+C while the edit owns Esc"
+        );
     }
     #[test]
     fn prompt_legacy_vte_adds_alt_enter_newline_hint() {
