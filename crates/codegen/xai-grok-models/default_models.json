@@ -1,9 +1,14 @@
 {
-  "default": "grok-4.5",
+  "default": "big-pickle",
   "web_search": "grok-4.5",
   "image_description": "grok-4.5",
   "session_summary": "grok-4.5",
   "models": [
+    {
+      "id": "big-pickle",
+      "model": "big-pickle",
+      "name": "Big Pickle"
+    },
     {
       "id": "grok-4.5",
       "model": "grok-4.5",

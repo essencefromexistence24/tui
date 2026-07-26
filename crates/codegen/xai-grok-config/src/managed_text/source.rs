@@ -128,6 +128,7 @@ impl ParentPlan {
 pub(super) struct ParentAnchor {
     path: PathBuf,
     identity: FileIdentity,
+    #[cfg(unix)]
     directory: fs::File,
 }
 
@@ -140,6 +141,7 @@ impl ParentAnchor {
         if metadata.file_type().is_symlink() || !metadata.is_dir() {
             return Err(ManagedConfigError::ParentChanged(path.to_path_buf()));
         }
+        #[cfg(unix)]
         let directory = fs::File::open(path).map_err(|source| ManagedConfigError::Read {
             path: path.to_path_buf(),
             source,
@@ -147,6 +149,7 @@ impl ParentAnchor {
         Ok(Self {
             path: path.to_path_buf(),
             identity: FileIdentity::from_metadata(&metadata),
+            #[cfg(unix)]
             directory,
         })
     }

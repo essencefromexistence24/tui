@@ -3535,6 +3535,13 @@ pub fn resolve_model_list(
             }
         }
         resolved = prefetched;
+
+        // Ensure built-in community (free) models survive prefetch replacement.
+        // These point to opencode.ai/zen/v1 with a public API key and must be
+        // visible alongside the xAI API models in the model picker.
+        for (key, entry) in super::community_models::builtin_community_models() {
+            resolved.entry(key).or_insert_with(|| ModelEntry::from_config_entry(&entry));
+        }
     }
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
@@ -3839,10 +3846,11 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
         .collect();
 
     // Inject built-in community (free) models. These appear in the model
-    // picker without any user config. Remote prefetched models and user
-    // [model."..."] overrides still win for the same key.
+    // picker without any user config. Community models override JSON stubs
+    // (e.g. the minimal `big-pickle` entry) so the correct base URL and
+    // API key from the community definition are used.
     for (key, entry) in super::community_models::builtin_community_models() {
-        map.entry(key).or_insert(entry);
+        map.insert(key, entry);
     }
 
     map
