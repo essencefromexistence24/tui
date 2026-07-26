@@ -28,7 +28,6 @@ pub(crate) use logo::shimmer_frame;
 use logo::{logo_line_count, render_logo};
 use menu::render_menu;
 pub(crate) use top_bar::location_line_at;
-use top_bar::render_top_bar;
 
 /// True for VS Code and xterm.js embeds (VS Code-family IDEs and Zed) where
 /// quit is `Ctrl+D` (canonical: [`TerminalName::is_vscode_family`]).
@@ -669,21 +668,13 @@ pub fn render_welcome(
     buf.set_style(area, Style::default().bg(theme.bg_base));
 
     // Announcements only render inside the hero box. Top bar is always 1 row.
-    let [_, top_bar_area, content_area, _] = Layout::vertical([
+    let [_, _top_bar_area, content_area, _] = Layout::vertical([
         Constraint::Length(v_margin),
-        Constraint::Length(1),
+        Constraint::Length(0),
         Constraint::Min(10),
         Constraint::Length(v_margin),
     ])
     .areas(area);
-
-    let top_bar_inner = Rect {
-        x: top_bar_area.x + h_margin,
-        y: top_bar_area.y,
-        width: top_bar_area.width.saturating_sub(h_margin * 2),
-        height: 1,
-    };
-    render_top_bar(top_bar_inner, buf, &theme, None);
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {

@@ -102,7 +102,7 @@ pub fn effective_compact(user_compact: bool, terminal_rows: u16) -> bool {
 /// prompt height + todo height. Shared widgets use these rects to render into.
 pub struct AgentViewLayout {
     pub status_bar: Rect,
-    /// Startup terminal-warning banner (between status bar and bg tasks/scrollback).
+    /// Startup terminal-warning banner.
     pub startup_warnings: Rect,
     pub tasks: Rect,
     pub catalog: Rect,
@@ -123,6 +123,8 @@ pub struct AgentViewLayout {
     pub voice_recording: Rect,
     pub prompt: Rect,
     pub shortcuts: Rect,
+    /// Single compact row below the prompt: turn status | shortcuts | agent status.
+    pub bottom_chrome: Rect,
     /// Scrollback area narrowed for scrollbar (content rendering uses this).
     pub scrollback_content: Rect,
     /// Scrollbar track position (x coordinate).
@@ -177,11 +179,7 @@ impl AgentViewLayout {
         compact: bool,
     ) -> Self {
         let outer_vpad = layout_cfg.eff_outer_vpad(compact);
-        let bottom_vpad = if area.height <= SHORT_TERMINAL_ROWS {
-            0
-        } else {
-            outer_vpad
-        };
+        let bottom_vpad = outer_vpad;
         let cta_height = if area.height <= SHORT_TERMINAL_ROWS {
             0
         } else {
@@ -200,7 +198,7 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
-        let mut constraints = vec![Constraint::Length(1)];
+        let mut constraints = vec![Constraint::Length(0)];
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
@@ -217,8 +215,6 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(todo_height));
         }
-        let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
-        constraints.push(Constraint::Length(status_gap));
         constraints.push(Constraint::Min(5));
         if btw_height > 0 {
             constraints.push(Constraint::Length(1));
@@ -251,11 +247,15 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(voice_recording_height));
         }
         constraints.push(Constraint::Length(prompt_height));
-        let shortcuts_gap = if bottom_vpad == 0 { 0u16 } else { 1 };
+        let shortcuts_gap = if bottom_vpad == 0 || shortcuts_height == 0 { 0u16 } else { 1 };
         if shortcuts_gap > 0 {
             constraints.push(Constraint::Length(shortcuts_gap));
         }
-        constraints.push(Constraint::Length(shortcuts_height));
+        if shortcuts_height > 0 {
+            constraints.push(Constraint::Length(shortcuts_height));
+        }
+        // Bottom chrome row (1 row, always rendered).
+        constraints.push(Constraint::Length(1));
         let chunks = Layout::vertical(constraints).split(inner_area);
         let mut i = 0;
         let status_bar = chunks[i];
@@ -291,7 +291,6 @@ impl AgentViewLayout {
         } else {
             Rect::default()
         };
-        i += 1;
         let scrollback = chunks[i];
         i += 1;
         let btw = if btw_height > 0 {
@@ -357,7 +356,14 @@ impl AgentViewLayout {
         if shortcuts_gap > 0 {
             i += 1;
         }
-        let shortcuts = chunks[i];
+        let shortcuts = if shortcuts_height > 0 {
+            let r = chunks[i];
+            i += 1;
+            r
+        } else {
+            Rect::default()
+        };
+        let bottom_chrome = chunks[i];
         let scrollbar_x = area.right().saturating_sub(scrollbar_cfg.gap_right + 1);
         let timeline_width = if scrollbar_cfg.enabled {
             timeline_width
@@ -399,6 +405,7 @@ impl AgentViewLayout {
             scrollbar_x,
             timeline_x,
             timeline_width,
+            bottom_chrome,
         }
     }
     /// Inner area width (for prompt height computation before full layout).

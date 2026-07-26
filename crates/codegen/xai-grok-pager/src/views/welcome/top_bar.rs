@@ -12,6 +12,7 @@ use crate::git_info;
 use crate::render::line_utils::truncate_line;
 use crate::theme::Theme;
 
+#[allow(dead_code)]
 pub fn render_top_bar(
     area: Rect,
     buf: &mut Buffer,
@@ -41,6 +42,7 @@ pub fn render_top_bar(
 
 /// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar,
 /// reading the live process cwd.
+#[allow(dead_code)]
 pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
     location_line_at(theme, &process_cwd())
 }
@@ -84,6 +86,7 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     Line::from(parts)
 }
 
+#[allow(dead_code)]
 fn process_cwd() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
