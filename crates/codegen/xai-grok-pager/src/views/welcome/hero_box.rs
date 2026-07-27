@@ -178,7 +178,7 @@ pub(super) fn compute_hero_box(
         Constraint::Length(tip_gap),
         Constraint::Length(PROMPT_HEIGHT),
         Constraint::Length(VERSION_GAP),
-        Constraint::Length(1),
+        Constraint::Length(0), // [commented] version bar removed
     ])
     .areas(content_area);
 

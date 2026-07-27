@@ -113,6 +113,21 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                 {
                     tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
                 }
+                // Inject placeholder `id` if missing (some API backends omit it)
+                if first_err.to_string().contains("missing field `id`") {
+                    if let Some(obj) = value.as_object_mut() {
+                        if !obj.contains_key("id") {
+                            obj.insert("id".to_string(), serde_json::Value::String("placeholder".to_string()));
+                        }
+                    }
+                    if let Some(response) = value.pointer_mut("/response") {
+                        if let Some(resp_obj) = response.as_object_mut() {
+                            if !resp_obj.contains_key("id") {
+                                resp_obj.insert("id".to_string(), serde_json::Value::String("placeholder".to_string()));
+                            }
+                        }
+                    }
+                }
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                     apply_terminal_event_overrides(&mut event, data);
                     return Ok(event);
@@ -867,14 +882,37 @@ impl SamplingClient {
             });
         }
 
-        let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize ChatCompletionResponse"
-            );
-            SamplingError::Serialization(e)
+        let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).or_else(|e| {
+            if e.classify() == serde_json::error::Category::Data && e.to_string().contains("missing field `id`") {
+                let mut val: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(SamplingError::Serialization)?;
+                val["id"] = serde_json::Value::String("placeholder".to_string());
+                serde_json::from_value(val).map_err(|e| {
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e,
+                        raw_body = %raw_body,
+                        "Failed to deserialize ChatCompletionResponse even with id patch"
+                    );
+                    SamplingError::serialization_message(format!(
+                        "[source:chat_completion] {} (response body: {})",
+                        e, raw_body
+                    ))
+                })
+            } else {
+                Err({
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e,
+                        raw_body = %raw_body,
+                        "Failed to deserialize ChatCompletionResponse"
+                    );
+                    SamplingError::serialization_message(format!(
+                        "[source:chat_completion] {} (response body: {})",
+                        e, raw_body
+                    ))
+                })
+            }
         })?;
         Ok(completion)
     }
@@ -1074,16 +1112,51 @@ impl SamplingClient {
                         if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Err(stream_error))
                         } else {
-                            Some(
-                                serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
+                            Some({
+                                // Skip custom API events (e.g. x-opencode-type) that
+                                // are not standard OpenAI chat completion chunks
+                                let chunk = if data.contains("\"x-opencode-type\"") {
+                                    // Return a synthetic no-op chunk via JSON so the
+                                    // stream processor treats it as empty-delta/ignored.
+                                    serde_json::from_value::<ChatCompletionChunk>(
+                                        serde_json::json!({
+                                            "id": "skip",
+                                            "object": "chat.completion.chunk",
+                                            "created": 0,
+                                            "model": "",
+                                            "choices": [],
+                                        })
+                                    ).map_err(|e| SamplingError::Serialization(e))
+                                } else {
+                                    serde_json::from_str::<ChatCompletionChunk>(data).or_else(|e| {
+                                        let msg = e.to_string();
+                                        if msg.contains("missing field `id`") || msg.contains("missing field `object`") {
+                                            let mut val: serde_json::Value = serde_json::from_str(data)
+                                                .map_err(SamplingError::Serialization)?;
+                                            if val.get("id").is_none() {
+                                                val["id"] = serde_json::Value::String("placeholder".to_string());
+                                            }
+                                            if val.get("object").is_none() {
+                                                val["object"] = serde_json::Value::String("chat.completion.chunk".to_string());
+                                            }
+                                            serde_json::from_value(val).map_err(SamplingError::Serialization)
+                                        } else {
+                                            Err(SamplingError::Serialization(e))
+                                        }
+                                    })
+                                };
+                                chunk.map_err(|e| {
                                     tracing::error!(
                                         error = %e,
                                         raw_data = %data,
                                         "Failed to deserialize ChatCompletionChunk from stream"
                                     );
-                                    SamplingError::Serialization(e)
-                                }),
-                            )
+                                    SamplingError::serialization_message(format!(
+                                        "[source:chunk] {} (data: {})",
+                                        e, data
+                                    ))
+                                })
+                            })
                         }
                     }
                     Err(e) => {
@@ -1221,14 +1294,37 @@ impl SamplingClient {
             });
         }
 
-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize rs::Response"
-            );
-            SamplingError::Serialization(e)
+        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).or_else(|e| {
+            if e.to_string().contains("missing field `id`") {
+                let mut val: serde_json::Value = serde_json::from_slice(&bytes)
+                    .map_err(SamplingError::Serialization)?;
+                if val.get("id").is_none() {
+                    val["id"] = serde_json::Value::String("placeholder".to_string());
+                }
+                serde_json::from_value(val).map_err(|e2| {
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e2,
+                        raw_body = %raw_body,
+                        "Failed to deserialize rs::Response even with id patch"
+                    );
+                    SamplingError::serialization_message(format!(
+                        "[source:rs_response] {} (response body: {})",
+                        e2, raw_body
+                    ))
+                })
+            } else {
+                let raw_body = String::from_utf8_lossy(&bytes);
+                tracing::error!(
+                    error = %e,
+                    raw_body = %raw_body,
+                    "Failed to deserialize rs::Response"
+                );
+                Err(SamplingError::serialization_message(format!(
+                    "[source:rs_response] {} (response body: {})",
+                    e, raw_body
+                )))
+            }
         })?;
         Ok(response_obj)
     }
@@ -1561,14 +1657,37 @@ impl SamplingClient {
         }
 
         let response_obj =
-            serde_json::from_slice::<messages::MessagesResponse>(&bytes).map_err(|e| {
-                let raw_body = String::from_utf8_lossy(&bytes);
-                tracing::error!(
-                    error = %e,
-                    raw_body = %raw_body,
-                    "Failed to deserialize MessagesResponse"
-                );
-                SamplingError::Serialization(e)
+            serde_json::from_slice::<messages::MessagesResponse>(&bytes).or_else(|e| {
+                if e.to_string().contains("missing field `id`") {
+                    let mut val: serde_json::Value = serde_json::from_slice(&bytes)
+                        .map_err(SamplingError::Serialization)?;
+                    if val.get("id").is_none() {
+                        val["id"] = serde_json::Value::String("placeholder".to_string());
+                    }
+                    serde_json::from_value(val).map_err(|e2| {
+                        let raw_body = String::from_utf8_lossy(&bytes);
+                        tracing::error!(
+                            error = %e2,
+                            raw_body = %raw_body,
+                            "Failed to deserialize MessagesResponse even with id patch"
+                        );
+                        SamplingError::serialization_message(format!(
+                            "[source:messages] {} (response body: {})",
+                            e2, raw_body
+                        ))
+                    })
+                } else {
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e,
+                        raw_body = %raw_body,
+                        "Failed to deserialize MessagesResponse"
+                    );
+                    Err(SamplingError::serialization_message(format!(
+                        "[source:messages] {} (response body: {})",
+                        e, raw_body
+                    )))
+                }
             })?;
         Ok(response_obj)
     }

@@ -126,7 +126,7 @@ use hero_box::HERO_BOX_MIN_WIDTH;
 /// Prompt input height (shared across hero and stacked layout paths).
 const PROMPT_HEIGHT: u16 = 3;
 /// Gap between prompt and version line.
-const VERSION_GAP: u16 = 1;
+const VERSION_GAP: u16 = 0;
 
 /// Computed areas for the welcome screen vertical layout.
 pub(super) struct WelcomeLayout {
@@ -357,7 +357,7 @@ impl WelcomeLayout {
             Constraint::Length(tip_gap),
             Constraint::Length(PROMPT_HEIGHT),
             Constraint::Length(VERSION_GAP),
-            Constraint::Length(1), // version
+            Constraint::Length(0), // [commented] version bar removed
         ])
         .areas(content_area);
         Self {
@@ -557,7 +557,7 @@ fn render_prompt_and_version(
             &line,
             layout.version.width,
         );
-    } else if !skip_version {
+    } else if !skip_version && layout.version.height > 0 {
         render_version_badge(
             layout.version,
             buf,
@@ -569,7 +569,7 @@ fn render_prompt_and_version(
                 subscription_tier: None,
             },
         );
-    } else {
+    } else if layout.version.height > 0 {
         render_version_badge(
             layout.version,
             buf,
@@ -2142,9 +2142,8 @@ fn render_welcome_done(
                 .render(tip_inset, buf);
         }
 
-        let warning = p.credit_balance.and_then(|bal| {
-            crate::views::credit_bar::usage_warning(bal, p.auto_topup, p.usage_visible)
-        });
+        // Suppressed on welcome screen — no active model to associate with
+        let warning: Option<(String, bool)> = None;
         let (usage_warning_text, usage_warning_critical) = match warning {
             Some((text, critical)) => (Some(text), critical),
             None => (None, false),
