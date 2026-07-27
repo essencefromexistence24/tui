@@ -200,9 +200,7 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
-        let mut constraints = vec![
-            Constraint::Length(1), // StatusBar
-        ];
+        let mut constraints: Vec<Constraint> = Vec::new();
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
@@ -258,10 +256,9 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(shortcuts_gap));
         }
         constraints.push(Constraint::Length(shortcuts_height));
+        constraints.push(Constraint::Length(1)); // StatusBar
         let chunks = Layout::vertical(constraints).split(inner_area);
         let mut i = 0;
-        let status_bar = chunks[i];
-        i += 1;
         let startup_warnings = if startup_warning_height > 0 {
             let r = chunks[i];
             i += 1;
@@ -360,6 +357,8 @@ impl AgentViewLayout {
             i += 1;
         }
         let shortcuts = chunks[i];
+        i += 1;
+        let status_bar = chunks[i];
         let scrollbar_x = area.right().saturating_sub(scrollbar_cfg.gap_right + 1);
         let timeline_width = if scrollbar_cfg.enabled {
             timeline_width

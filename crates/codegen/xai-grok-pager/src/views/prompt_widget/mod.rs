@@ -226,7 +226,7 @@ impl Default for PromptStyle {
         Self {
             focused: true,
             show_prefix: true,
-            vpad_top: 1,
+            vpad_top: 0,
             chrome: true,
             chrome_pad_left: 2,
             chrome_pad_right: 1,
