@@ -3,24 +3,39 @@ use ratatui::crossterm::event::{Event, KeyCode, KeyEvent, MouseEvent};
 use crate::views::picker::{PickerConfig, PickerOutcome, handle_picker_input};
 
 use super::{
-    categorize, fuzzy_matches, ConnectMode, ProviderConnectState, ProviderDef, ProviderTab, TAB_LABELS,
+    ConnectMode, ProviderConnectState, ProviderDef, ProviderTab, TAB_LABELS, categorize,
+    fuzzy_matches,
 };
 
 pub enum ConnectOutcome {
     Close,
-    Configure { provider_id: String, api_key: Option<String>, set_default: bool },
+    Configure {
+        provider_id: String,
+        api_key: Option<String>,
+        set_default: bool,
+    },
     Unchanged,
 }
 
-pub fn handle_provider_connect_key(state: &mut ProviderConnectState, key: KeyEvent) -> ConnectOutcome {
+pub fn handle_provider_connect_key(
+    state: &mut ProviderConnectState,
+    key: KeyEvent,
+) -> ConnectOutcome {
     match &state.mode.clone() {
         ConnectMode::Browse => handle_browse_key(state, key),
-        ConnectMode::KeyInput { provider_id, input_buffer, set_default, .. } =>
-            handle_key_input(state, key, provider_id, input_buffer, *set_default),
+        ConnectMode::KeyInput {
+            provider_id,
+            input_buffer,
+            set_default,
+            ..
+        } => handle_key_input(state, key, provider_id, input_buffer, *set_default),
     }
 }
 
-pub fn handle_provider_connect_mouse(state: &mut ProviderConnectState, mouse: MouseEvent) -> ConnectOutcome {
+pub fn handle_provider_connect_mouse(
+    state: &mut ProviderConnectState,
+    mouse: MouseEvent,
+) -> ConnectOutcome {
     if !matches!(state.mode, ConnectMode::Browse) {
         return ConnectOutcome::Unchanged;
     }
@@ -90,11 +105,7 @@ fn handle_picker_outcome(
 
 /// Count how many selectable provider entries appear before `idx`.
 fn provider_count_before(idx: usize, data: &super::PickerEntryData) -> usize {
-    data.non_sel
-        .iter()
-        .take(idx)
-        .filter(|&&ns| !ns)
-        .count()
+    data.non_sel.iter().take(idx).filter(|&&ns| !ns).count()
 }
 
 /// Map a picker entry index to a provider and open KeyInput mode.
@@ -111,7 +122,11 @@ fn handle_selection(
     let prov_n = provider_count_before(idx, data);
 
     // Rebuild the provider list in the same order as picker_entry_data.
-    let all: Vec<_> = state.free_providers.iter().chain(state.providers.iter()).collect();
+    let all: Vec<_> = state
+        .free_providers
+        .iter()
+        .chain(state.providers.iter())
+        .collect();
     let mut cat: Vec<&ProviderDef> = all
         .into_iter()
         .filter(|p| match state.active_tab {
@@ -176,9 +191,7 @@ fn handle_key_input(
     let free = all
         .iter()
         .find(|p| p.id == provider_id)
-        .is_some_and(|p| {
-            p.auth_type == "none" || p.auth_type == "optional" || p.free == "true"
-        });
+        .is_some_and(|p| p.auth_type == "none" || p.auth_type == "optional" || p.free == "true");
 
     match key.code {
         KeyCode::Esc => {

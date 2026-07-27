@@ -1,9 +1,14 @@
 {
-  "default": "big-pickle",
+  "default": "minicpm5-1b-tooluse",
   "web_search": "grok-4.5",
   "image_description": "grok-4.5",
   "session_summary": "grok-4.5",
   "models": [
+    {
+      "id": "minicpm5-1b-tooluse",
+      "model": "minicpm5-1b-tooluse",
+      "name": "MiniCPM5 1B Tool Use (Local)"
+    },
     {
       "id": "big-pickle",
       "model": "big-pickle",

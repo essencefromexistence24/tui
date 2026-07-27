@@ -1665,7 +1665,8 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ModalWindowOutcome::TabChanged(idx) => {
-                    if let Some(tab) = crate::views::provider_connect::ProviderTab::from_index(idx) {
+                    if let Some(tab) = crate::views::provider_connect::ProviderTab::from_index(idx)
+                    {
                         state.switch_tab(tab);
                         state.window.tabs_focused = true;
                     }

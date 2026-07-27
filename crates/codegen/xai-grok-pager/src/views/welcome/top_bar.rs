@@ -1,53 +1,14 @@
-//! Top bar component — renders cwd and git info.
+//! Location line component — renders cwd and git info for the dashboard header.
 
-use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, Widget};
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::git_info;
-use crate::render::line_utils::truncate_line;
 use crate::theme::Theme;
 
-#[allow(dead_code)]
-pub fn render_top_bar(
-    area: Rect,
-    buf: &mut Buffer,
-    theme: &Theme,
-    announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
-) {
-    let line = truncate_line(location_line(theme), area.width as usize);
-    let line_width = line.width() as u16;
-    buf.set_line(area.x, area.y, &line, line_width.min(area.width));
-
-    if let Some(a) = announcement
-        && let Some(text) = a.message.as_deref()
-        && area.height > 1
-    {
-        let text_style = Style::default().fg(theme.text_primary);
-        let line = Line::from(Span::styled(text, text_style));
-        Paragraph::new(line).render(
-            Rect {
-                y: area.y + 1,
-                height: area.height.saturating_sub(1),
-                ..area
-            },
-            buf,
-        );
-    }
-}
-
-/// Build the `{git branch} {worktree} {cwd}` line for the welcome top bar,
-/// reading the live process cwd.
-#[allow(dead_code)]
-pub(crate) fn location_line(theme: &Theme) -> Line<'static> {
-    location_line_at(theme, &process_cwd())
-}
-
-/// As [`location_line`], but for an explicit `cwd`. The dashboard header
+/// Build the `{git branch} {worktree} {cwd}` line for an explicit `cwd`. The dashboard header
 /// passes its staged `app.cwd` so the line tracks a `/cd` immediately,
 /// before (or even if) `Effect::SetWorkingDir` moves the process cwd.
 ///
@@ -86,12 +47,7 @@ pub(crate) fn location_line_at(theme: &Theme, cwd: &Path) -> Line<'static> {
     Line::from(parts)
 }
 
-#[allow(dead_code)]
-fn process_cwd() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-}
-
-/// Format the cwd for the welcome top bar / dashboard header: the actual
+/// Format the cwd for the dashboard header: the actual
 /// working directory (tilde-collapsed), with a `(worktree of …)` suffix
 /// when `info` reports a linked worktree's main repo. Matches the session
 /// status bar (the `worktree ` badge itself is painted by [`location_line`]).

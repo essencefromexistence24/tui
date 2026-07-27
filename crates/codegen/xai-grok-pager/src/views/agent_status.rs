@@ -122,7 +122,12 @@ impl<'a> AgentStatusBar<'a> {
 
         // Fill background only for the content area (not full width)
         let fill_w = area.width.saturating_sub(start_x.saturating_sub(area.x));
-        let fill_area = Rect { x: start_x, y: area.y, width: fill_w, height: 1 };
+        let fill_area = Rect {
+            x: start_x,
+            y: area.y,
+            width: fill_w,
+            height: 1,
+        };
         if fill_w > 0 {
             buf.set_style(fill_area, Style::default().bg(self.theme.bg_base));
         }

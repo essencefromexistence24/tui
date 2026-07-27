@@ -672,10 +672,8 @@ pub fn render_welcome(
 
     buf.set_style(area, Style::default().bg(theme.bg_base));
 
-    // Announcements only render inside the hero box. Top bar is always 1 row.
-    let [_, _top_bar_area, content_area, _] = Layout::vertical([
-        Constraint::Length(v_margin),
-        Constraint::Length(0),
+    let [_, content_area, _] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Min(10),
         Constraint::Length(v_margin),
     ])

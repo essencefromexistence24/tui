@@ -3416,6 +3416,7 @@ mod tests {
             compaction_at_tokens: None,
             show_model_fingerprint: false,
             stream_tool_calls: None,
+            local_model_path: None,
             laziness_detector: config::LazinessDetectorPerModelConfig::default(),
         }
     }

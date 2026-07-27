@@ -10,7 +10,6 @@ use crate::key;
 use crate::render::SafeBuf;
 
 use crate::scrollback::block::BlockContent;
-use crate::scrollback::layout::HorizontalLayout;
 use crate::scrollback::render::ScratchBuffer;
 use crate::scrollback::text_selection::{
     ResolvedSelectionBoundaries, ResolvedSelectionModel, render_active_selection_overlay,
@@ -443,13 +442,13 @@ impl AgentView {
         agent::fill_background(buf, area, layout_cfg, compact, theme);
         let padded = Rect {
             x: area.x + layout_cfg.eff_hpad_left(compact),
-            y: area.y + layout_cfg.eff_outer_vpad(compact),
+            y: area.y,
             width: area.width.saturating_sub(
                 layout_cfg.eff_hpad_left(compact) + layout_cfg.eff_hpad_right(compact),
             ),
             height: area
                 .height
-                .saturating_sub(layout_cfg.eff_outer_vpad(compact) * 2),
+                .saturating_sub(layout_cfg.eff_outer_vpad(compact)),
         };
         if padded.width < 10 || padded.height < 5 {
             return (None, crate::terminal::overlay::clear().map(Into::into));
@@ -1369,7 +1368,41 @@ impl AgentView {
         self.hit_plan_button.rect = areas.get("plan").copied();
         self.hit_queue_badge.rect = areas.get("queue").copied();
         self.hit_badge.rect = areas.get("badge").copied();
-        // [commented] CWD rendering removed — turn_status uses the left side
+        // Render CWD/path/branch on the left side of the bottom bar
+        let cwd_home = std::env::var("HOME").ok();
+        let cwd_display = self.session.cwd.display().to_string();
+        let cwd_short = match &cwd_home {
+            Some(h) if cwd_display.starts_with(h.as_str()) => {
+                format!("~{}", &cwd_display[h.len()..])
+            }
+            _ => cwd_display,
+        };
+        let cwd_lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
+        let cwd_branch = self
+            .current_branch
+            .clone()
+            .or_else(|| cwd_lazy_git.as_ref().and_then(|i| i.branch.clone()));
+        let mut cwd_spans: Vec<Span> = Vec::new();
+        if let Some(b) = cwd_branch {
+            let icon = crate::git_info::branch_icon();
+            let git_style = Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base)
+                .add_modifier(ratatui::style::Modifier::DIM);
+            cwd_spans.push(Span::styled(format!("{icon} {b}"), git_style));
+            cwd_spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
+        }
+        let cwd_show_worktree = self.is_worktree
+            || self.session.is_worktree
+            || cwd_lazy_git.as_ref().is_some_and(|i| i.is_worktree);
+        if cwd_show_worktree {
+            cwd_spans.push(Span::styled(
+                "worktree ",
+                Style::default().fg(theme.accent_user).bg(theme.bg_base),
+            ));
+        }
+        let cwd_path_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        cwd_spans.push(Span::styled(cwd_short, cwd_path_style));
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
         {
             self.sync_pending_user_input_marks();
@@ -1811,133 +1844,37 @@ impl AgentView {
             self.hovered_link_idx = None;
         }
         let dropdown_open = self.prompt.any_dropdown_open();
-        if _turn_status_active {
-            let pad_left = HorizontalLayout::ACCENT + layout_cfg.block_pad_left.saturating_sub(1);
-            let turn_area = Rect {
-                x: layout.status_bar.x + pad_left,
-                y: layout.status_bar.y,
-                width: layout.status_bar.width.saturating_sub(pad_left),
-                height: layout.status_bar.height,
-            };
-            let tick = self.scrollback.animation_tick();
-            let activity = self.resolve_turn_activity();
-            if activity != self.last_activity {
-                if let Some(prev) = &self.last_activity {
-                    let phase_ms = self
-                        .activity_started_at
-                        .map(|t| t.elapsed().as_millis() as u64)
-                        .unwrap_or(0);
-                    let prev_label = prev.as_label();
-                    let next_label = activity.as_ref().map(|a| a.as_label()).unwrap_or("idle");
-                    let sid = self.session.session_id.as_ref().map(|s| s.0.as_ref());
-                    crate::unified_log::debug(
-                        "turn.phase_transition",
-                        sid,
-                        Some(serde_json::json!({
-                            "from": prev_label,
-                            "to": next_label,
-                            "phase_elapsed_ms": phase_ms,
-                        })),
-                    );
-                }
-                self.activity_started_at = Some(Instant::now());
-                self.last_activity = activity.clone();
-            }
-            self.hit_plan_approval_status.clear();
-            if let Some(ref pav) = self.plan_approval_view {
-                let diamond_color = crate::views::turn_status::pending_diamond_color(
-                    &theme,
-                    theme.accent_plan,
-                    tick,
-                );
-                let text_style = if self.hit_plan_approval_status.hovered {
-                    Style::default()
-                        .fg(theme.text_primary)
-                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
-                } else {
-                    Style::default().fg(theme.gray)
-                };
-                let status_label =
-                    crate::views::plan_approval_view::plan_approval_status_label(pav.has_plan);
-                let spans = vec![
-                    Span::styled(
-                        format!("{} ", crate::glyphs::diamond_filled()),
-                        Style::default().fg(diamond_color),
-                    ),
-                    Span::styled(status_label, text_style),
-                ];
-                buf.set_line_safe(
-                    turn_area.x,
-                    turn_area.y,
-                    &Line::from(spans),
-                    turn_area.width,
-                );
-                let item_width: u16 = 2u16.saturating_add(status_label.len() as u16);
-                self.hit_plan_approval_status.rect = Some(Rect::new(
-                    turn_area.x,
-                    turn_area.y,
-                    item_width.min(turn_area.width),
-                    1,
-                ));
-                self.hit_cancel_button.rect = None;
-                self.hit_bg_button.rect = None;
-                self.hit_watching_cue.rect = None;
+        // Render bottom bar left side: status text first, then CWD
+        {
+            let status_text = if _turn_status_active {
+                "Working…"
             } else {
-                let has_running_execute = !self.is_subagent_view
-                    && self
-                        .session
-                        .tracker
-                        .running_execute_tool_call_id()
-                        .is_some();
-                let is_pending_user_input =
-                    !self.permission_queue.is_empty() || self.question_view.is_some();
-                let goal_verifying = self
-                    .goal_state
-                    .as_ref()
-                    .is_some_and(|g| g.verifying_completion);
-                let held_queue = self.held_queue_count();
-                let held_queue_top_sendable = self.held_queue_top_sendable();
-                let turn_output = turn_status::render_turn_status(
-                    buf,
-                    turn_area,
-                    turn_status::TurnStatusArgs {
-                        state: &self.session.state,
-                        activity: &activity,
-                        turn_elapsed: self.turn_elapsed(),
-                        activity_started_at: self.activity_started_at,
-                        tick,
-                        drain_blocked,
-                        buttons: Some(turn_status::MouseButtons {
-                            cancel_hovered: self.hit_cancel_button.hovered,
-                            bg_hovered: self.hit_bg_button.hovered,
-                            watching_hovered: self.hit_watching_cue.hovered,
-                        }),
-                        has_running_execute,
-                        total_tokens: self.context_state.as_ref().map(|c| c.used),
-                        mcp_init_progress: self.mcp_init_progress.as_ref(),
-                        is_bash_turn: self.bash_turn,
-                        is_pending_user_input,
-                        goal_verifying,
-                        watchers,
-                        parked,
-                        flat_background: false,
-                        held_queue,
-                        held_queue_top_sendable,
-                    },
-                );
-                self.hit_cancel_button
-                    .set_unless_dropdown(turn_output.cancel_button, dropdown_open);
-                self.hit_bg_button
-                    .set_unless_dropdown(turn_output.bg_button, dropdown_open);
-                self.hit_watching_cue
-                    .set_unless_dropdown(turn_output.watching_cue, dropdown_open);
+                "Not working"
+            };
+            let s_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let mut left_spans: Vec<Span> = Vec::new();
+            left_spans.push(Span::styled(status_text, s_style));
+            left_spans.push(Span::styled(" · ", sep_style));
+            for s in &cwd_spans {
+                left_spans.push(Span::styled(s.content.clone(), s.style));
             }
-        } else {
-            self.hit_cancel_button.clear();
-            self.hit_bg_button.clear();
-            self.hit_watching_cue.clear();
-            self.hit_plan_approval_status.clear();
+            let left_line = Line::from(left_spans);
+            let left_w = left_line.width() as u16;
+            let x = layout.status_bar.x;
+            buf.set_line_safe(x, layout.status_bar.y, &left_line, left_w);
+            let fill = Rect {
+                x,
+                y: layout.status_bar.y,
+                width: left_w,
+                height: 1,
+            };
+            buf.set_style(fill, Style::default().bg(theme.bg_base));
         }
+        self.hit_cancel_button.clear();
+        self.hit_bg_button.clear();
+        self.hit_watching_cue.clear();
+        self.hit_plan_approval_status.clear();
         let privacy_banner_owns_slot = privacy_banner && layout.banner.height >= 2;
         if !privacy_banner_owns_slot {
             self.privacy_banner.clear_hits();

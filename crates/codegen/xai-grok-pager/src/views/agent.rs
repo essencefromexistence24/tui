@@ -192,7 +192,8 @@ impl AgentViewLayout {
         } else {
             follow_ups_height
         };
-        let top_vpad = outer_vpad;
+        // One cell is the smallest useful top margin.
+        let top_vpad = 1u16;
         let outer_block = Block::default().padding(Padding::new(
             layout_cfg.eff_hpad_left(compact),
             layout_cfg.eff_hpad_right(compact),

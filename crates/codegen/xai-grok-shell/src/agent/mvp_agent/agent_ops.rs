@@ -1233,6 +1233,17 @@ impl MvpAgent {
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
+        // Ensure local server is running for localhost models
+        let base_url = model.info().base_url.clone();
+        let model_key = model.info().model.clone();
+        if base_url.contains("localhost") || base_url.contains("127.0.0.1") {
+            let base_url_clone = base_url.clone();
+            let model_key_clone = model_key.clone();
+            tokio::spawn(async move {
+                crate::agent::local_model::ensure_local_server(&model_key_clone, &base_url_clone).await;
+            });
+        }
+
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let session = match preferred {
             Some(crate::auth::PreferredAuthMethod::ApiKey) => None,

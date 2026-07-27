@@ -62,7 +62,15 @@ impl ProviderTab {
     }
 }
 
-pub const TAB_LABELS: [&str; 7] = ["All", "Free", "Featured", "Gateway", "Enterprise", "China", "Other"];
+pub const TAB_LABELS: [&str; 7] = [
+    "All",
+    "Free",
+    "Featured",
+    "Gateway",
+    "Enterprise",
+    "China",
+    "Other",
+];
 
 // ── Categorisation ──
 
@@ -72,26 +80,44 @@ pub fn categorize(provider: &ProviderDef) -> ProviderTab {
     }
     match provider.id.as_str() {
         // Featured – major global AI platforms
-        "openai" | "anthropic" | "gemini" | "mistral" | "cohere" | "deepseek"
-        | "meta-llama" | "xai" | "grok-web" | "perplexity" | "ai21" | "cerebras"
-        | "groq" => ProviderTab::Featured,
+        "openai" | "anthropic" | "gemini" | "mistral" | "cohere" | "deepseek" | "meta-llama"
+        | "xai" | "grok-web" | "perplexity" | "ai21" | "cerebras" | "groq" => ProviderTab::Featured,
 
         // Gateway – multi-model routers / aggregators
-        "openrouter" | "deepinfra" | "fireworks" | "hyperbolic" | "aimlapi"
-        | "orcarouter" | "tokenrouter" | "agentrouter" | "zenmux" | "zenmux-free"
-        | "featherless-ai" | "freeaiapikey" => ProviderTab::Gateway,
+        "openrouter" | "deepinfra" | "fireworks" | "hyperbolic" | "aimlapi" | "orcarouter"
+        | "tokenrouter" | "agentrouter" | "zenmux" | "zenmux-free" | "featherless-ai"
+        | "freeaiapikey" => ProviderTab::Gateway,
 
         // China / East Asia
-        "baidu" | "alibaba" | "tencent" | "moonshot" | "kimi" | "minimax"
-        | "stepfun" | "glm" | "baichuan" | "doubao" | "iflytek" | "sparkdesk"
-        | "sensenova" | "qianfan" | "volcengine" | "yi" | "zai" | "zai-web"
-        | "xiaomi-mimo" | "coze" | "bailian-coding-plan" | "byteplus" | "qiniu"
+        "baidu"
+        | "alibaba"
+        | "tencent"
+        | "moonshot"
+        | "kimi"
+        | "minimax"
+        | "stepfun"
+        | "glm"
+        | "baichuan"
+        | "doubao"
+        | "iflytek"
+        | "sparkdesk"
+        | "sensenova"
+        | "qianfan"
+        | "volcengine"
+        | "yi"
+        | "zai"
+        | "zai-web"
+        | "xiaomi-mimo"
+        | "coze"
+        | "bailian-coding-plan"
+        | "byteplus"
+        | "qiniu"
         | "yuanbao-web" => ProviderTab::China,
 
         // Enterprise / Cloud
-        "vertex" | "databricks" | "snowflake" | "cloudflare-ai" | "nvidia"
-        | "ovhcloud" | "scaleway" | "vercel-ai-gateway" | "upstage" | "wandb"
-        | "heroku" | "inference-net" | "predibase" => ProviderTab::Enterprise,
+        "vertex" | "databricks" | "snowflake" | "cloudflare-ai" | "nvidia" | "ovhcloud"
+        | "scaleway" | "vercel-ai-gateway" | "upstage" | "wandb" | "heroku" | "inference-net"
+        | "predibase" => ProviderTab::Enterprise,
 
         _ => ProviderTab::Other,
     }
@@ -153,7 +179,11 @@ impl ProviderDef {
     }
 
     pub fn display_name(&self) -> &str {
-        if self.name.is_empty() { &self.id } else { &self.name }
+        if self.name.is_empty() {
+            &self.id
+        } else {
+            &self.name
+        }
     }
 }
 
@@ -167,7 +197,11 @@ pub enum ProviderStatus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConnectMode {
     Browse,
-    KeyInput { provider_id: String, input_buffer: String, set_default: bool },
+    KeyInput {
+        provider_id: String,
+        input_buffer: String,
+        set_default: bool,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -232,7 +266,10 @@ impl ProviderConnectState {
             configured_ids: load_configured_providers(),
             picker: PickerState::with_mode(crate::views::picker::PickerMode::Popup(
                 crate::views::picker::PopupConfig {
-                    width_pct: 0.85, height_pct: 0.7, min_width: 50, min_height: 16,
+                    width_pct: 0.85,
+                    height_pct: 0.7,
+                    min_width: 50,
+                    min_height: 16,
                 },
             )),
             mode: ConnectMode::Browse,
@@ -279,17 +316,20 @@ impl ProviderConnectState {
 
         let cat: Vec<&ProviderDef> = match active_tab {
             ProviderTab::All => free_providers.iter().chain(providers.iter()).collect(),
-            ProviderTab::Free => free_providers.iter()
+            ProviderTab::Free => free_providers
+                .iter()
                 .chain(providers.iter())
                 .filter(|p| categorize(p) == ProviderTab::Free)
                 .collect(),
-            tab => free_providers.iter()
+            tab => free_providers
+                .iter()
                 .chain(providers.iter())
                 .filter(|p| categorize(p) == tab)
                 .collect(),
         };
 
-        let mut matched: Vec<&ProviderDef> = cat.into_iter()
+        let mut matched: Vec<&ProviderDef> = cat
+            .into_iter()
             .filter(|p| fuzzy_matches(p.display_name(), query))
             .collect();
         matched.sort_by(|a, b| a.display_name().cmp(b.display_name()));
@@ -359,24 +399,37 @@ impl ProviderConnectState {
             }
         }
 
-        PickerEntryData { labels, badges, badge_colors, non_sel, group_keys, collapsible, indents, dimmed }
+        PickerEntryData {
+            labels,
+            badges,
+            badge_colors,
+            non_sel,
+            group_keys,
+            collapsible,
+            indents,
+            dimmed,
+        }
     }
 }
 
 fn load_community_providers() -> Vec<ProviderDef> {
-    let json = include_str!("../../../../../../crates/codegen/xai-grok-models/community_providers.json");
+    let json =
+        include_str!("../../../../../../crates/codegen/xai-grok-models/community_providers.json");
     serde_json::from_str(json).unwrap_or_else(|e| {
-        tracing::warn!("Failed to parse community_providers.json: {e}"); Vec::new()
+        tracing::warn!("Failed to parse community_providers.json: {e}");
+        Vec::new()
     })
 }
 
 pub fn load_configured_providers() -> Vec<String> {
     let config_path = grok_home().join("config.toml");
     let content = match std::fs::read_to_string(&config_path) {
-        Ok(c) => c, Err(_) => return Vec::new(),
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
     };
     let doc = match content.parse::<DocumentMut>() {
-        Ok(d) => d, Err(_) => return Vec::new(),
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
     };
     doc.get("model")
         .and_then(|m| m.as_table())
@@ -384,24 +437,51 @@ pub fn load_configured_providers() -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub fn save_provider_config(provider_id: &str, api_key: Option<&str>, set_default: bool) -> Result<(), String> {
+pub fn save_provider_config(
+    provider_id: &str,
+    api_key: Option<&str>,
+    set_default: bool,
+) -> Result<(), String> {
     let config_path = grok_home().join("config.toml");
     let content = std::fs::read_to_string(&config_path).unwrap_or_default();
-    let mut doc = content.parse::<DocumentMut>().map_err(|e| format!("Failed to parse config: {e}"))?;
-    let provider = load_community_providers().into_iter().find(|p| p.id == provider_id);
-    let base_url = provider.as_ref().map(|p| p.base_url.as_str()).unwrap_or("https://api.openai.com/v1");
-    let api_backend = provider.as_ref().map(|p| p.api_backend.as_str()).unwrap_or("chat_completions");
-    let auth_scheme = provider.as_ref().map(|p| p.auth_scheme.as_str()).unwrap_or("bearer");
-    let entry = doc.entry("model").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let mut doc = content
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    let provider = load_community_providers()
+        .into_iter()
+        .find(|p| p.id == provider_id);
+    let base_url = provider
+        .as_ref()
+        .map(|p| p.base_url.as_str())
+        .unwrap_or("https://api.openai.com/v1");
+    let api_backend = provider
+        .as_ref()
+        .map(|p| p.api_backend.as_str())
+        .unwrap_or("chat_completions");
+    let auth_scheme = provider
+        .as_ref()
+        .map(|p| p.auth_scheme.as_str())
+        .unwrap_or("bearer");
+    let entry = doc
+        .entry("model")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
     let model_table = entry.as_table_mut().expect("model entry is always a table");
-    let prov_entry = model_table.entry(provider_id).or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
-    let table = prov_entry.as_table_mut().expect("provider entry is always a table");
+    let prov_entry = model_table
+        .entry(provider_id)
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let table = prov_entry
+        .as_table_mut()
+        .expect("provider entry is always a table");
     table["base_url"] = Value::from(base_url).into();
     table["api_backend"] = Value::from(api_backend).into();
     table["auth_scheme"] = Value::from(auth_scheme).into();
-    if let Some(key) = api_key { table["api_key"] = Value::from(key).into(); }
+    if let Some(key) = api_key {
+        table["api_key"] = Value::from(key).into();
+    }
     if set_default {
-        let me = doc.entry("models").or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        let me = doc
+            .entry("models")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
         me["default"] = Value::from(provider_id).into();
     }
     std::fs::write(&config_path, doc.to_string()).map_err(|e| format!("{e}"))?;

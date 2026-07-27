@@ -31,7 +31,7 @@ pub fn render_bottom_chrome(
     buf: &mut Buffer,
     area: Rect,
     left: Option<&Line<'_>>,
-    _center: Option<&Line<'_>>,   // reserved for future ShortcutsBar
+    _center: Option<&Line<'_>>, // reserved for future ShortcutsBar
     right: Option<&Line<'_>>,
     justify: BottomChromeJustify,
 ) {
@@ -53,9 +53,13 @@ pub fn render_bottom_chrome(
                 let mut x = area.x;
                 for span in &line.spans {
                     let sw = span.width() as u16;
-                    if sw == 0 { continue; }
+                    if sw == 0 {
+                        continue;
+                    }
                     let remaining = area.x + area.width - x;
-                    if remaining == 0 { break; }
+                    if remaining == 0 {
+                        break;
+                    }
                     let sw = sw.min(remaining);
                     buf.set_span(x, area.y, span, sw);
                     x += sw;
@@ -77,9 +81,13 @@ pub fn render_bottom_chrome(
                 let mut cx = x;
                 for span in &line.spans {
                     let sw = span.width() as u16;
-                    if sw == 0 { continue; }
+                    if sw == 0 {
+                        continue;
+                    }
                     let remaining = area.x + area.width - cx;
-                    if remaining == 0 { break; }
+                    if remaining == 0 {
+                        break;
+                    }
                     let sw = sw.min(remaining);
                     buf.set_span(cx, area.y, span, sw);
                     cx += sw;
@@ -92,9 +100,13 @@ pub fn render_bottom_chrome(
             if let Some(line) = left {
                 for span in &line.spans {
                     let sw = span.width() as u16;
-                    if sw == 0 { continue; }
+                    if sw == 0 {
+                        continue;
+                    }
                     let remaining = area.x + area.width - x;
-                    if remaining == 0 { break; }
+                    if remaining == 0 {
+                        break;
+                    }
                     let sw = sw.min(remaining);
                     buf.set_span(x, area.y, span, sw);
                     x += sw;
@@ -116,9 +128,13 @@ pub fn render_bottom_chrome(
                     let mut cx = right_x;
                     for span in &line.spans {
                         let sw = span.width() as u16;
-                        if sw == 0 { continue; }
+                        if sw == 0 {
+                            continue;
+                        }
                         let remaining = area.x + area.width - cx;
-                        if remaining == 0 { break; }
+                        if remaining == 0 {
+                            break;
+                        }
                         let sw = sw.min(remaining);
                         buf.set_span(cx, area.y, span, sw);
                         cx += sw;

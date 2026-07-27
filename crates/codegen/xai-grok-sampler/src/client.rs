@@ -41,6 +41,31 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 
+/// Managed local inference starts concurrently with session setup. Wait until
+/// its configured socket is accepting connections so the first user turn
+/// cannot lose a race with model loading.
+async fn wait_for_local_server(url: &reqwest::Url) -> Result<()> {
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
+    if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(80);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(65);
+    while tokio::time::Instant::now() < deadline {
+        if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    Err(SamplingError::EventStreamError(format!(
+        "local model server at {host}:{port} did not become ready within 65 seconds"
+    )))
+}
+
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
     conv_id: &'a str,
@@ -117,13 +142,19 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                 if first_err.to_string().contains("missing field `id`") {
                     if let Some(obj) = value.as_object_mut() {
                         if !obj.contains_key("id") {
-                            obj.insert("id".to_string(), serde_json::Value::String("placeholder".to_string()));
+                            obj.insert(
+                                "id".to_string(),
+                                serde_json::Value::String("placeholder".to_string()),
+                            );
                         }
                     }
                     if let Some(response) = value.pointer_mut("/response") {
                         if let Some(resp_obj) = response.as_object_mut() {
                             if !resp_obj.contains_key("id") {
-                                resp_obj.insert("id".to_string(), serde_json::Value::String("placeholder".to_string()));
+                                resp_obj.insert(
+                                    "id".to_string(),
+                                    serde_json::Value::String("placeholder".to_string()),
+                                );
                             }
                         }
                     }
@@ -883,9 +914,11 @@ impl SamplingClient {
         }
 
         let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).or_else(|e| {
-            if e.classify() == serde_json::error::Category::Data && e.to_string().contains("missing field `id`") {
-                let mut val: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(SamplingError::Serialization)?;
+            if e.classify() == serde_json::error::Category::Data
+                && e.to_string().contains("missing field `id`")
+            {
+                let mut val: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
                 val["id"] = serde_json::Value::String("placeholder".to_string());
                 serde_json::from_value(val).map_err(|e| {
                     let raw_body = String::from_utf8_lossy(&bytes);
@@ -1021,6 +1054,8 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "chat/completions");
 
+        wait_for_local_server(built_request.url()).await?;
+
         let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             record_stream_request_failure(&e);
@@ -1125,21 +1160,30 @@ impl SamplingClient {
                                             "created": 0,
                                             "model": "",
                                             "choices": [],
-                                        })
-                                    ).map_err(|e| SamplingError::Serialization(e))
+                                        }),
+                                    )
+                                    .map_err(|e| SamplingError::Serialization(e))
                                 } else {
                                     serde_json::from_str::<ChatCompletionChunk>(data).or_else(|e| {
                                         let msg = e.to_string();
-                                        if msg.contains("missing field `id`") || msg.contains("missing field `object`") {
-                                            let mut val: serde_json::Value = serde_json::from_str(data)
-                                                .map_err(SamplingError::Serialization)?;
+                                        if msg.contains("missing field `id`")
+                                            || msg.contains("missing field `object`")
+                                        {
+                                            let mut val: serde_json::Value =
+                                                serde_json::from_str(data)
+                                                    .map_err(SamplingError::Serialization)?;
                                             if val.get("id").is_none() {
-                                                val["id"] = serde_json::Value::String("placeholder".to_string());
+                                                val["id"] = serde_json::Value::String(
+                                                    "placeholder".to_string(),
+                                                );
                                             }
                                             if val.get("object").is_none() {
-                                                val["object"] = serde_json::Value::String("chat.completion.chunk".to_string());
+                                                val["object"] = serde_json::Value::String(
+                                                    "chat.completion.chunk".to_string(),
+                                                );
                                             }
-                                            serde_json::from_value(val).map_err(SamplingError::Serialization)
+                                            serde_json::from_value(val)
+                                                .map_err(SamplingError::Serialization)
                                         } else {
                                             Err(SamplingError::Serialization(e))
                                         }
@@ -1296,8 +1340,8 @@ impl SamplingClient {
 
         let response_obj = serde_json::from_slice::<rs::Response>(&bytes).or_else(|e| {
             if e.to_string().contains("missing field `id`") {
-                let mut val: serde_json::Value = serde_json::from_slice(&bytes)
-                    .map_err(SamplingError::Serialization)?;
+                let mut val: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
                 if val.get("id").is_none() {
                     val["id"] = serde_json::Value::String("placeholder".to_string());
                 }
@@ -1659,8 +1703,8 @@ impl SamplingClient {
         let response_obj =
             serde_json::from_slice::<messages::MessagesResponse>(&bytes).or_else(|e| {
                 if e.to_string().contains("missing field `id`") {
-                    let mut val: serde_json::Value = serde_json::from_slice(&bytes)
-                        .map_err(SamplingError::Serialization)?;
+                    let mut val: serde_json::Value =
+                        serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
                     if val.get("id").is_none() {
                         val["id"] = serde_json::Value::String("placeholder".to_string());
                     }

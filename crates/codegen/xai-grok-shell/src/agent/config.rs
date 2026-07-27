@@ -3540,7 +3540,16 @@ pub fn resolve_model_list(
         // These point to opencode.ai/zen/v1 with a public API key and must be
         // visible alongside the xAI API models in the model picker.
         for (key, entry) in super::community_models::builtin_community_models() {
-            resolved.entry(key).or_insert_with(|| ModelEntry::from_config_entry(&entry));
+            if key == "minicpm5-1b-tooluse" {
+                // The local model must never inherit a same-named prefetched
+                // proxy entry; its localhost URL and Chat Completions backend
+                // are required for inference to reach llama-server.
+                resolved.insert(key, ModelEntry::from_config_entry(&entry));
+            } else {
+                resolved
+                    .entry(key)
+                    .or_insert_with(|| ModelEntry::from_config_entry(&entry));
+            }
         }
     }
     for (key, model_override) in &cfg.config_models {
@@ -3839,6 +3848,7 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
                 compaction_at_tokens: m.compaction_at_tokens,
                 show_model_fingerprint: m.show_model_fingerprint,
                 stream_tool_calls: None,
+                local_model_path: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
             };
             (key, config)
@@ -3973,6 +3983,11 @@ pub struct ModelEntryConfig {
     /// the all-disabled state via `#[serde(default)]`.
     #[serde(default, skip_serializing_if = "is_default_laziness_detector")]
     pub laziness_detector: LazinessDetectorPerModelConfig,
+    /// Path to a local model file (GGUF) for managed server auto-start.
+    /// When set, the app automatically starts a local inference server
+    /// (llama-server) for this model instead of requiring a remote endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_model_path: Option<std::path::PathBuf>,
 }
 /// True when `cfg` equals the all-disabled default. Derives `PartialEq`
 /// on `f32`, which is fine for the current shape because both `f32`
@@ -7528,6 +7543,7 @@ reasoning_effort = "low"
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            local_model_path: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert!(info.use_concise);
@@ -7687,6 +7703,7 @@ reasoning_effort = "low"
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            local_model_path: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.agent_type, "codex");
@@ -8138,6 +8155,7 @@ reasoning_effort = "low"
             show_model_fingerprint: false,
             stream_tool_calls: None,
             laziness_detector: LazinessDetectorPerModelConfig::default(),
+            local_model_path: None,
         };
         let info = ModelInfo::from_config(&entry);
         assert_eq!(info.inference_idle_timeout_secs, Some(120));

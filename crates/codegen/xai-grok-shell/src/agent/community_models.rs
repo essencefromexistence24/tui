@@ -20,6 +20,13 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
 
     let models = [
         ModelSpec {
+            key: "minicpm5-1b-tooluse",
+            name: "MiniCPM5 1B Tool Use (Local)",
+            model_id: "minicpm5-1b-tooluse",
+            ctx: 131_072,
+            title_header: None,
+        },
+        ModelSpec {
             key: "big-pickle",
             name: "Big Pickle",
             model_id: "big-pickle",
@@ -65,12 +72,15 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
 
     for m in &models {
         let mut extra_headers = IndexMap::new();
-        extra_headers.insert(
-            "HTTP-Referer".to_string(),
-            "https://opencode.ai/".to_string(),
-        );
-        if let Some(title) = m.title_header {
-            extra_headers.insert("X-Title".to_string(), title.to_string());
+        let is_local = m.key == "minicpm5-1b-tooluse";
+        if !is_local {
+            extra_headers.insert(
+                "HTTP-Referer".to_string(),
+                "https://opencode.ai/".to_string(),
+            );
+            if let Some(title) = m.title_header {
+                extra_headers.insert("X-Title".to_string(), title.to_string());
+            }
         }
 
         map.insert(
@@ -78,14 +88,20 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
             ModelEntryConfig {
                 id: Some(m.key.to_string()),
                 model: m.model_id.to_string(),
-                base_url: "https://opencode.ai/zen/v1".to_string(),
+                base_url: if is_local {
+                    "http://localhost:8080/v1".to_string()
+                } else {
+                    "https://opencode.ai/zen/v1".to_string()
+                },
                 api_base_url: None,
                 name: Some(m.name.to_string()),
                 description: None,
                 max_completion_tokens: None,
                 temperature: None,
                 top_p: None,
-                api_key: Some("public".to_string()),
+                // llama-server ignores this placeholder; the client uses its
+                // presence to avoid sending xAI session credentials locally.
+                api_key: Some(if is_local { "local" } else { "public" }.to_string()),
                 env_key: None,
                 api_backend: ApiBackend::ChatCompletions,
                 auth_scheme: None,
@@ -107,6 +123,7 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
                 compaction_at_tokens: None,
                 show_model_fingerprint: false,
                 stream_tool_calls: None,
+                local_model_path: None,
                 laziness_detector: LazinessDetectorPerModelConfig::default(),
             },
         );
