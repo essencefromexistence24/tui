@@ -8,7 +8,7 @@ use super::{
 use crate::actions::{ActionId, ActionRegistry};
 use crate::key;
 use crate::render::SafeBuf;
-use crate::render::line_utils::truncate_line;
+
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::layout::HorizontalLayout;
 use crate::scrollback::render::ScratchBuffer;
@@ -1101,19 +1101,15 @@ impl AgentView {
         let drain_blocked = self.drain_blocked();
         let watchers = self.watchers();
         let parked = self.renders_parked();
-        let turn_status_height = if turn_status::should_show(
+        let _turn_status_active = turn_status::should_show(
             &self.session.state,
             drain_blocked,
             self.mcp_init_progress.as_ref(),
             watchers,
             parked,
-        ) {
-            1
-        } else {
-            0
-        };
+        );
         let prompt_gap = if appearance.prompt.compact
-            || (turn_status_height > 0 && !appearance.turn_status.gap)
+            || (_turn_status_active && !appearance.turn_status.gap)
             || area.height <= agent::SHORT_TERMINAL_ROWS
         {
             0
@@ -1148,7 +1144,7 @@ impl AgentView {
             todo_height,
             queue_height,
             btw_height,
-            turn_status_height,
+            u16::from(_turn_status_active),
             banner_height,
             cta_height,
             follow_ups_height,
@@ -1224,7 +1220,7 @@ impl AgentView {
                         todo_height,
                         queue_height,
                         btw_height,
-                        turn_status_height,
+                        u16::from(_turn_status_active),
                         banner_height,
                         cta_height,
                         follow_ups_height,
@@ -1373,129 +1369,7 @@ impl AgentView {
         self.hit_plan_button.rect = areas.get("plan").copied();
         self.hit_queue_badge.rect = areas.get("queue").copied();
         self.hit_badge.rect = areas.get("badge").copied();
-        let home = std::env::var("HOME").ok();
-        let display = self.session.cwd.display().to_string();
-        let short = match &home {
-            Some(h) if display.starts_with(h.as_str()) => {
-                format!("~{}", &display[h.len()..])
-            }
-            _ => display,
-        };
-        let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-        use unicode_width::UnicodeWidthStr;
-        let mut parts: Vec<Span> = Vec::new();
-        let mut path_offset: u16 = 0;
-        let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
-        let branch = self
-            .current_branch
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
-        let git_text = branch.map(|b| {
-            let icon = crate::git_info::branch_icon();
-            if b.is_empty() {
-                format!("{icon} detached")
-            } else {
-                format!("{icon} {b}")
-            }
-        });
-        if let Some(git_text) = git_text {
-            let git_style = Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base)
-                .add_modifier(ratatui::style::Modifier::DIM);
-            path_offset += git_text.width() as u16;
-            parts.push(Span::styled(git_text, git_style));
-            path_offset += 1;
-            parts.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
-        }
-        let show_worktree_label = self.is_worktree
-            || self.session.is_worktree
-            || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
-        if show_worktree_label {
-            let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
-            path_offset += "worktree ".width() as u16;
-            parts.push(Span::styled("worktree ", label_style));
-        }
-        if let Some(profile) = xai_grok_sandbox::profile_name() {
-            let sandbox_text = format!("sandbox:{profile} ");
-            let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
-            path_offset += sandbox_text.width() as u16;
-            parts.push(Span::styled(sandbox_text, sandbox_style));
-        }
-        let path_width = short.width() as u16;
-        let path_style = if self.hit_cwd.hovered {
-            Style::default().fg(theme.text_primary).bg(theme.bg_base)
-        } else {
-            cwd_style
-        };
-        parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
-            ));
-        }
-        let cwd_line = Line::from(parts);
-        let max_cwd_width = areas
-            .values()
-            .map(|r| r.x)
-            .min()
-            .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
-            .unwrap_or(layout.status_bar.width);
-        let upgrade_cta =
-            crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids);
-        let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
-            1 + crate::views::announcements::upgrade_cta_reserve(label, None)
-        });
-        let cwd_line = truncate_line(
-            cwd_line,
-            max_cwd_width.saturating_sub(upgrade_reserve) as usize,
-        );
-        let cwd_width = cwd_line.width() as u16;
-        buf.set_line_safe(
-            layout.status_bar.x,
-            layout.status_bar.y,
-            &cwd_line,
-            cwd_width,
-        );
-        let path_x = layout.status_bar.x + path_offset;
-        let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
-        self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
-            x: path_x,
-            y: layout.status_bar.y,
-            width: visible_path_width,
-            height: 1,
-        });
-        let mut upgrade_cta_rect = None;
-        if let Some((_owner, label, _url)) = upgrade_cta {
-            let avail = max_cwd_width.saturating_sub(cwd_width);
-            if avail > 1 {
-                let cta_x = layout.status_bar.x + cwd_width;
-                buf.set_span(
-                    cta_x,
-                    layout.status_bar.y,
-                    &Span::styled(" ", Style::default().bg(theme.bg_base)),
-                    1,
-                );
-                upgrade_cta_rect = crate::views::announcements::render_cta_button(
-                    buf,
-                    &theme,
-                    cta_x + 1,
-                    layout.status_bar.y,
-                    avail - 1,
-                    label,
-                    None,
-                    self.hit_upgrade_cta.hovered,
-                );
-            }
-        }
-        let dropdown_open = self.prompt.any_dropdown_open();
-        self.hit_upgrade_cta
-            .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        // [commented] CWD rendering removed — turn_status uses the left side
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
         {
             self.sync_pending_user_input_marks();
@@ -1544,6 +1418,7 @@ impl AgentView {
             if search_reserved_rows > 0
                 && let Some(search) = self.scrollback_search.as_ref()
             {
+                use unicode_width::UnicodeWidthStr;
                 let reserved_top = layout.scrollback.y + layout.scrollback.height;
                 let bar_y = reserved_top + (search_reserved_rows - 1);
                 if search_reserved_rows >= 2 {
@@ -1935,13 +1810,14 @@ impl AgentView {
         {
             self.hovered_link_idx = None;
         }
-        if turn_status_height > 0 {
+        let dropdown_open = self.prompt.any_dropdown_open();
+        if _turn_status_active {
             let pad_left = HorizontalLayout::ACCENT + layout_cfg.block_pad_left.saturating_sub(1);
             let turn_area = Rect {
-                x: layout.turn_status.x + pad_left,
-                y: layout.turn_status.y,
-                width: layout.turn_status.width.saturating_sub(pad_left),
-                height: layout.turn_status.height,
+                x: layout.status_bar.x + pad_left,
+                y: layout.status_bar.y,
+                width: layout.status_bar.width.saturating_sub(pad_left),
+                height: layout.status_bar.height,
             };
             let tick = self.scrollback.animation_tick();
             let activity = self.resolve_turn_activity();

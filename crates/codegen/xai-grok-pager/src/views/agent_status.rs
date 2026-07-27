@@ -105,9 +105,6 @@ impl<'a> AgentStatusBar<'a> {
             return HashMap::new();
         }
 
-        // Fill background
-        buf.set_style(area, Style::default().bg(self.theme.bg_base));
-
         let sep = self.separator();
         let sep_w = sep.width() as u16; // 3
 
@@ -122,6 +119,13 @@ impl<'a> AgentStatusBar<'a> {
         let start_x = area
             .x
             .saturating_add(area.width.saturating_sub(self.right_pad + total_width));
+
+        // Fill background only for the content area (not full width)
+        let fill_w = area.width.saturating_sub(start_x.saturating_sub(area.x));
+        let fill_area = Rect { x: start_x, y: area.y, width: fill_w, height: 1 };
+        if fill_w > 0 {
+            buf.set_style(fill_area, Style::default().bg(self.theme.bg_base));
+        }
 
         let mut x = start_x;
         let mut areas = HashMap::new();
