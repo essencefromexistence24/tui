@@ -1,0 +1,99 @@
+use std::{ops::Deref, str::FromStr};
+
+use mlua::{AnyUserData, ExternalError, ExternalResult, FromLua, IntoLua, Lua, MetaMethod, Table, UserData, Value};
+
+use super::Pad;
+
+const EXPECTED: &str = "expected a Pos";
+
+#[derive(Clone, Copy, Default)]
+pub struct Pos {
+	inner: fb_config::popup::Position,
+
+	pub(super) pad: Pad,
+}
+
+impl Deref for Pos {
+	type Target = fb_config::popup::Position;
+
+	fn deref(&self) -> &Self::Target { &self.inner }
+}
+
+impl From<fb_config::popup::Position> for Pos {
+	fn from(value: fb_config::popup::Position) -> Self {
+		Self { inner: value, ..Default::default() }
+	}
+}
+
+impl From<Pos> for fb_config::popup::Position {
+	fn from(value: Pos) -> Self { value.inner }
+}
+
+impl TryFrom<Table> for Pos {
+	type Error = mlua::Error;
+
+	fn try_from(t: Table) -> Result<Self, Self::Error> {
+		use fb_config::popup::{Offset, Origin, Position};
+
+		Ok(Self::from(Position {
+			origin: Origin::from_str(&t.raw_get::<mlua::String>(1)?.to_str()?).into_lua_err()?,
+			offset: Offset {
+				x:      t.raw_get("x").unwrap_or_default(),
+				y:      t.raw_get("y").unwrap_or_default(),
+				width:  t.raw_get("w").unwrap_or_default(),
+				height: t.raw_get("h").unwrap_or_default(),
+			},
+		}))
+	}
+}
+
+impl FromLua for Pos {
+	fn from_lua(value: Value, _: &Lua) -> mlua::Result<Self> {
+		Ok(match value {
+			Value::Table(tbl) => Self::try_from(tbl)?,
+			Value::UserData(ud) => {
+				if let Ok(pos) = ud.borrow() {
+					*pos
+				} else {
+					Err(EXPECTED.into_lua_err())?
+				}
+			}
+			_ => Err(EXPECTED.into_lua_err())?,
+		})
+	}
+}
+
+impl Pos {
+	pub fn compose(lua: &Lua) -> mlua::Result<Value> {
+		let new = lua.create_function(|_, (_, t): (Table, Table)| Self::try_from(t))?;
+
+		let position = lua.create_table()?;
+		position.set_metatable(Some(lua.create_table_from([(MetaMethod::Call.name(), new)])?))?;
+
+		position.into_lua(lua)
+	}
+
+	pub fn with_height(mut self, height: u16) -> Self {
+		self.inner.offset.height = height;
+		self
+	}
+}
+
+impl UserData for Pos {
+	fn add_fields<F: mlua::UserDataFields<Self>>(fields: &mut F) {
+		// TODO: cache
+		fields.add_field_method_get("1", |_, me| Ok(me.origin.to_string()));
+		fields.add_field_method_get("x", |_, me| Ok(me.offset.x));
+		fields.add_field_method_get("y", |_, me| Ok(me.offset.y));
+		fields.add_field_method_get("w", |_, me| Ok(me.offset.width));
+		fields.add_field_method_get("h", |_, me| Ok(me.offset.height));
+	}
+
+	fn add_methods<M: mlua::UserDataMethods<Self>>(methods: &mut M) {
+		methods.add_function_mut("pad", |_, (ud, pad): (AnyUserData, Pad)| {
+			ud.borrow_mut::<Self>()?.pad = pad;
+			Ok(ud)
+		});
+	}
+}
+

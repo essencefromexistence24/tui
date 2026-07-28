@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🚧 Build Issues
+    url: https://github.com/sxdx/dx/discussions/new?category=3-build-issues
+    about: If you have issues building dx from source code
+  - name: 📝 Documentation Improvement
+    url: https://github.com/dx-rs/dx-rs.github.io
+    about: If you'd like to help improve the documentation
+  - name: 💬 GitHub Discussions
+    url: https://github.com/sxdx/dx/discussions/new?category=1-q-a
+    about: When you have questions that are not bug reports or feature requests
+  - name: 🌐 Discord Server / Telegram Group
+    url: https://github.com/sxdx/dx#discussion
+    about: If you'd prefer more realtime conversation with the community

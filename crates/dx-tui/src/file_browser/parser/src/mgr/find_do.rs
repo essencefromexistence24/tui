@@ -1,0 +1,36 @@
+use anyhow::bail;
+use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
+use fb_fs::FilterCase;
+use fb_shared::{SStr, event::ActionCow};
+
+#[derive(Clone, Debug)]
+pub struct FindDoOpt {
+	pub query: SStr,
+	pub prev:  bool,
+	pub case:  FilterCase,
+}
+
+impl TryFrom<ActionCow> for FindDoOpt {
+	type Error = anyhow::Error;
+
+	fn try_from(mut a: ActionCow) -> Result<Self, Self::Error> {
+		if let Some(opt) = a.take_any2("opt") {
+			return opt;
+		}
+
+		let Ok(query) = a.take_first() else {
+			bail!("Invalid 'query' in FindDoOpt");
+		};
+
+		Ok(Self { query, prev: a.bool("previous"), case: FilterCase::from(&*a) })
+	}
+}
+
+impl FromLua for FindDoOpt {
+	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+}
+
+impl IntoLua for FindDoOpt {
+	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+}
+

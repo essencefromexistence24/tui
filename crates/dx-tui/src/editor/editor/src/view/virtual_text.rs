@@ -1,0 +1,1181 @@
+//! Virtual text rendering infrastructure
+//!
+//! Provides a system for rendering virtual text that doesn't exist in the buffer.
+//! Used for inlay hints (type annotations, parameter names), git blame headers, etc.
+//!
+//! Two types of virtual text are supported:
+//! - **Inline**: Text inserted before/after a character (e.g., `: i32` type hints)
+//! - **Line**: Full lines inserted above/below a position (e.g., git blame headers)
+//!
+//! Virtual text is rendered during the render phase by reading from VirtualTextManager.
+//! The buffer content remains unchanged - we just inject extra styled text during rendering.
+//!
+//! ## Architecture
+//!
+//! This follows an Emacs-like model where:
+//! 1. Plugins add virtual text in response to buffer changes (async, fire-and-forget)
+//! 2. Virtual text is stored persistently with marker-based position tracking
+//! 3. Render loop reads virtual text synchronously from memory (no async waiting)
+//!
+//! This ensures frame coherence: render always sees a consistent snapshot of virtual text.
+
+use ratatui::style::{Color, Style};
+use std::collections::HashMap;
+
+use crate::model::marker::{MarkerId, MarkerList};
+
+/// Position relative to the character at the marker position
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VirtualTextPosition {
+	// ─── Inline positions (within a line) ───
+	/// Render before the character (e.g., parameter hints: `/*count=*/5`)
+	BeforeChar,
+	/// Render after the character (e.g., type hints: `x: i32`)
+	AfterChar,
+
+	// ─── Line positions (full lines) ───
+	/// Render as a full line ABOVE the line containing this position
+	/// Used for git blame headers, section separators, etc.
+	/// These lines do NOT get line numbers in the gutter.
+	LineAbove,
+	/// Render as a full line BELOW the line containing this position
+	/// Used for inline documentation, fold previews, etc.
+	/// These lines do NOT get line numbers in the gutter.
+	LineBelow,
+}
+
+impl VirtualTextPosition {
+	/// Returns true if this is a line-level position (LineAbove/LineBelow)
+	pub fn is_line(&self) -> bool {
+		matches!(self, Self::LineAbove | Self::LineBelow)
+	}
+
+	/// Returns true if this is an inline position (BeforeChar/AfterChar)
+	pub fn is_inline(&self) -> bool {
+		matches!(self, Self::BeforeChar | Self::AfterChar)
+	}
+}
+
+/// Namespace for grouping virtual texts (for efficient bulk removal).
+/// Similar to OverlayNamespace - plugins create a namespace once and use it for all their virtual texts.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct VirtualTextNamespace(pub String);
+
+impl VirtualTextNamespace {
+	/// Create a namespace from a string (for plugin registration)
+	pub fn from_string(s: String) -> Self {
+		Self(s)
+	}
+
+	/// Get the internal string representation
+	pub fn as_str(&self) -> &str {
+		&self.0
+	}
+}
+
+/// A piece of virtual text to render at a specific position
+#[derive(Debug, Clone)]
+pub struct VirtualText {
+	/// Marker tracking the position (auto-adjusts on edits)
+	pub marker_id: MarkerId,
+	/// Text to display (for LineAbove/LineBelow, this is the full line content)
+	pub text: String,
+	/// Fallback styling, used when the theme-key fields below are unset OR
+	/// the keys don't resolve in the active theme.  The renderer composes
+	/// the final style by overlaying any resolved theme colours on top of
+	/// this fallback (see [`VirtualText::resolved_style`]).
+	pub style: Style,
+	/// Optional theme key for the foreground colour (e.g.
+	/// `"editor.line_number_fg"`).  Resolved on every render so the line
+	/// follows live theme changes.
+	pub fg_theme_key: Option<String>,
+	/// Optional theme key for the background colour.
+	pub bg_theme_key: Option<String>,
+	/// Where to render relative to the marker position
+	pub position: VirtualTextPosition,
+	/// Priority for ordering multiple items at same position (higher = later)
+	pub priority: i32,
+	/// Optional string identifier for this virtual text (for plugin use)
+	pub string_id: Option<String>,
+	/// Optional namespace for bulk removal (like Overlay's namespace)
+	pub namespace: Option<VirtualTextNamespace>,
+	/// Optional gutter glyph rendered in the line-number column on the
+	/// FIRST visual row of this virtual line. Subsequent wrapped rows
+	/// keep a blank gutter. `None` (the default) renders blank, which
+	/// matches the legacy behaviour. Used by `live_diff` to place "-"
+	/// directly on the deletion line itself instead of the source
+	/// line that happens to follow it.
+	pub gutter_glyph: Option<String>,
+	/// Foreground color for `gutter_glyph`. Falls back to
+	/// `theme.line_number_fg` when `None`.
+	pub gutter_color: Option<Color>,
+	/// Per-range modifier overlays applied on top of the base fg/bg.
+	/// Offsets are byte offsets within `text`. Used e.g. by live-diff
+	/// to bold + underline removed words on deletion virtual lines.
+	pub text_overlays: Vec<dx_core::api::VirtualLineTextOverlay>,
+}
+
+impl VirtualText {
+	/// Resolve the on-screen `Style` for this entry against a live theme.
+	///
+	/// Theme keys take precedence over the fallback `style`'s fg/bg.  If a
+	/// key fails to resolve (e.g. the theme doesn't define it), the
+	/// fallback colour is kept.  Modifiers from `style` (bold/italic/etc.)
+	/// always survive.
+	pub fn resolved_style(&self, theme: &crate::view::theme::Theme) -> Style {
+		let mut style = self.style;
+		if let Some(ref key) = self.fg_theme_key {
+			if let Some(color) = theme.resolve_theme_key(key) {
+				style = style.fg(color);
+			}
+		}
+		if let Some(ref key) = self.bg_theme_key {
+			if let Some(color) = theme.resolve_theme_key(key) {
+				style = style.bg(color);
+			}
+		}
+		style
+	}
+}
+
+/// Unique identifier for a virtual text entry
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct VirtualTextId(pub u64);
+
+/// Manages virtual text entries for a buffer
+///
+/// Uses the marker system for position tracking, so virtual text automatically
+/// adjusts when the buffer is edited.
+pub struct VirtualTextManager {
+	/// Map from virtual text ID to virtual text entry
+	texts: HashMap<VirtualTextId, VirtualText>,
+	/// Next ID to assign
+	next_id: u64,
+	/// Monotonic version, bumped on every mutation.  Folded into
+	/// `pipeline_inputs_version` so that adding / removing virtual
+	/// lines (e.g. markdown_compose's table borders) invalidates
+	/// `LineWrapCache` / `VisualRowIndex` entries — same mechanism
+	/// `SoftBreakManager` and `ConcealManager` use.
+	version: u32,
+}
+
+impl VirtualTextManager {
+	/// Create a new empty manager
+	pub fn new() -> Self {
+		Self { texts: HashMap::new(), next_id: 0, version: 0 }
+	}
+
+	/// Monotonic version. Increments on every mutation to virtual text
+	/// state. Used by `pipeline_inputs_version` to invalidate scroll-math
+	/// caches keyed off `EditorState`.
+	#[inline]
+	/// MarkerId backing the given virtual text, or `None` if the id is unknown.
+	/// Callers pair this with `MarkerList::get_position` to read the current
+	/// buffer position after edits have moved the marker — used by async-paste
+	/// to look up where the placeholder ended up so the pasted text lands
+	/// there, not where the cursor was at Ctrl+V time.
+	pub fn marker_id_of(&self, id: VirtualTextId) -> Option<MarkerId> {
+		self.texts.get(&id).map(|vt| vt.marker_id)
+	}
+
+	pub fn version(&self) -> u32 {
+		self.version
+	}
+
+	#[inline]
+	fn bump_version(&mut self) {
+		self.version = self.version.wrapping_add(1);
+	}
+
+	/// Add a virtual text entry
+	///
+	/// # Arguments
+	/// * `marker_list` - The marker list to create a position marker in
+	/// * `position` - Byte offset in the buffer
+	/// * `text` - Text to display
+	/// * `style` - Styling for the text
+	/// * `vtext_position` - Whether to render before or after the character
+	/// * `priority` - Ordering priority (higher = later in render order)
+	///
+	/// # Returns
+	/// The ID of the created virtual text entry
+	pub fn add(
+		&mut self,
+		marker_list: &mut MarkerList,
+		position: usize,
+		text: String,
+		style: Style,
+		vtext_position: VirtualTextPosition,
+		priority: i32,
+	) -> VirtualTextId {
+		// Create marker at position
+		// Use right affinity (false) so the marker stays with the following character
+		let marker_id = marker_list.create(position, false);
+
+		let id = VirtualTextId(self.next_id);
+		self.next_id += 1;
+
+		self.texts.insert(
+			id,
+			VirtualText {
+				marker_id,
+				text,
+				style,
+				fg_theme_key: None,
+				bg_theme_key: None,
+				position: vtext_position,
+				priority,
+				string_id: None,
+				namespace: None,
+				gutter_glyph: None,
+				gutter_color: None,
+				text_overlays: Vec::new(),
+			},
+		);
+		self.bump_version();
+
+		id
+	}
+
+	/// Add an inline virtual text entry whose foreground/background colours
+	/// are stored as theme keys (resolved at render time so theme changes
+	/// apply live).
+	///
+	/// `style` is the fallback used when a theme key fails to resolve;
+	/// `fg_theme_key` / `bg_theme_key` are the keys passed to
+	/// `Theme::resolve_theme_key` (e.g. `"editor.line_number_fg"`).
+	#[allow(clippy::too_many_arguments)]
+	pub fn add_with_theme_keys(
+		&mut self,
+		marker_list: &mut MarkerList,
+		position: usize,
+		text: String,
+		style: Style,
+		fg_theme_key: Option<String>,
+		bg_theme_key: Option<String>,
+		vtext_position: VirtualTextPosition,
+		priority: i32,
+	) -> VirtualTextId {
+		debug_assert!(
+			vtext_position.is_inline(),
+			"add_with_theme_keys requires BeforeChar or AfterChar"
+		);
+
+		let marker_id = marker_list.create(position, false);
+
+		let id = VirtualTextId(self.next_id);
+		self.next_id += 1;
+
+		self.texts.insert(
+			id,
+			VirtualText {
+				marker_id,
+				text,
+				style,
+				fg_theme_key,
+				bg_theme_key,
+				position: vtext_position,
+				priority,
+				string_id: None,
+				namespace: None,
+				gutter_glyph: None,
+				gutter_color: None,
+				text_overlays: Vec::new(),
+			},
+		);
+		self.bump_version();
+
+		id
+	}
+
+	/// Add a virtual text entry with a string identifier
+	///
+	/// This is useful for plugins that need to track and remove virtual texts by name.
+	#[allow(clippy::too_many_arguments)]
+	pub fn add_with_id(
+		&mut self,
+		marker_list: &mut MarkerList,
+		position: usize,
+		text: String,
+		style: Style,
+		vtext_position: VirtualTextPosition,
+		priority: i32,
+		string_id: String,
+	) -> VirtualTextId {
+		let marker_id = marker_list.create(position, false);
+
+		let id = VirtualTextId(self.next_id);
+		self.next_id += 1;
+
+		self.texts.insert(
+			id,
+			VirtualText {
+				marker_id,
+				text,
+				style,
+				fg_theme_key: None,
+				bg_theme_key: None,
+				position: vtext_position,
+				priority,
+				string_id: Some(string_id),
+				namespace: None,
+				gutter_glyph: None,
+				gutter_color: None,
+				text_overlays: Vec::new(),
+			},
+		);
+		self.bump_version();
+
+		id
+	}
+
+	/// String-id form of [`add_with_theme_keys`] — same as
+	/// [`add_with_id`] but stores theme keys for live theme updates.
+	#[allow(clippy::too_many_arguments)]
+	pub fn add_with_id_and_theme_keys(
+		&mut self,
+		marker_list: &mut MarkerList,
+		position: usize,
+		text: String,
+		style: Style,
+		fg_theme_key: Option<String>,
+		bg_theme_key: Option<String>,
+		vtext_position: VirtualTextPosition,
+		priority: i32,
+		string_id: String,
+	) -> VirtualTextId {
+		debug_assert!(
+			vtext_position.is_inline(),
+			"add_with_id_and_theme_keys requires BeforeChar or AfterChar"
+		);
+
+		let marker_id = marker_list.create(position, false);
+
+		let id = VirtualTextId(self.next_id);
+		self.next_id += 1;
+
+		self.texts.insert(
+			id,
+			VirtualText {
+				marker_id,
+				text,
+				style,
+				fg_theme_key,
+				bg_theme_key,
+				position: vtext_position,
+				priority,
+				string_id: Some(string_id),
+				namespace: None,
+				gutter_glyph: None,
+				gutter_color: None,
+				text_overlays: Vec::new(),
+			},
+		);
+
+		id
+	}
+
+	/// Add a virtual line (LineAbove or LineBelow) with namespace for bulk removal
+	///
+	/// This is the primary API for features like git blame headers.
+	///
+	/// # Arguments
+	/// * `marker_list` - The marker list to create a position marker in
+	/// * `position` - Byte offset in the buffer (anchors the line to this position)
+	/// * `text` - Full line content to display
+	/// * `style` - Styling for the line
+	/// * `placement` - LineAbove or LineBelow
+	/// * `namespace` - Namespace for bulk removal (e.g., "git-blame")
+	/// * `priority` - Ordering when multiple lines at same position
+	#[allow(clippy::too_many_arguments)]
+	pub fn add_line(
+		&mut self,
+		marker_list: &mut MarkerList,
+		position: usize,
+		text: String,
+		style: Style,
+		placement: VirtualTextPosition,
+		namespace: VirtualTextNamespace,
+		priority: i32,
+	) -> VirtualTextId {
+		self.add_line_with_theme_keys(
+			marker_list,
+			position,
+			text,
+			style,
+			None,
+			None,
+			placement,
+			namespace,
+			priority,
+			None,
+			None,
+			Vec::new(),
+		)
+	}
+
+	/// Add a virtual line whose foreground/background colours are stored
+	/// as theme keys (resolved at render time so theme changes apply
+	/// live).
+	///
+	/// `style` is the fallback used when a theme key fails to resolve;
+	/// `fg_theme_key` / `bg_theme_key` are the keys passed to
+	/// `Theme::resolve_theme_key` (e.g. `"editor.line_number_fg"`).
+	#[allow(clippy::too_many_arguments)]
+	pub fn add_line_with_theme_keys(
+		&mut self,
+		marker_list: &mut MarkerList,
+		position: usize,
+		text: String,
+		style: Style,
+		fg_theme_key: Option<String>,
+		bg_theme_key: Option<String>,
+		placement: VirtualTextPosition,
+		namespace: VirtualTextNamespace,
+		priority: i32,
+		gutter_glyph: Option<String>,
+		gutter_color: Option<Color>,
+		text_overlays: Vec<dx_core::api::VirtualLineTextOverlay>,
+	) -> VirtualTextId {
+		debug_assert!(placement.is_line(), "add_line requires LineAbove or LineBelow");
+
+		let marker_id = marker_list.create(position, false);
+
+		let id = VirtualTextId(self.next_id);
+		self.next_id += 1;
+
+		self.texts.insert(
+			id,
+			VirtualText {
+				marker_id,
+				text,
+				style,
+				fg_theme_key,
+				bg_theme_key,
+				position: placement,
+				priority,
+				string_id: None,
+				namespace: Some(namespace),
+				gutter_glyph,
+				gutter_color,
+				text_overlays,
+			},
+		);
+		self.bump_version();
+
+		id
+	}
+
+	/// Remove a virtual text entry by its string identifier
+	pub fn remove_by_id(&mut self, marker_list: &mut MarkerList, string_id: &str) -> bool {
+		// Find the entry with matching string_id
+		let to_remove: Vec<VirtualTextId> = self
+			.texts
+			.iter()
+			.filter_map(
+				|(id, vtext)| {
+					if vtext.string_id.as_deref() == Some(string_id) { Some(*id) } else { None }
+				},
+			)
+			.collect();
+
+		let mut removed = false;
+		for id in to_remove {
+			if let Some(vtext) = self.texts.remove(&id) {
+				marker_list.delete(vtext.marker_id);
+				removed = true;
+			}
+		}
+		if removed {
+			self.bump_version();
+		}
+		removed
+	}
+
+	/// Remove all virtual text entries whose string_id starts with the given prefix
+	pub fn remove_by_prefix(&mut self, marker_list: &mut MarkerList, prefix: &str) {
+		// Collect markers to delete
+		let markers_to_delete: Vec<(VirtualTextId, MarkerId)> = self
+			.texts
+			.iter()
+			.filter_map(|(id, vtext)| {
+				if let Some(ref sid) = vtext.string_id {
+					if sid.starts_with(prefix) {
+						return Some((*id, vtext.marker_id));
+					}
+				}
+				None
+			})
+			.collect();
+
+		// Delete markers and remove entries
+		let removed = !markers_to_delete.is_empty();
+		for (id, marker_id) in markers_to_delete {
+			marker_list.delete(marker_id);
+			self.texts.remove(&id);
+		}
+		if removed {
+			self.bump_version();
+		}
+	}
+
+	/// Remove a virtual text entry
+	pub fn remove(&mut self, marker_list: &mut MarkerList, id: VirtualTextId) -> bool {
+		if let Some(vtext) = self.texts.remove(&id) {
+			marker_list.delete(vtext.marker_id);
+			self.bump_version();
+			true
+		} else {
+			false
+		}
+	}
+
+	/// Clear all virtual text entries
+	pub fn clear(&mut self, marker_list: &mut MarkerList) {
+		let was_non_empty = !self.texts.is_empty();
+		for vtext in self.texts.values() {
+			marker_list.delete(vtext.marker_id);
+		}
+		self.texts.clear();
+		if was_non_empty {
+			self.bump_version();
+		}
+	}
+
+	/// Remove all virtual text entries whose marker position lies within the
+	/// half-open byte range `[start, end)`.
+	///
+	/// This must be called BEFORE the underlying buffer/marker list is
+	/// adjusted for a deletion, otherwise the affected markers will already
+	/// have been clamped to the deletion start and appear to fall outside
+	/// the range. Used by the editor to drop stale inlay hints whose
+	/// anchors have been erased by the user (a fresh LSP response will
+	/// repopulate them if still applicable).
+	///
+	/// Returns the number of entries removed.
+	pub fn remove_in_range(
+		&mut self,
+		marker_list: &mut MarkerList,
+		start: usize,
+		end: usize,
+	) -> usize {
+		if start >= end {
+			return 0;
+		}
+
+		let to_remove: Vec<VirtualTextId> = self
+			.texts
+			.iter()
+			.filter_map(|(id, vtext)| {
+				let pos = marker_list.get_position(vtext.marker_id)?;
+				if pos >= start && pos < end { Some(*id) } else { None }
+			})
+			.collect();
+
+		let count = to_remove.len();
+		for id in to_remove {
+			if let Some(vtext) = self.texts.remove(&id) {
+				marker_list.delete(vtext.marker_id);
+			}
+		}
+		if count > 0 {
+			self.bump_version();
+		}
+		count
+	}
+
+	/// Get the number of virtual text entries
+	pub fn len(&self) -> usize {
+		self.texts.len()
+	}
+
+	/// Check if there are no virtual text entries
+	pub fn is_empty(&self) -> bool {
+		self.texts.is_empty()
+	}
+
+	/// Query virtual texts in a byte range
+	///
+	/// Returns a vector of (byte_position, &VirtualText) pairs, sorted by:
+	/// 1. Byte position (ascending)
+	/// 2. Priority (ascending, so higher priority renders later)
+	///
+	/// # Arguments
+	/// * `marker_list` - The marker list to query positions from
+	/// * `start` - Start byte offset (inclusive)
+	/// * `end` - End byte offset (exclusive)
+	pub fn query_range(
+		&self,
+		marker_list: &MarkerList,
+		start: usize,
+		end: usize,
+	) -> Vec<(usize, &VirtualText)> {
+		let mut results: Vec<(usize, &VirtualText)> = self
+			.texts
+			.values()
+			.filter_map(|vtext| {
+				let pos = marker_list.get_position(vtext.marker_id)?;
+				if pos >= start && pos < end { Some((pos, vtext)) } else { None }
+			})
+			.collect();
+
+		// Sort by position, then by priority
+		results.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.priority.cmp(&b.1.priority)));
+
+		results
+	}
+
+	/// Build a lookup map for efficient per-character access during rendering
+	///
+	/// Returns a HashMap where keys are byte positions and values are vectors
+	/// of virtual texts at that position, sorted by priority.
+	pub fn build_lookup(
+		&self,
+		marker_list: &MarkerList,
+		start: usize,
+		end: usize,
+	) -> HashMap<usize, Vec<&VirtualText>> {
+		let mut lookup: HashMap<usize, Vec<&VirtualText>> = HashMap::new();
+
+		for vtext in self.texts.values() {
+			if let Some(pos) = marker_list.get_position(vtext.marker_id) {
+				if pos >= start && pos < end {
+					lookup.entry(pos).or_default().push(vtext);
+				}
+			}
+		}
+
+		// Sort each position's texts by priority
+		for texts in lookup.values_mut() {
+			texts.sort_by_key(|vt| vt.priority);
+		}
+
+		lookup
+	}
+
+	/// Clear all virtual texts in a namespace
+	///
+	/// This is the primary way plugins remove their virtual texts (e.g., before updating blame data).
+	pub fn clear_namespace(
+		&mut self,
+		marker_list: &mut MarkerList,
+		namespace: &VirtualTextNamespace,
+	) {
+		let to_remove: Vec<VirtualTextId> = self
+			.texts
+			.iter()
+			.filter_map(
+				|(id, vtext)| {
+					if vtext.namespace.as_ref() == Some(namespace) { Some(*id) } else { None }
+				},
+			)
+			.collect();
+
+		let removed = !to_remove.is_empty();
+		for id in to_remove {
+			if let Some(vtext) = self.texts.remove(&id) {
+				marker_list.delete(vtext.marker_id);
+			}
+		}
+		if removed {
+			self.bump_version();
+		}
+	}
+
+	/// Remove virtual LINES in `namespace` whose anchor byte (resolved live from
+	/// the marker list) falls in `[start, end)`. The per-line analogue of
+	/// `clear_namespace`, so a plugin can rebuild one line's virtual lines
+	/// without dropping the rest of the namespace. Non-line virtual texts and
+	/// other namespaces are left untouched.
+	pub fn clear_lines_in_range(
+		&mut self,
+		marker_list: &mut MarkerList,
+		namespace: &VirtualTextNamespace,
+		start: usize,
+		end: usize,
+	) {
+		let to_remove: Vec<VirtualTextId> = self
+			.texts
+			.iter()
+			.filter_map(|(id, vtext)| {
+				if !vtext.position.is_line() || vtext.namespace.as_ref() != Some(namespace) {
+					return None;
+				}
+				let pos = marker_list.get_position(vtext.marker_id)?;
+				if pos >= start && pos < end { Some(*id) } else { None }
+			})
+			.collect();
+
+		let removed = !to_remove.is_empty();
+		for id in to_remove {
+			if let Some(vtext) = self.texts.remove(&id) {
+				marker_list.delete(vtext.marker_id);
+			}
+		}
+		if removed {
+			self.bump_version();
+		}
+	}
+
+	/// Query only virtual LINES (LineAbove/LineBelow) in a byte range
+	///
+	/// Used by the render pipeline to inject header/footer lines.
+	/// Returns (byte_position, &VirtualText) pairs sorted by position then priority.
+	pub fn query_lines_in_range(
+		&self,
+		marker_list: &MarkerList,
+		start: usize,
+		end: usize,
+	) -> Vec<(usize, &VirtualText)> {
+		let mut results: Vec<(usize, &VirtualText)> = self
+			.texts
+			.values()
+			.filter(|vtext| vtext.position.is_line())
+			.filter_map(|vtext| {
+				let pos = marker_list.get_position(vtext.marker_id)?;
+				if pos >= start && pos < end { Some((pos, vtext)) } else { None }
+			})
+			.collect();
+
+		// Sort by position, then by priority
+		results.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.priority.cmp(&b.1.priority)));
+
+		results
+	}
+
+	/// Query only INLINE virtual texts (BeforeChar/AfterChar) in a byte range
+	///
+	/// Used by the render pipeline to inject inline hints.
+	pub fn query_inline_in_range(
+		&self,
+		marker_list: &MarkerList,
+		start: usize,
+		end: usize,
+	) -> Vec<(usize, &VirtualText)> {
+		let mut results: Vec<(usize, &VirtualText)> = self
+			.texts
+			.values()
+			.filter(|vtext| vtext.position.is_inline())
+			.filter_map(|vtext| {
+				let pos = marker_list.get_position(vtext.marker_id)?;
+				if pos >= start && pos < end { Some((pos, vtext)) } else { None }
+			})
+			.collect();
+
+		// Sort by position, then by priority
+		results.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.priority.cmp(&b.1.priority)));
+
+		results
+	}
+
+	/// Build a lookup map for virtual LINES, keyed by the line's anchor byte position
+	///
+	/// For each source line, the renderer can quickly check if there are
+	/// LineAbove or LineBelow virtual texts anchored to positions within that line.
+	pub fn build_lines_lookup(
+		&self,
+		marker_list: &MarkerList,
+		start: usize,
+		end: usize,
+	) -> HashMap<usize, Vec<&VirtualText>> {
+		let mut lookup: HashMap<usize, Vec<&VirtualText>> = HashMap::new();
+
+		for vtext in self.texts.values() {
+			if !vtext.position.is_line() {
+				continue;
+			}
+			if let Some(pos) = marker_list.get_position(vtext.marker_id) {
+				if pos >= start && pos < end {
+					lookup.entry(pos).or_default().push(vtext);
+				}
+			}
+		}
+
+		// Sort each position's texts by priority
+		for texts in lookup.values_mut() {
+			texts.sort_by_key(|vt| vt.priority);
+		}
+
+		lookup
+	}
+}
+
+impl Default for VirtualTextManager {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use ratatui::style::Color;
+
+	fn hint_style() -> Style {
+		Style::default().fg(Color::DarkGray)
+	}
+
+	#[test]
+	fn test_new_manager() {
+		let manager = VirtualTextManager::new();
+		assert_eq!(manager.len(), 0);
+		assert!(manager.is_empty());
+	}
+
+	#[test]
+	fn test_add_virtual_text() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		let id = manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		assert_eq!(manager.len(), 1);
+		assert!(!manager.is_empty());
+		assert_eq!(id.0, 0);
+	}
+
+	#[test]
+	fn test_remove_virtual_text() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		let id = manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		assert_eq!(manager.len(), 1);
+
+		let removed = manager.remove(&mut marker_list, id);
+		assert!(removed);
+		assert_eq!(manager.len(), 0);
+
+		// Marker should also be removed
+		assert_eq!(marker_list.marker_count(), 0);
+	}
+
+	#[test]
+	fn test_remove_nonexistent() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		let removed = manager.remove(&mut marker_list, VirtualTextId(999));
+		assert!(!removed);
+	}
+
+	#[test]
+	fn test_clear() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+		manager.add(
+			&mut marker_list,
+			20,
+			": String".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		assert_eq!(manager.len(), 2);
+		assert_eq!(marker_list.marker_count(), 2);
+
+		manager.clear(&mut marker_list);
+
+		assert_eq!(manager.len(), 0);
+		assert_eq!(marker_list.marker_count(), 0);
+	}
+
+	#[test]
+	fn test_query_range() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		// Add three virtual texts at positions 10, 20, 30
+		manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+		manager.add(
+			&mut marker_list,
+			20,
+			": String".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+		manager.add(
+			&mut marker_list,
+			30,
+			": bool".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		// Query range [15, 35) should return positions 20 and 30
+		let results = manager.query_range(&marker_list, 15, 35);
+		assert_eq!(results.len(), 2);
+		assert_eq!(results[0].0, 20);
+		assert_eq!(results[0].1.text, ": String");
+		assert_eq!(results[1].0, 30);
+		assert_eq!(results[1].1.text, ": bool");
+
+		// Query range [0, 15) should return position 10
+		let results = manager.query_range(&marker_list, 0, 15);
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].0, 10);
+		assert_eq!(results[0].1.text, ": i32");
+	}
+
+	#[test]
+	fn test_query_empty_range() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		// Query range with no virtual texts
+		let results = manager.query_range(&marker_list, 100, 200);
+		assert!(results.is_empty());
+	}
+
+	#[test]
+	fn test_priority_ordering() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		// Add multiple virtual texts at the same position with different priorities
+		manager.add(
+			&mut marker_list,
+			10,
+			"low".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+		manager.add(
+			&mut marker_list,
+			10,
+			"high".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			10,
+		);
+		manager.add(
+			&mut marker_list,
+			10,
+			"medium".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			5,
+		);
+
+		let results = manager.query_range(&marker_list, 0, 20);
+		assert_eq!(results.len(), 3);
+		// Should be sorted by priority: 0, 5, 10
+		assert_eq!(results[0].1.text, "low");
+		assert_eq!(results[1].1.text, "medium");
+		assert_eq!(results[2].1.text, "high");
+	}
+
+	#[test]
+	fn test_build_lookup() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+		manager.add(
+			&mut marker_list,
+			10,
+			" = 5".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			1,
+		);
+		manager.add(
+			&mut marker_list,
+			20,
+			": String".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		let lookup = manager.build_lookup(&marker_list, 0, 30);
+
+		assert_eq!(lookup.len(), 2); // Two unique positions
+
+		let at_10 = lookup.get(&10).unwrap();
+		assert_eq!(at_10.len(), 2);
+		assert_eq!(at_10[0].text, ": i32"); // priority 0
+		assert_eq!(at_10[1].text, " = 5"); // priority 1
+
+		let at_20 = lookup.get(&20).unwrap();
+		assert_eq!(at_20.len(), 1);
+		assert_eq!(at_20[0].text, ": String");
+	}
+
+	#[test]
+	fn test_position_tracking_after_insert() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		manager.add(
+			&mut marker_list,
+			10,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		// Insert 5 bytes before position 10
+		marker_list.adjust_for_insert(5, 5);
+
+		// Virtual text should now be at position 15
+		let results = manager.query_range(&marker_list, 0, 20);
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].0, 15);
+	}
+
+	#[test]
+	fn test_position_tracking_after_delete() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		manager.add(
+			&mut marker_list,
+			20,
+			": i32".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		// Delete 5 bytes before position 20 (at position 10)
+		marker_list.adjust_for_delete(10, 5);
+
+		// Virtual text should now be at position 15
+		let results = manager.query_range(&marker_list, 0, 20);
+		assert_eq!(results.len(), 1);
+		assert_eq!(results[0].0, 15);
+	}
+
+	#[test]
+	fn test_clear_lines_in_range_tolerates_offset_anchor() {
+		// The per-line markdown table border pass clears `[byteStart, byteEnd)`
+		// and re-adds. Under the async lines_changed lag a previously-emitted
+		// border rides a few bytes ahead of the event's byteStart, so the clear
+		// must be range-wide (not single-byte) to catch it — otherwise a stale
+		// doubled separator is stranded. This is the regression guard for that.
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+		let ns = VirtualTextNamespace::from_string("md-tb".to_string());
+
+		// Two row borders: one for the row at byte 10, one for the row at 30.
+		manager.add_line(
+			&mut marker_list,
+			10,
+			"─".to_string(),
+			hint_style(),
+			VirtualTextPosition::LineAbove,
+			ns.clone(),
+			0,
+		);
+		manager.add_line(
+			&mut marker_list,
+			30,
+			"─".to_string(),
+			hint_style(),
+			VirtualTextPosition::LineAbove,
+			ns.clone(),
+			0,
+		);
+
+		// An edit inserts 1 byte at pos 5: both borders ride forward to 11 / 31.
+		marker_list.adjust_for_insert(5, 1);
+
+		// The event still reports the first row at its pre-lag span [10, 20). A
+		// single-byte clear at byte 10 would MISS the border now at 11; the
+		// range clear catches it and leaves the far row (at 31) intact.
+		manager.clear_lines_in_range(&mut marker_list, &ns, 10, 20);
+
+		let remaining = manager.query_lines_in_range(&marker_list, 0, 100);
+		assert_eq!(remaining.len(), 1, "offset border in range should be cleared");
+		assert_eq!(remaining[0].0, 31, "the far row's border must survive");
+	}
+
+	#[test]
+	fn test_before_and_after_positions() {
+		let mut marker_list = MarkerList::new();
+		let mut manager = VirtualTextManager::new();
+
+		manager.add(
+			&mut marker_list,
+			10,
+			"/*param=*/".to_string(),
+			hint_style(),
+			VirtualTextPosition::BeforeChar,
+			0,
+		);
+		manager.add(
+			&mut marker_list,
+			10,
+			": Type".to_string(),
+			hint_style(),
+			VirtualTextPosition::AfterChar,
+			0,
+		);
+
+		let lookup = manager.build_lookup(&marker_list, 0, 20);
+		let at_10 = lookup.get(&10).unwrap();
+
+		assert_eq!(at_10.len(), 2);
+		// Both at same position, check they have different positions
+		let before = at_10.iter().find(|vt| vt.position == VirtualTextPosition::BeforeChar);
+		let after = at_10.iter().find(|vt| vt.position == VirtualTextPosition::AfterChar);
+
+		assert!(before.is_some());
+		assert!(after.is_some());
+		assert_eq!(before.unwrap().text, "/*param=*/");
+		assert_eq!(after.unwrap().text, ": Type");
+	}
+}

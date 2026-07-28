@@ -1,0 +1,40 @@
+app-id: io.github.sinelaw.fresh
+runtime: org.freedesktop.Platform
+runtime-version: "24.08"
+sdk: org.freedesktop.Sdk
+command: fresh
+finish-args:
+  # Terminal access
+  - --device=dri
+  # Access to user files
+  - --filesystem=host
+  # For git operations and other tools
+  - --talk-name=org.freedesktop.Flatpak
+  # Network access for LSP servers that may need it
+  - --share=network
+  # For clipboard support
+  - --socket=session-bus
+
+modules:
+  - name: fresh
+    buildsystem: simple
+    build-commands:
+      # Install pre-built binary (built with cargo before flatpak-builder)
+      - install -Dm0755 target/release/fresh ${FLATPAK_DEST}/bin/fresh
+      - install -Dm0644 flatpak/io.github.sinelaw.fresh.desktop ${FLATPAK_DEST}/share/applications/${FLATPAK_ID}.desktop
+      - install -Dm0644 flatpak/io.github.sinelaw.fresh.metainfo.xml ${FLATPAK_DEST}/share/metainfo/${FLATPAK_ID}.metainfo.xml
+      - install -Dm0644 flatpak/io.github.sinelaw.fresh.svg ${FLATPAK_DEST}/share/icons/hicolor/scalable/apps/${FLATPAK_ID}.svg
+      # Install hicolor PNG icons for desktop environments that prefer raster icons
+      - for size in 16x16 22x22 24x24 32x32 48x48 64x64 128x128 256x256 512x512; do install -Dm0644 docs/icons/linux/hicolor/${size}/apps/fresh.png ${FLATPAK_DEST}/share/icons/hicolor/${size}/apps/${FLATPAK_ID}.png; done
+      # Install plugins
+      - mkdir -p ${FLATPAK_DEST}/share/fresh-editor/plugins/lib
+      - mkdir -p ${FLATPAK_DEST}/share/fresh-editor/plugins/examples
+      - cp -r plugins/*.ts plugins/*.json plugins/*.md ${FLATPAK_DEST}/share/fresh-editor/plugins/ 2>/dev/null || true
+      - cp -r plugins/lib/* ${FLATPAK_DEST}/share/fresh-editor/plugins/lib/ 2>/dev/null || true
+      - cp -r plugins/examples/* ${FLATPAK_DEST}/share/fresh-editor/plugins/examples/ 2>/dev/null || true
+      # Install themes
+      - mkdir -p ${FLATPAK_DEST}/share/fresh-editor/themes
+      - cp -r themes/*.json ${FLATPAK_DEST}/share/fresh-editor/themes/ 2>/dev/null || true
+    sources:
+      - type: dir
+        path: ..

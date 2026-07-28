@@ -1,0 +1,46 @@
+[package]
+name = "fb-core"
+description            = "DX TUI file-browser core logic"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-adapter = { path = "../adapter" }
+fb-binding = { path = "../binding" }
+fb-config = { path = "../config" }
+fb-dds = { path = "../dds" }
+fb-emulator = { path = "../emulator" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-parser = { path = "../parser" }
+fb-plugin = { path = "../plugin" }
+fb-proxy = { path = "../proxy" }
+fb-scheduler = { path = "../scheduler" }
+fb-shared = { path = "../shared" }
+fb-vfs = { path = "../vfs" }
+fb-watcher = { path = "../watcher" }
+fb-widgets = { path = "../widgets" }
+
+# External dependencies
+anyhow        = { workspace = true }
+crossterm     = { workspace = true }
+hashbrown     = { workspace = true }
+indexmap      = { workspace = true }
+parking_lot   = { workspace = true }
+ratatui       = { workspace = true }
+tokio         = { workspace = true }
+tokio-stream  = { workspace = true }
+tokio-util    = { workspace = true }
+tracing       = { workspace = true }
+unicode-width = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

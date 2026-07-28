@@ -1,0 +1,55 @@
+[package]
+name = "fb-cli"
+description            = "DX TUI file-browser command-line interface"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-boot = { path = "../boot" }
+fb-dds = { path = "../dds" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-shared = { path = "../shared" }
+fb-shim = { path = "../shim" }
+
+# External dependencies
+anyhow     = { workspace = true }
+clap       = { workspace = true }
+crossterm  = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+tokio      = { workspace = true }
+toml       = { workspace = true }
+twox-hash  = { workspace = true }
+
+[build-dependencies]
+fb-shared = { path = "../shared" }
+
+# External build dependencies
+anyhow                = { workspace = true }
+clap                  = { workspace = true }
+clap_complete         = "4.6.0"
+clap_complete_fig     = "4.5.2"
+clap_complete_nushell = "4.6.0"
+serde                 = { workspace = true }
+serde_json            = { workspace = true }
+vergen-gitcl          = { version = "9.1.0", features = [ "build" ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }
+
+[[bin]]
+name = "ya"
+path = "src/main.rs"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/yazi-{ target }{ archive-suffix }"
+bin-dir = "yazi-{ target }/{ bin }{ binary-ext }"

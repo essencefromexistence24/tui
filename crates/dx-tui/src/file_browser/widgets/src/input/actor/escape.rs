@@ -1,0 +1,26 @@
+use anyhow::Result;
+use fb_macro::{act, succ};
+use fb_shared::data::Data;
+
+use crate::input::{Input, InputMode, op::InputOp};
+
+impl Input {
+	pub fn escape(&mut self, _: ()) -> Result<Data> {
+		let snap = self.snap_mut();
+		match snap.mode {
+			InputMode::Normal => {
+				snap.op = InputOp::None;
+			}
+			InputMode::Insert => {
+				snap.mode = InputMode::Normal;
+				act!(r#move, self, -1)?;
+			}
+			InputMode::Replace => {
+				snap.mode = InputMode::Normal;
+			}
+		}
+		self.snaps.tag(self.limit);
+		succ!();
+	}
+}
+

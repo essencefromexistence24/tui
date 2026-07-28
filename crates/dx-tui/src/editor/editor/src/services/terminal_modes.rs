@@ -1,0 +1,384 @@
+//! Terminal mode management
+//!
+//! This module handles enabling and disabling various terminal modes:
+//! - Raw mode
+//! - Alternate screen
+//! - Mouse capture
+//! - Keyboard enhancement flags
+//! - Bracketed paste
+//!
+//! It provides a `TerminalModes` struct that tracks which modes were enabled
+//! and can restore the terminal to its original state via the `undo()` method.
+//!
+//! The `sequences` submodule provides raw ANSI escape sequence constants
+//! shared between direct mode (crossterm) and client/server mode (raw bytes).
+
+use anyhow::Result;
+use crossterm::{
+	ExecutableCommand,
+	cursor::SetCursorStyle,
+	event::{
+		DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, KeyboardEnhancementFlags,
+		PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+	},
+	terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
+};
+use std::io::{Write, stdout};
+
+/// Raw ANSI escape sequences for terminal mode control.
+///
+/// These constants are the canonical source of truth for terminal escape sequences
+/// used by both direct mode (`TerminalModes`) and client/server mode
+/// (`terminal_setup_sequences` / `terminal_teardown_sequences`).
+pub mod sequences {
+	// Alternate screen
+	pub const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
+	pub const LEAVE_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049l";
+
+	// Mouse tracking (SGR format)
+	pub const ENABLE_MOUSE_CLICK: &[u8] = b"\x1b[?1000h";
+	pub const ENABLE_MOUSE_DRAG: &[u8] = b"\x1b[?1002h";
+	pub const ENABLE_MOUSE_MOTION: &[u8] = b"\x1b[?1003h";
+	pub const ENABLE_SGR_MOUSE: &[u8] = b"\x1b[?1006h";
+	pub const DISABLE_MOUSE_CLICK: &[u8] = b"\x1b[?1000l";
+	pub const DISABLE_MOUSE_DRAG: &[u8] = b"\x1b[?1002l";
+	pub const DISABLE_MOUSE_MOTION: &[u8] = b"\x1b[?1003l";
+	pub const DISABLE_SGR_MOUSE: &[u8] = b"\x1b[?1006l";
+
+	// Focus events
+	pub const ENABLE_FOCUS_EVENTS: &[u8] = b"\x1b[?1004h";
+	pub const DISABLE_FOCUS_EVENTS: &[u8] = b"\x1b[?1004l";
+
+	// Bracketed paste
+	pub const ENABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004h";
+	pub const DISABLE_BRACKETED_PASTE: &[u8] = b"\x1b[?2004l";
+
+	// Cursor
+	pub const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+	pub const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
+	pub const RESET_CURSOR_STYLE: &[u8] = b"\x1b[0 q";
+
+	// Attributes
+	pub const RESET_ATTRIBUTES: &[u8] = b"\x1b[0m";
+}
+
+/// Configuration for keyboard enhancement flags.
+#[derive(Debug, Clone)]
+pub struct KeyboardConfig {
+	/// Enable CSI-u sequences for unambiguous escape code reading.
+	pub disambiguate_escape_codes: bool,
+	/// Enable key repeat and release events.
+	pub report_event_types: bool,
+	/// Enable alternate keycodes.
+	pub report_alternate_keys: bool,
+	/// Represent all keys as CSI-u escape codes.
+	pub report_all_keys_as_escape_codes: bool,
+}
+
+impl Default for KeyboardConfig {
+	fn default() -> Self {
+		Self {
+			disambiguate_escape_codes: true,
+			report_event_types: false,
+			report_alternate_keys: true,
+			report_all_keys_as_escape_codes: false,
+		}
+	}
+}
+
+impl KeyboardConfig {
+	/// Build crossterm KeyboardEnhancementFlags from this config.
+	pub fn to_flags(&self) -> KeyboardEnhancementFlags {
+		let mut flags = KeyboardEnhancementFlags::empty();
+		if self.disambiguate_escape_codes {
+			flags |= KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES;
+		}
+		if self.report_event_types {
+			flags |= KeyboardEnhancementFlags::REPORT_EVENT_TYPES;
+		}
+		if self.report_alternate_keys {
+			flags |= KeyboardEnhancementFlags::REPORT_ALTERNATE_KEYS;
+		}
+		if self.report_all_keys_as_escape_codes {
+			flags |= KeyboardEnhancementFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES;
+		}
+		flags
+	}
+
+	/// Returns true if any flags are enabled.
+	pub fn any_enabled(&self) -> bool {
+		self.disambiguate_escape_codes
+			|| self.report_event_types
+			|| self.report_alternate_keys
+			|| self.report_all_keys_as_escape_codes
+	}
+}
+
+/// Tracks which terminal modes have been enabled and provides cleanup.
+///
+/// Use `TerminalModes::enable()` to set up the terminal, then call `undo()`
+/// to restore the original state (e.g., on exit or panic).
+#[derive(Debug, Default)]
+pub struct TerminalModes {
+	raw_mode: bool,
+	alternate_screen: bool,
+	mouse_capture: bool,
+	keyboard_enhancement: bool,
+	bracketed_paste: bool,
+}
+
+impl TerminalModes {
+	/// Create a new TerminalModes with nothing enabled.
+	pub fn new() -> Self {
+		Self::default()
+	}
+
+	/// Enable all terminal modes, checking support for each.
+	///
+	/// The `keyboard_config` parameter controls which keyboard enhancement flags
+	/// to enable. Pass `None` to use defaults, or `Some(config)` for custom flags.
+	///
+	/// Returns Ok(Self) with tracked state of what was enabled.
+	/// On error, automatically undoes any partially enabled modes.
+	pub fn enable(keyboard_config: Option<&KeyboardConfig>) -> Result<Self> {
+		let mut modes = Self::new();
+		let keyboard_config = keyboard_config.cloned().unwrap_or_default();
+
+		// Enable raw mode
+		if let Err(e) = enable_raw_mode() {
+			tracing::error!("Failed to enable raw mode: {}", e);
+			return Err(e.into());
+		}
+		modes.raw_mode = true;
+		tracing::debug!("Enabled raw mode");
+
+		// Enable alternate screen BEFORE keyboard enhancement.
+		// This is critical: the Kitty keyboard protocol specifies that main and
+		// alternate screens maintain independent keyboard mode stacks. If we push
+		// keyboard enhancement before entering alternate screen, it goes to the
+		// main screen's stack. Then when we pop before leaving (in undo), we pop
+		// from the alternate screen's stack, leaving the main screen corrupted.
+		// See: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+		if let Err(e) = stdout().execute(EnterAlternateScreen) {
+			tracing::error!("Failed to enter alternate screen: {}", e);
+			modes.undo();
+			return Err(e.into());
+		}
+		modes.alternate_screen = true;
+		tracing::debug!("Entered alternate screen");
+
+		// Push keyboard enhancement flags (if any are configured).
+		//
+		// Must happen AFTER entering alternate screen so the flags land on
+		// the alternate screen's stack, not the main screen's.
+		//
+		// We push optimistically — no detection probe. The kitty keyboard
+		// protocol [1] is explicit that push/pop CSIs are silently ignored
+		// by terminals that don't implement it, so an unconditional push
+		// is safe; we still pop in `undo()` to leave the user's terminal
+		// exactly as we found it.
+		//
+		// The detection probe `crossterm::supports_keyboard_enhancement`
+		// exists, but at version 0.29 it has a 2-second timeout that
+		// fires on every terminal answering the universal `\x1B[c`
+		// (primary device attributes) query but not the kitty-specific
+		// `\x1B[?u` query — i.e., gnome-terminal, konsole, xterm, Apple
+		// Terminal, screen, tmux without kitty passthrough, etc. That's
+		// a 2 s hang on every startup for those users, with no upside
+		// (the editor still works fine without the enhancement).
+		//
+		// [1] https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+		if keyboard_config.any_enabled() {
+			let flags = keyboard_config.to_flags();
+			if let Err(e) = stdout().execute(PushKeyboardEnhancementFlags(flags)) {
+				tracing::info!("Failed to push keyboard enhancement flags: {}", e);
+				// Non-fatal, continue without it
+			} else {
+				modes.keyboard_enhancement = true;
+				tracing::debug!("Pushed keyboard enhancement flags optimistically: {:?}", flags);
+			}
+		} else {
+			tracing::debug!("Keyboard enhancement disabled by config");
+		}
+
+		// Enable mouse capture.
+		// On Windows, skip crossterm's EnableMouseCapture — it replaces the
+		// entire console mode with ENABLE_MOUSE_INPUT (removing VT input mode)
+		// and doesn't write VT tracking sequences. Mouse is handled by
+		// win_vt_input::enable_vt_input() + enable_mouse_tracking() instead.
+		#[cfg(not(windows))]
+		{
+			if let Err(e) = stdout().execute(EnableMouseCapture) {
+				tracing::warn!("Failed to enable mouse capture: {}", e);
+				// Non-fatal, continue without it
+			} else {
+				modes.mouse_capture = true;
+				tracing::debug!("Enabled mouse capture");
+			}
+		}
+		#[cfg(windows)]
+		{
+			modes.mouse_capture = true;
+			tracing::debug!("Skipped crossterm EnableMouseCapture on Windows (handled by win_vt_input)");
+		}
+
+		// Enable bracketed paste
+		if let Err(e) = stdout().execute(EnableBracketedPaste) {
+			tracing::warn!("Failed to enable bracketed paste: {}", e);
+			// Non-fatal, continue without it
+		} else {
+			modes.bracketed_paste = true;
+			tracing::debug!("Enabled bracketed paste mode");
+		}
+
+		Ok(modes)
+	}
+
+	/// Restore terminal to original state by disabling all enabled modes.
+	///
+	/// This is safe to call multiple times - it tracks what was enabled
+	/// and only disables those modes.
+	#[allow(clippy::let_underscore_must_use)]
+	pub fn undo(&mut self) {
+		// Best-effort terminal teardown — if stdout is broken, we can't recover.
+		// Disable mouse capture
+		// On Windows, skip crossterm's DisableMouseCapture (same reason as enable).
+		// Mouse cleanup is handled by win_vt_input::disable_mouse_tracking() +
+		// restore_console_mode() in the event loop.
+		if self.mouse_capture {
+			#[cfg(not(windows))]
+			let _ = stdout().execute(DisableMouseCapture);
+			self.mouse_capture = false;
+			tracing::debug!("Disabled mouse capture");
+		}
+
+		// Disable bracketed paste
+		if self.bracketed_paste {
+			let _ = stdout().execute(DisableBracketedPaste);
+			self.bracketed_paste = false;
+			tracing::debug!("Disabled bracketed paste");
+		}
+
+		// Reset cursor style to default
+		let _ = stdout().execute(SetCursorStyle::DefaultUserShape);
+
+		// Reset terminal cursor color
+		crate::view::theme::Theme::reset_terminal_cursor_color();
+
+		// Pop keyboard enhancement flags
+		if self.keyboard_enhancement {
+			let _ = stdout().execute(PopKeyboardEnhancementFlags);
+			self.keyboard_enhancement = false;
+			tracing::debug!("Popped keyboard enhancement flags");
+		}
+
+		// Disable raw mode (before leaving alternate screen for cleaner output)
+		if self.raw_mode {
+			let _ = disable_raw_mode();
+			self.raw_mode = false;
+			tracing::debug!("Disabled raw mode");
+		}
+
+		// Leave alternate screen last
+		if self.alternate_screen {
+			let _ = stdout().execute(LeaveAlternateScreen);
+			self.alternate_screen = false;
+			tracing::debug!("Left alternate screen");
+		}
+
+		// Flush stdout to ensure all escape sequences are sent
+		let _ = stdout().flush();
+	}
+
+	/// Returns true if raw mode is enabled.
+	pub fn raw_mode_enabled(&self) -> bool {
+		self.raw_mode
+	}
+
+	/// Returns true if keyboard enhancement is enabled.
+	pub fn keyboard_enhancement_enabled(&self) -> bool {
+		self.keyboard_enhancement
+	}
+
+	/// Returns true if mouse capture is enabled.
+	pub fn mouse_capture_enabled(&self) -> bool {
+		self.mouse_capture
+	}
+
+	/// Returns true if bracketed paste is enabled.
+	pub fn bracketed_paste_enabled(&self) -> bool {
+		self.bracketed_paste
+	}
+
+	/// Returns true if alternate screen is enabled.
+	pub fn alternate_screen_enabled(&self) -> bool {
+		self.alternate_screen
+	}
+}
+
+impl Drop for TerminalModes {
+	fn drop(&mut self) {
+		self.undo();
+	}
+}
+
+/// Suspend the editor process with SIGTSTP and restore terminal modes on resume.
+///
+/// Tears the terminal back down to a normal cooked-mode shell, raises SIGTSTP
+/// so the shell regains control (the user can then `fg` to resume), and on
+/// resume re-enables the same set of modes we started with.
+///
+/// The caller is responsible for requesting a full redraw after this returns —
+/// the screen has been wiped and repainted by the shell.
+#[cfg(unix)]
+pub fn suspend_and_resume(
+	terminal_modes: &mut TerminalModes,
+	keyboard_config: Option<&KeyboardConfig>,
+) -> Result<()> {
+	use nix::sys::signal::{Signal, raise};
+
+	terminal_modes.undo();
+
+	// Block until the shell sends SIGCONT (typically via `fg`).
+	raise(Signal::SIGTSTP)?;
+
+	// Re-enable everything we tore down. If enable() fails we drop the
+	// old (empty) TerminalModes and return the error — the caller can
+	// surface it and still keep running in a degraded state.
+	let restored = TerminalModes::enable(keyboard_config)?;
+	*terminal_modes = restored;
+	Ok(())
+}
+
+/// Unconditionally restore terminal state without tracking.
+///
+/// This is intended for use in panic hooks where we don't have access
+/// to the TerminalModes instance. It attempts to disable all modes
+/// regardless of whether they were actually enabled.
+#[allow(clippy::let_underscore_must_use)]
+pub fn emergency_cleanup() {
+	// Best-effort emergency terminal restore — if stdout is broken, we can't recover.
+	// Disable mouse capture
+	let _ = stdout().execute(DisableMouseCapture);
+
+	// Disable bracketed paste
+	let _ = stdout().execute(DisableBracketedPaste);
+
+	// Reset cursor style to default
+	let _ = stdout().execute(SetCursorStyle::DefaultUserShape);
+
+	// Reset terminal cursor color
+	crate::view::theme::Theme::reset_terminal_cursor_color();
+
+	// Pop keyboard enhancement flags
+	let _ = stdout().execute(PopKeyboardEnhancementFlags);
+
+	// Disable raw mode
+	let _ = disable_raw_mode();
+
+	// Leave alternate screen
+	let _ = stdout().execute(LeaveAlternateScreen);
+
+	// Flush stdout
+	let _ = stdout().flush();
+}

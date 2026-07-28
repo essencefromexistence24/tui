@@ -1,0 +1,34 @@
+use anyhow::bail;
+use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
+use fb_fs::FilesOp;
+use fb_shared::event::ActionCow;
+
+#[derive(Debug)]
+pub struct UpdateFilesOpt {
+	pub op: FilesOp,
+}
+
+impl TryFrom<ActionCow> for UpdateFilesOpt {
+	type Error = anyhow::Error;
+
+	fn try_from(mut a: ActionCow) -> Result<Self, Self::Error> {
+		let Some(op) = a.take_any("op") else {
+			bail!("Invalid 'op' in UpdateFilesOpt");
+		};
+
+		Ok(Self { op })
+	}
+}
+
+impl From<FilesOp> for UpdateFilesOpt {
+	fn from(op: FilesOp) -> Self { Self { op } }
+}
+
+impl FromLua for UpdateFilesOpt {
+	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+}
+
+impl IntoLua for UpdateFilesOpt {
+	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+}
+

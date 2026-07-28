@@ -1,0 +1,29 @@
+[package]
+name = "fb-emulator"
+description            = "DX TUI file-browser terminal emulator database"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-macro = { path = "../macro" }
+fb-shared = { path = "../shared" }
+fb-tty = { path = "../tty" }
+
+# External dependencies
+anyhow     = { workspace = true }
+crossterm  = { workspace = true }
+either     = { workspace = true }
+scopeguard = { workspace = true }
+tokio      = { workspace = true }
+tracing    = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

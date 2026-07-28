@@ -1,0 +1,26 @@
+use anyhow::Result;
+use fb_actor::Ctx;
+use fb_macro::act;
+use fb_parser::app::ReflowOpt;
+use fb_shared::data::Data;
+
+use crate::Actor;
+
+pub struct Resize;
+
+impl Actor for Resize {
+	type Options = ReflowOpt;
+
+	const NAME: &str = "resize";
+
+	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+		act!(app:reflow, cx, opt)?;
+
+		cx.current_mut().arrow(0);
+		cx.parent_mut().map(|f| f.arrow(0));
+		cx.current_mut().sync_page(true);
+
+		act!(mgr:peek, cx)
+	}
+}
+

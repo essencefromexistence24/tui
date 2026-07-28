@@ -1,0 +1,31 @@
+[package]
+name = "dx-languages"
+version = "1.0.0"
+edition = "2021"
+description = "Language support and syntax highlighting for Dx editor"
+
+[dependencies]
+tree-sitter = "0.26.5"
+tree-sitter-highlight = "0.26.3"
+# Only the grammars Fresh must use tree-sitter for are kept: languages syntect
+# ships no highlighting for — JavaScript, TypeScript, JSON (also serves JSONC),
+# Templ — plus Go, which the Templ grammar extends. The other grammars were
+# removed: those languages are highlighted by syntect and indented by the regex
+# indent-rules tier, which dropped ~18 MB of parse tables from the binary.
+tree-sitter-javascript = { version = "0.25.0", optional = true }
+tree-sitter-typescript = { version = "0.23.2", optional = true }
+tree-sitter-go = { version = "0.25.0", optional = true }
+tree-sitter-json = { version = "0.24.8", optional = true }
+tree-sitter-templ = { version = "2.2.0", optional = true }
+
+[features]
+# Enabling tree-sitter-templ also requires tree-sitter-go: the templ grammar is
+# built on top of Go and reuses Go's highlight queries for the embedded Go.
+tree-sitter-templ = ["dep:tree-sitter-templ", "tree-sitter-go"]
+
+# The grammars Fresh bundles — the must-keep set described above. This is what
+# the editor's `tree-sitter` feature enables.
+bundled-languages = [
+    "tree-sitter-javascript", "tree-sitter-typescript",
+    "tree-sitter-json", "tree-sitter-go", "tree-sitter-templ",
+]

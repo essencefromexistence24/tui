@@ -1,0 +1,55 @@
+use anyhow::Result;
+use mlua::Value;
+use ratatui::layout::Position;
+use tracing::error;
+use fb_actor::lives::Lives;
+use fb_config::LAYOUT;
+use fb_macro::{render, succ};
+use fb_parser::app::ReflowOpt;
+use fb_shared::data::Data;
+
+use crate::{Actor, Ctx};
+
+pub struct Reflow;
+
+impl Actor for Reflow {
+	type Options = ReflowOpt;
+
+	const NAME: &str = "reflow";
+
+	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+		let Some(size) = cx.term.as_ref().and_then(|t| t.size().ok()) else { succ!() };
+		let mut layout = LAYOUT.get();
+
+		let result = Lives::scope(cx.core, || {
+			let comps = (opt.reflow)((Position::ORIGIN, size).into())?;
+
+			for v in comps.sequence_values::<Value>() {
+				let Value::Table(t) = v? else {
+					error!("`reflow()` must return a table of components");
+					continue;
+				};
+
+				let id: mlua::String = t.get("_id")?;
+				match &*id.as_bytes() {
+					b"current" => layout.current = *t.raw_get::<fb_binding::elements::Rect>("_area")?,
+					b"preview" => layout.preview = *t.raw_get::<fb_binding::elements::Rect>("_area")?,
+					b"progress" => layout.progress = *t.raw_get::<fb_binding::elements::Rect>("_area")?,
+					_ => {}
+				}
+			}
+			Ok(())
+		});
+
+		if layout != LAYOUT.get() {
+			LAYOUT.set(layout);
+			render!();
+		}
+
+		if let Err(ref e) = result {
+			error!("Failed to `reflow()` the `Root` component:\n{e}");
+		}
+		succ!();
+	}
+}
+

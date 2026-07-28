@@ -1,0 +1,33 @@
+[package]
+name = "fb-term"
+description            = "DX TUI file-browser terminal extensions"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-config = { path = "../config" }
+fb-emulator = { path = "../emulator" }
+fb-macro = { path = "../macro" }
+fb-shared = { path = "../shared" }
+fb-shim = { path = "../shim" }
+fb-tty = { path = "../tty" }
+
+# External dependencies
+anyhow    = { workspace = true }
+crossterm = { workspace = true }
+ratatui   = { workspace = true }
+tokio     = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

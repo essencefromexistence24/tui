@@ -1,0 +1,3954 @@
+//! Settings state management
+//!
+//! Tracks the current state of the settings UI, pending changes,
+//! and provides methods for reading/writing config values.
+
+use super::entry_dialog::EntryDialogState;
+use super::items::{SettingControl, SettingItem, SettingsPage, control_to_value};
+use super::layout::SettingsHit;
+use super::schema::{SettingCategory, SettingSchema, parse_schema};
+use super::search::{DeepMatch, SearchResult, search_settings};
+use crate::config::Config;
+use crate::config_io::ConfigLayer;
+use crate::view::controls::FocusState;
+use crate::view::controls::text_input::TextInputState;
+use crate::view::ui::{FocusManager, ScrollItem, ScrollablePanel};
+use std::collections::HashMap;
+
+/// Set a value at a JSON pointer path, creating intermediate objects as
+/// needed. Mirrors `config_io::set_json_pointer` (kept private there).
+fn set_json_pointer_create(root: &mut serde_json::Value, pointer: &str, value: serde_json::Value) {
+	if pointer.is_empty() || pointer == "/" {
+		*root = value;
+		return;
+	}
+	let parts: Vec<&str> = pointer.trim_start_matches('/').split('/').collect();
+	let mut current = root;
+	for (i, part) in parts.iter().enumerate() {
+		if i == parts.len() - 1 {
+			if let serde_json::Value::Object(map) = current {
+				map.insert(part.to_string(), value);
+			}
+			return;
+		}
+		if let serde_json::Value::Object(map) = current {
+			if !map.contains_key(*part) {
+				map.insert(part.to_string(), serde_json::Value::Object(Default::default()));
+			}
+			current = map.get_mut(*part).unwrap();
+		} else {
+			return;
+		}
+	}
+}
+
+/// Info needed to open a nested dialog (extracted before mutable borrow)
+enum NestedDialogInfo {
+	MapEntry {
+		key: String,
+		value: serde_json::Value,
+		schema: SettingSchema,
+		path: String,
+		is_new: bool,
+		no_delete: bool,
+	},
+	ArrayItem {
+		index: Option<usize>,
+		value: serde_json::Value,
+		schema: SettingSchema,
+		path: String,
+		is_new: bool,
+	},
+}
+
+/// Which panel currently has keyboard focus
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FocusPanel {
+	/// Category list (left panel)
+	#[default]
+	Categories,
+	/// Settings items (right panel)
+	Settings,
+	/// Footer buttons (Reset/Save/Cancel)
+	Footer,
+}
+
+/// The state of the settings UI
+#[derive(Debug)]
+pub struct SettingsState {
+	/// Parsed schema categories
+	categories: Vec<SettingCategory>,
+	/// Pages built from categories
+	pub pages: Vec<SettingsPage>,
+	/// Currently selected category index
+	pub selected_category: usize,
+	/// Currently selected item index within the category
+	pub selected_item: usize,
+	/// Which panel currently has keyboard focus
+	pub focus: FocusManager<FocusPanel>,
+	/// Selected footer button index (0=Reset, 1=Save, 2=Cancel)
+	pub footer_button_index: usize,
+	/// Pending changes (path -> new value)
+	pub pending_changes: HashMap<String, serde_json::Value>,
+	/// The original config value (for detecting changes)
+	original_config: serde_json::Value,
+	/// Whether the settings panel is visible
+	pub visible: bool,
+	/// The search filter's text field. Backed by the same `TextInputState`
+	/// control the rest of the Settings dialog uses, so the filter gets
+	/// grapheme-aware cursor movement (arrow keys, Home/End, mid-string
+	/// insert/delete) for free instead of the old append-only string.
+	/// Read the text via [`SettingsState::search_query`] and the caret via
+	/// [`SettingsState::search_cursor`].
+	pub search_input: TextInputState,
+	/// Whether search is active
+	pub search_active: bool,
+	/// Current search results
+	pub search_results: Vec<SearchResult>,
+	/// Selected search result index
+	pub selected_search_result: usize,
+	/// Scroll offset for search results (first visible result index)
+	pub search_scroll_offset: usize,
+	/// Maximum number of visible search results (set during render)
+	pub search_max_visible: usize,
+	/// Whether the unsaved changes confirmation dialog is showing
+	pub showing_confirm_dialog: bool,
+	/// Selected option in confirmation dialog (0=Save, 1=Discard, 2=Cancel)
+	pub confirm_dialog_selection: usize,
+	/// Hovered option in confirmation dialog (for mouse hover feedback)
+	pub confirm_dialog_hover: Option<usize>,
+	/// Whether the reset confirmation dialog is showing
+	pub showing_reset_dialog: bool,
+	/// Selected option in reset dialog (0=Reset, 1=Cancel)
+	pub reset_dialog_selection: usize,
+	/// Hovered option in reset dialog (for mouse hover feedback)
+	pub reset_dialog_hover: Option<usize>,
+	/// Whether the "Discard changes?" prompt is showing over the
+	/// currently-open entry dialog. Set when the user presses Esc
+	/// on a dialog that has uncommitted edits; cleared by either
+	/// button choice.
+	pub showing_entry_discard_confirm: bool,
+	/// Selection in the entry-discard prompt: 0 = Keep editing,
+	/// 1 = Discard.
+	pub entry_discard_confirm_selection: usize,
+	/// Whether the "Delete <name>?" prompt is showing over the
+	/// currently-open entry dialog. Set when the user activates
+	/// the Delete button; deletion only fires once they confirm.
+	pub showing_entry_delete_confirm: bool,
+	/// Selection in the entry-delete prompt: 0 = Cancel (safe
+	/// default), 1 = Delete.
+	pub entry_delete_confirm_selection: usize,
+	/// Key being deleted, displayed in the confirm prompt.
+	pub entry_delete_target_name: String,
+	/// True when the entry-delete prompt is targeting an array item.
+	/// The confirm uses a generic "item" phrasing in this case since a
+	/// numeric index in `entry_delete_target_name` would mean nothing
+	/// to the user.
+	pub entry_delete_target_is_array_item: bool,
+	/// Whether the help overlay is showing
+	pub showing_help: bool,
+	/// Scrollable panel for settings items
+	pub scroll_panel: ScrollablePanel,
+	/// Sub-focus index within the selected item (for TextList/Map navigation)
+	pub sub_focus: Option<usize>,
+	/// Whether we're in text editing mode (for TextList controls)
+	pub editing_text: bool,
+	/// Current mouse hover position (for hover feedback)
+	pub hover_position: Option<(u16, u16)>,
+	/// Current hover hit result (computed from hover_position and cached layout)
+	pub hover_hit: Option<SettingsHit>,
+	/// Stack of entry dialogs (for nested editing of Maps/ObjectArrays)
+	/// The top of the stack (last element) is the currently active dialog.
+	pub entry_dialog_stack: Vec<EntryDialogState>,
+	/// Which configuration layer to save changes to.
+	/// User layer is the default (global settings).
+	/// Project layer saves to the current project's .fresh/config.json.
+	pub target_layer: ConfigLayer,
+	/// Snapshot of plugin-registered status-bar tokens (key → display title).
+	/// Refreshed via `set_status_bar_tokens` when settings are opened.
+	available_status_bar_tokens: HashMap<String, String>,
+	/// Source layer for each setting path (where the value came from).
+	/// Maps JSON pointer paths (e.g., "/editor/tab_size") to their source layer.
+	/// Values not in this map come from system defaults.
+	pub layer_sources: HashMap<String, ConfigLayer>,
+	/// Paths to be removed from the current layer on save.
+	/// When a user "resets" a setting, we remove it from the delta rather than
+	/// setting it to the schema default.
+	pub pending_deletions: std::collections::HashSet<String>,
+	/// Last known layout width for the body panel. Set during render so input
+	/// handlers (which run between renders) can recompute scroll math without
+	/// access to the frame area.
+	pub layout_width: u16,
+	/// Visual style applied to every item in this state. Toggle with
+	/// [`Self::set_item_style`] to swap between card / flat presentation.
+	pub item_style: super::items::ItemBoxStyle,
+	/// Categories whose sections are currently expanded in the left-panel
+	/// tree view. Only categories with `sections.len() > 1` are eligible —
+	/// a category with zero or one section stays flat.
+	pub expanded_categories: std::collections::HashSet<usize>,
+	/// Scroll state for the categories panel itself, separate from the body
+	/// panel's `scroll_panel`. Drives mouse-wheel + page-up/down on the left.
+	pub categories_scroll: ScrollablePanel,
+	/// Cursor position inside the currently-selected category's tree row.
+	/// `None` = cursor is on the category row itself (the category row
+	/// shows the `>` indicator).
+	/// `Some(s)` = cursor is on the s-th section row of the current
+	/// category (that section row shows the `>` indicator).
+	///
+	/// Tracked explicitly so it is independent of the body's scroll
+	/// position — pressing Right to expand a category keeps the cursor
+	/// on the category, pressing Down then walks into the sections,
+	/// and scrolling the body updates this so Up/Down resumes from the
+	/// section the user is actually looking at.
+	pub tree_cursor_section: Option<usize>,
+	/// Snapshot of a plain `Text` control taken when its edit began, so Esc
+	/// can revert an abandoned edit to exactly what it was. `None` whenever a
+	/// Text edit is not in progress. See [`Self::start_editing`] /
+	/// [`Self::revert_editing`].
+	text_edit_snapshot: Option<TextEditSnapshot>,
+	/// Persistent widget instance-state store for the mounted-panel
+	/// migration. Keyed by control field name (JSON pointer). Each entry
+	/// carries the runtime-owned interaction state for that control —
+	/// TextEdit cursor + selection, Number edit buffer, Dropdown open
+	/// flag, DualList cursors. Input handlers evolve these entries by
+	/// routing keys through the widget runtime; render reads them as the
+	/// `prev` instance-state so cursor/selection/edit affordances persist
+	/// across frames. Empty until a control's input is routed through the
+	/// runtime (behavior is then identical to the old per-control State).
+	pub widget_states: std::collections::HashMap<String, crate::widgets::WidgetInstanceState>,
+}
+
+/// Pre-edit state of a plain `Text` setting, captured by `start_editing` and
+/// restored by `revert_editing` (the Esc path). Enter/Tab commit instead and
+/// clear it. Reverting has to undo not just the control's typed buffer but also
+/// the pending-change bookkeeping, since a mid-edit `on_value_changed` (e.g.
+/// from Delete) can flush the buffer into `pending_changes` before Esc.
+#[derive(Debug)]
+struct TextEditSnapshot {
+	/// JSON pointer of the edited setting (`current_item().path`).
+	path: String,
+	/// The control exactly as it was before the first keystroke.
+	control: SettingControl,
+	/// `item.modified` before the edit.
+	modified: bool,
+	/// `item.layer_source` before the edit.
+	layer_source: ConfigLayer,
+	/// `item.is_null` before the edit.
+	is_null: bool,
+	/// The `pending_changes` entry for `path` before the edit (`None` = absent).
+	pending: Option<serde_json::Value>,
+	/// Whether `path` was in `pending_deletions` before the edit.
+	was_pending_deletion: bool,
+}
+
+/// One row of the left-panel tree. Either a top-level category, or a section
+/// row that appears under an expanded category.
+///
+/// Sections only appear when their owning category is in
+/// `expanded_categories` AND has more than one section — single-section
+/// categories show their items flat without a tree node.
+#[derive(Debug, Clone, Copy)]
+pub enum TreeRow {
+	Category { idx: usize, expandable: bool, expanded: bool },
+	Section { cat_idx: usize, section_idx: usize },
+}
+
+impl crate::view::ui::ScrollItem for TreeRow {
+	fn height(&self, _width: u16) -> u16 {
+		1
+	}
+}
+
+impl SettingsState {
+	/// Create a new settings state from schema and current config
+	pub fn new(schema_json: &str, config: &Config) -> Result<Self, serde_json::Error> {
+		Self::new_with_plugin_schemas(schema_json, config, &HashMap::new())
+	}
+
+	/// Same as [`Self::new`], plus inject per-plugin config schemas as
+	/// subcategories of a "Plugin Settings" top-level category. Only
+	/// enabled plugins with a schema are rendered.
+	pub fn new_with_plugin_schemas(
+		schema_json: &str,
+		config: &Config,
+		plugin_schemas: &HashMap<String, serde_json::Value>,
+	) -> Result<Self, serde_json::Error> {
+		let mut categories = parse_schema(schema_json)?;
+
+		// Collect enabled plugins that have a schema sidecar.
+		let mut enabled_with_schema: Vec<String> = config
+			.plugins
+			.iter()
+			.filter_map(|(name, cfg)| {
+				if cfg.enabled && plugin_schemas.contains_key(name) { Some(name.clone()) } else { None }
+			})
+			.collect();
+		enabled_with_schema.sort();
+		tracing::trace!(
+			"SettingsState built: total plugin_schemas={}, enabled_with_schema={:?}",
+			plugin_schemas.len(),
+			enabled_with_schema
+		);
+		super::schema::append_plugin_settings_category(
+			&mut categories,
+			plugin_schemas,
+			&enabled_with_schema,
+		);
+
+		let config_value = serde_json::to_value(config)?;
+		let layer_sources = HashMap::new(); // Populated via set_layer_sources()
+		let target_layer = ConfigLayer::User; // Default to user-global settings
+		let available_status_bar_tokens: HashMap<String, String> = HashMap::new();
+		let pages = super::items::build_pages(
+			&categories,
+			&config_value,
+			&layer_sources,
+			target_layer,
+			&available_status_bar_tokens,
+		);
+
+		Ok(Self {
+			categories,
+			pages,
+			selected_category: 0,
+			selected_item: 0,
+			focus: FocusManager::new(vec![
+				FocusPanel::Categories,
+				FocusPanel::Settings,
+				FocusPanel::Footer,
+			]),
+			footer_button_index: 2, // Default to Save button (0=Layer, 1=Reset, 2=Save, 3=Cancel)
+			pending_changes: HashMap::new(),
+			original_config: config_value,
+			visible: false,
+			search_input: TextInputState::new("").with_focus(FocusState::Focused),
+			search_active: false,
+			search_results: Vec::new(),
+			selected_search_result: 0,
+			search_scroll_offset: 0,
+			search_max_visible: 5, // Default, updated during render
+			showing_confirm_dialog: false,
+			confirm_dialog_selection: 0,
+			confirm_dialog_hover: None,
+			showing_reset_dialog: false,
+			reset_dialog_selection: 0,
+			reset_dialog_hover: None,
+			showing_entry_discard_confirm: false,
+			entry_discard_confirm_selection: 0,
+			showing_entry_delete_confirm: false,
+			entry_delete_confirm_selection: 0,
+			entry_delete_target_name: String::new(),
+			entry_delete_target_is_array_item: false,
+			showing_help: false,
+			scroll_panel: ScrollablePanel::new(),
+			sub_focus: None,
+			editing_text: false,
+			available_status_bar_tokens,
+			hover_position: None,
+			hover_hit: None,
+			entry_dialog_stack: Vec::new(),
+			target_layer,
+			layer_sources,
+			pending_deletions: std::collections::HashSet::new(),
+			layout_width: 0,
+			item_style: super::items::ItemBoxStyle::default(),
+			expanded_categories: std::collections::HashSet::new(),
+			categories_scroll: ScrollablePanel::new(),
+			tree_cursor_section: None,
+			text_edit_snapshot: None,
+			widget_states: std::collections::HashMap::new(),
+		})
+	}
+
+	/// Get the currently focused panel
+	#[inline]
+	pub fn focus_panel(&self) -> FocusPanel {
+		self.focus.current().unwrap_or_default()
+	}
+
+	/// Whether Nerd Font icons are enabled (`editor.nerd_font_icons`).
+	///
+	/// Checks the unsaved pending value first so toggling the setting
+	/// inside the Settings dialog previews immediately, then falls back
+	/// to the value the dialog was opened with.
+	pub fn nerd_font_icons_enabled(&self) -> bool {
+		const PATH: &str = "/editor/nerd_font_icons";
+		self
+			.pending_changes
+			.get(PATH)
+			.or_else(|| self.original_config.pointer(PATH))
+			.and_then(|v| v.as_bool())
+			.unwrap_or(false)
+	}
+
+	/// Show the settings panel
+	pub fn show(&mut self) {
+		self.visible = true;
+		self.focus.set(FocusPanel::Categories);
+		self.footer_button_index = 2; // Default to Save button (0=Layer, 1=Reset, 2=Save, 3=Cancel)
+		self.selected_category = 0;
+		self.selected_item = 0;
+		self.scroll_panel = ScrollablePanel::new();
+		self.sub_focus = None;
+		// Reset all dialog states so re-opening settings starts clean
+		self.showing_confirm_dialog = false;
+		self.confirm_dialog_selection = 0;
+		self.confirm_dialog_hover = None;
+		self.showing_reset_dialog = false;
+		self.reset_dialog_selection = 0;
+		self.reset_dialog_hover = None;
+		self.showing_help = false;
+		// Runtime-owned widget interaction state is per-session; start clean.
+		self.widget_states.clear();
+	}
+
+	/// Rebuild pages with current state
+	fn rebuild_pages(&mut self) {
+		self.pages = super::items::build_pages(
+			&self.categories,
+			&self.original_config,
+			&self.layer_sources,
+			self.target_layer,
+			&self.available_status_bar_tokens,
+		);
+	}
+
+	fn paths_intersect(a: &str, b: &str) -> bool {
+		if a.is_empty() || b.is_empty() {
+			return a == b;
+		}
+		if a == b {
+			return true;
+		}
+		let a_prefix = format!("{}/", a.trim_end_matches('/'));
+		let b_prefix = format!("{}/", b.trim_end_matches('/'));
+		a.starts_with(&b_prefix) || b.starts_with(&a_prefix)
+	}
+
+	/// True when this JSON pointer has an unsaved change in the current
+	/// Settings session. This is intentionally separate from `item.modified`,
+	/// which tracks whether a value is defined in the target config layer.
+	pub fn path_has_pending_change(&self, path: &str) -> bool {
+		self.pending_changes.keys().any(|pending| Self::paths_intersect(path, pending))
+			|| self.pending_deletions.iter().any(|pending| Self::paths_intersect(path, pending))
+	}
+
+	pub fn page_has_pending_changes(&self, page_idx: usize) -> bool {
+		let Some(page) = self.pages.get(page_idx) else {
+			return false;
+		};
+		(!page.path.is_empty() && self.path_has_pending_change(&page.path))
+			|| page.items.iter().any(|item| self.path_has_pending_change(&item.path))
+	}
+
+	fn schema_default_for_path(&self, path: &str) -> Option<serde_json::Value> {
+		self
+			.pages
+			.iter()
+			.flat_map(|page| &page.items)
+			.find(|item| item.path == path)
+			.and_then(|item| item.default.clone())
+	}
+
+	/// Return the value this setting had when Settings was opened.
+	///
+	/// Built-in settings are usually materialized in `original_config`.
+	/// Plugin settings can exist only as schema defaults until the user saves
+	/// an override, so the schema default is part of the original effective
+	/// value for dirty-state comparisons.
+	fn effective_original_value(&self, path: &str) -> Option<serde_json::Value> {
+		self.original_config.pointer(path).cloned().or_else(|| self.schema_default_for_path(path))
+	}
+
+	fn value_matches_effective_original(&self, path: &str, value: &serde_json::Value) -> bool {
+		self.effective_original_value(path).as_ref() == Some(value)
+	}
+
+	/// Hide the settings panel
+	pub fn hide(&mut self) {
+		self.visible = false;
+		self.search_active = false;
+		self.search_input.clear();
+	}
+
+	/// Get the current entry dialog (top of stack), if any
+	pub fn entry_dialog(&self) -> Option<&EntryDialogState> {
+		self.entry_dialog_stack.last()
+	}
+
+	/// Get the current entry dialog mutably (top of stack), if any
+	pub fn entry_dialog_mut(&mut self) -> Option<&mut EntryDialogState> {
+		self.entry_dialog_stack.last_mut()
+	}
+
+	/// Check if any entry dialog is open
+	pub fn has_entry_dialog(&self) -> bool {
+		!self.entry_dialog_stack.is_empty()
+	}
+
+	/// Get the currently selected page
+	pub fn current_page(&self) -> Option<&SettingsPage> {
+		self.pages.get(self.selected_category)
+	}
+
+	/// Get the currently selected page mutably
+	pub fn current_page_mut(&mut self) -> Option<&mut SettingsPage> {
+		self.pages.get_mut(self.selected_category)
+	}
+
+	/// Index of the item currently sitting at the top of the body
+	/// viewport, computed from the scroll offset and per-item heights. The
+	/// left-panel section indicator follows this so scrolling visibly moves
+	/// the highlight in the tree, not just keyboard navigation.
+	pub fn topmost_visible_item_index(&self) -> Option<usize> {
+		let page = self.pages.get(self.selected_category)?;
+		if page.items.is_empty() {
+			return None;
+		}
+		let target = self.scroll_panel.scroll.offset;
+		let width = self.layout_width;
+		let mut y: u16 = 0;
+		for (idx, item) in page.items.iter().enumerate() {
+			let h = <SettingItem as ScrollItem>::height(item, width);
+			if y + h > target {
+				return Some(idx);
+			}
+			y += h;
+		}
+		Some(page.items.len() - 1)
+	}
+
+	/// Section currently displayed in the body — the section whose item
+	/// range contains either the focused item or the topmost visible item
+	/// (whichever is later). Returns `None` when the page has no sections
+	/// or when the cursor is above the first section.
+	pub fn current_section_index(&self) -> Option<usize> {
+		let page = self.pages.get(self.selected_category)?;
+		if page.sections.is_empty() {
+			return None;
+		}
+		// Drive the section indicator off the topmost visible item — i.e.
+		// strictly what the user is looking at right now, regardless of
+		// where their last click landed. Earlier code did
+		// `topmost.max(selected_item)`, which clamped the indicator so
+		// wheel-UP after a click couldn't move the highlight back to an
+		// earlier section. Falling back to selected_item only when the
+		// body is genuinely empty (no items, no viewport) gives the
+		// expected "tree follows scroll, both directions" behavior.
+		let item_idx = self.topmost_visible_item_index().unwrap_or(self.selected_item);
+		// Walk sections in order and pick the last one whose first_item_index <= item_idx.
+		let mut current: Option<usize> = None;
+		for (s_idx, section) in page.sections.iter().enumerate() {
+			if section.first_item_index <= item_idx {
+				current = Some(s_idx);
+			} else {
+				break;
+			}
+		}
+		current
+	}
+
+	/// Whether a category should render with a chevron + be expandable in
+	/// the tree view. We require strictly more than one section, since one
+	/// section adds no information beyond the category itself.
+	pub fn is_category_expandable(&self, cat_idx: usize) -> bool {
+		self.pages.get(cat_idx).is_some_and(|p| p.sections.len() > 1)
+	}
+
+	/// Move the cursor in the categories tree by `delta` rows (positive =
+	/// down, negative = up). The cursor walks every visible row — both
+	/// category rows and the section rows under any expanded category — so
+	/// users can step into discovered sections without leaving the keyboard.
+	///
+	/// Maps the new row to state:
+	/// * Category row → `selected_category = idx`, `selected_item = 0`.
+	/// * Section row → category + first item of that section (same effect
+	///   as clicking the section).
+	pub fn tree_step(&mut self, delta: i32) {
+		let rows = self.visible_tree();
+		if rows.is_empty() {
+			return;
+		}
+		let cur = self.tree_cursor_index(&rows);
+		let len = rows.len() as i32;
+		let target = (cur as i32 + delta).clamp(0, len - 1) as usize;
+		if target == cur {
+			return;
+		}
+		let prev_category = self.selected_category;
+		self.update_control_focus(false);
+		match rows[target] {
+			TreeRow::Category { idx, .. } => {
+				// Cursor on a category row: body shows the page's first
+				// item but the tree highlight stays on the category
+				// header (no section is "current" yet).
+				self.selected_category = idx;
+				self.selected_item = 0;
+				self.tree_cursor_section = None;
+				if idx != prev_category {
+					self.scroll_panel = ScrollablePanel::new();
+				}
+				self.sub_focus = None;
+				self.update_control_focus(true);
+			}
+			TreeRow::Section { cat_idx, section_idx } => {
+				let first = self.pages[cat_idx].sections[section_idx].first_item_index;
+				self.selected_category = cat_idx;
+				self.selected_item = first;
+				self.tree_cursor_section = Some(section_idx);
+				if cat_idx != prev_category {
+					self.scroll_panel = ScrollablePanel::new();
+				}
+				self.sub_focus = None;
+				self.init_map_focus(true);
+				self.update_control_focus(true);
+			}
+		}
+		// We deliberately do NOT auto-expand here: Up/Down sequential
+		// navigation should walk through categories without unfolding
+		// each one as you pass over it — that would balloon the tree
+		// every time the user holds Down. Auto-expand fires on
+		// deliberate visits (click, search-jump, Enter on a section).
+		let width = self.layout_width;
+		if let Some(page) = self.pages.get(self.selected_category) {
+			// When the cursor lands on a section, snap the body's scroll
+			// to that section's first item — same UX as clicking a
+			// section in the tree. Without this, `ensure_focused_visible`
+			// would only scroll *just enough* for the item to be in
+			// view, leaving `topmost_visible_item_index` pointing at an
+			// earlier section and making the cursor visually "stick" on
+			// the previous section row.
+			if matches!(rows[target], TreeRow::Section { .. }) {
+				self.scroll_panel.update_content_height(&page.items, width);
+				let content_width = self.scroll_panel.content_width(width);
+				let item_y =
+					self.scroll_panel.item_y_offset(&page.items, self.selected_item, content_width);
+				self.scroll_panel.scroll.offset = item_y;
+			} else {
+				let selected_item = self.selected_item;
+				let sub_focus = self.sub_focus;
+				self.scroll_panel.ensure_focused_visible(&page.items, selected_item, sub_focus, width);
+			}
+		}
+		let new_rows = self.visible_tree();
+		let new_cur = self.tree_cursor_index(&new_rows);
+		self.categories_scroll.ensure_focused_visible(&new_rows, new_cur, None, width);
+	}
+
+	/// Find the visible-tree index for the current selection. Prefers the
+	/// section row matching the explicit `tree_cursor_section` cursor
+	/// (when set), or the category row otherwise. The cursor is
+	/// independent of body scroll position, so pressing Right to expand
+	/// a category does NOT make the cursor jump to the first section.
+	/// `Up`/`Down` walks the visible rows linearly; clicks and section
+	/// jumps update `tree_cursor_section` directly.
+	pub(super) fn tree_cursor_index(&self, rows: &[TreeRow]) -> usize {
+		let cat = self.selected_category;
+		if let Some(s_idx) = self.tree_cursor_section {
+			for (i, row) in rows.iter().enumerate() {
+				if let TreeRow::Section { cat_idx, section_idx } = *row {
+					if cat_idx == cat && section_idx == s_idx {
+						return i;
+					}
+				}
+			}
+		}
+		for (i, row) in rows.iter().enumerate() {
+			if let TreeRow::Category { idx, .. } = *row {
+				if idx == cat {
+					return i;
+				}
+			}
+		}
+		0
+	}
+
+	/// Toggle whether a category is expanded in the tree view. No-op for
+	/// categories that aren't expandable (zero or one section).
+	/// Ensure the currently selected category is expanded in the tree view
+	/// when it has more than one section. Called on any path that "visits"
+	/// a category (Up/Down to it, click, search-jump) so the user
+	/// immediately sees that the category contains sections — they don't
+	/// have to remember to press Right.
+	///
+	/// No-op for non-expandable categories (≤ 1 section). Idempotent.
+	pub fn auto_expand_current_category(&mut self) {
+		let idx = self.selected_category;
+		if self.is_category_expandable(idx) {
+			self.expanded_categories.insert(idx);
+		}
+	}
+
+	pub fn toggle_category_expanded(&mut self, cat_idx: usize) {
+		if !self.is_category_expandable(cat_idx) {
+			return;
+		}
+		if !self.expanded_categories.insert(cat_idx) {
+			self.expanded_categories.remove(&cat_idx);
+		}
+	}
+
+	/// Jump the body panel to a specific section within a category. The
+	/// category becomes the selected category, and the body's selected_item
+	/// jumps to the section's first item.
+	pub fn jump_to_section(&mut self, cat_idx: usize, section_idx: usize) {
+		let Some(page) = self.pages.get(cat_idx) else {
+			return;
+		};
+		let Some(section) = page.sections.get(section_idx) else {
+			return;
+		};
+		let target_item = section.first_item_index;
+		self.update_control_focus(false);
+		self.selected_category = cat_idx;
+		self.selected_item = target_item;
+		self.tree_cursor_section = Some(section_idx);
+		self.focus.set(FocusPanel::Settings);
+		let width = self.layout_width;
+		if let Some(page) = self.pages.get(self.selected_category) {
+			self.scroll_panel.update_content_height(&page.items, width);
+			let content_width = self.scroll_panel.content_width(width);
+			// Snap the body to the top of the section. `ensure_visible`
+			// would only scroll *just enough* to bring the target item
+			// into view, which puts it at the bottom of the viewport
+			// (and on tight viewports clips its body below the footer);
+			// jumping to a section instead means "show this section at
+			// the top".
+			let item_y = self.scroll_panel.item_y_offset(&page.items, target_item, content_width);
+			self.scroll_panel.scroll.offset = item_y;
+		}
+		self.sub_focus = None;
+		self.init_map_focus(true);
+		self.update_control_focus(true);
+		self.auto_expand_current_category();
+	}
+
+	/// Flatten the categories list + currently expanded sections into the
+	/// row order rendered in the left panel. Single source of truth for
+	/// rendering, hit-testing, and Up/Down navigation in the tree.
+	pub fn visible_tree(&self) -> Vec<TreeRow> {
+		let mut rows = Vec::with_capacity(self.pages.len());
+		for (idx, page) in self.pages.iter().enumerate() {
+			let expandable = page.sections.len() > 1;
+			let expanded = expandable && self.expanded_categories.contains(&idx);
+			rows.push(TreeRow::Category { idx, expandable, expanded });
+			if expanded {
+				for section_idx in 0..page.sections.len() {
+					rows.push(TreeRow::Section { cat_idx: idx, section_idx });
+				}
+			}
+		}
+		rows
+	}
+
+	/// Get the currently selected item
+	pub fn current_item(&self) -> Option<&SettingItem> {
+		self.current_page().and_then(|page| page.items.get(self.selected_item))
+	}
+
+	/// Get the currently selected item mutably
+	pub fn current_item_mut(&mut self) -> Option<&mut SettingItem> {
+		self
+			.pages
+			.get_mut(self.selected_category)
+			.and_then(|page| page.items.get_mut(self.selected_item))
+	}
+
+	/// Check if the current text field can be exited (valid JSON if required)
+	pub fn can_exit_text_editing(&self) -> bool {
+		self
+			.current_item()
+			.map(
+				|item| {
+					if let SettingControl::Text(state) = &item.control { state.is_valid() } else { true }
+				},
+			)
+			.unwrap_or(true)
+	}
+
+	/// Initialize map focus when entering a Map control.
+	/// `from_above`: true = start at first entry, false = start at add-new field
+	fn init_map_focus(&mut self, from_above: bool) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::Map(ref mut map_state) => map_state.init_focus(from_above),
+				SettingControl::ObjectArray(ref mut arr) => arr.init_nav_focus(from_above),
+				_ => {}
+			}
+		}
+		// Update sub_focus to match the map/array's focus position
+		self.update_map_sub_focus();
+	}
+
+	/// Update the focus state of the current item's control.
+	/// This should be called when selection changes to ensure the control
+	/// knows whether it's focused (for proper "[Enter to edit]" hints, etc.)
+	pub(super) fn update_control_focus(&mut self, focused: bool) {
+		let focus_state = if focused { FocusState::Focused } else { FocusState::Normal };
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::Map(ref mut state) => state.focus = focus_state,
+				SettingControl::TextList(ref mut state) => state.focus = focus_state,
+				SettingControl::DualList(ref mut state) => state.focus = focus_state,
+				SettingControl::ObjectArray(ref mut state) => state.focus = focus_state,
+				SettingControl::Toggle(ref mut state) => state.focus = focus_state,
+				SettingControl::Number(ref mut state) => state.focus = focus_state,
+				SettingControl::Dropdown(ref mut state) => state.focus = focus_state,
+				SettingControl::Text(ref mut state) => {
+					state.focus = focus_state;
+					// Leaving a text input via navigation also exits
+					// edit mode, so the cursor never lingers on a row
+					// the user is no longer looking at.
+					if !focused {
+						state.editing = false;
+					}
+				}
+				SettingControl::Json(_) | SettingControl::Complex { .. } => {} // These don't have focus state
+			}
+		}
+	}
+
+	/// Update sub_focus based on the current Map control's focus position.
+	/// Maps focus_regions use: id=0 for label, id=1+i for entry i, id=1+len for add-new
+	fn update_map_sub_focus(&mut self) {
+		self.sub_focus = self.current_item().and_then(|item| match &item.control {
+			// Map focus_regions: id=0 (label), id=1+i (entry), id=1+len (add-new)
+			SettingControl::Map(ref map_state) => Some(match map_state.focused_entry {
+				Some(i) => 1 + i,
+				None => 1 + map_state.entries.len(), // add-new field
+			}),
+			SettingControl::ObjectArray(ref arr) => Some(arr.sub_focus_row()),
+			_ => None,
+		});
+	}
+
+	/// Move selection up
+	pub fn select_prev(&mut self) {
+		match self.focus_panel() {
+			FocusPanel::Categories => {
+				self.tree_step(-1);
+			}
+			FocusPanel::Settings => {
+				// Try to navigate within current Map control first
+				let handled = self
+					.current_item_mut()
+					.and_then(|item| match &mut item.control {
+						SettingControl::Map(map_state) => Some(map_state.focus_prev()),
+						SettingControl::ObjectArray(arr) => Some(arr.nav_prev()),
+						_ => None,
+					})
+					.unwrap_or(false);
+
+				if handled {
+					// Update sub_focus for Map/ObjectArray navigation
+					self.update_map_sub_focus();
+				} else if self.selected_item > 0 {
+					self.update_control_focus(false); // Unfocus old item
+					self.selected_item -= 1;
+					self.sub_focus = None;
+					self.init_map_focus(false); // entering from below
+					self.update_control_focus(true); // Focus new item
+				}
+				self.ensure_visible();
+			}
+			FocusPanel::Footer => {
+				// Navigate between footer buttons (left)
+				if self.footer_button_index > 0 {
+					self.footer_button_index -= 1;
+				}
+			}
+		}
+	}
+
+	/// Move selection down
+	pub fn select_next(&mut self) {
+		match self.focus_panel() {
+			FocusPanel::Categories => {
+				self.tree_step(1);
+			}
+			FocusPanel::Settings => {
+				// Try to navigate within current Map control first
+				let handled = self
+					.current_item_mut()
+					.and_then(|item| match &mut item.control {
+						SettingControl::Map(map_state) => Some(map_state.focus_next()),
+						SettingControl::ObjectArray(arr) => Some(arr.nav_next()),
+						_ => None,
+					})
+					.unwrap_or(false);
+
+				if handled {
+					// Update sub_focus for Map/ObjectArray navigation
+					self.update_map_sub_focus();
+				} else {
+					let can_move =
+						self.current_page().is_some_and(|page| self.selected_item + 1 < page.items.len());
+					if can_move {
+						self.update_control_focus(false); // Unfocus old item
+						self.selected_item += 1;
+						self.sub_focus = None;
+						self.init_map_focus(true); // entering from above
+						self.update_control_focus(true); // Focus new item
+					}
+				}
+				self.ensure_visible();
+			}
+			FocusPanel::Footer => {
+				// Navigate between footer buttons (right)
+				if self.footer_button_index < 2 {
+					self.footer_button_index += 1;
+				}
+			}
+		}
+	}
+
+	/// Move selection down by a page (viewport height worth of items)
+	pub fn select_next_page(&mut self) {
+		let page_size = self.scroll_panel.viewport_height().max(1);
+		for _ in 0..page_size {
+			self.select_next();
+		}
+	}
+
+	/// Move selection up by a page (viewport height worth of items)
+	pub fn select_prev_page(&mut self) {
+		let page_size = self.scroll_panel.viewport_height().max(1);
+		for _ in 0..page_size {
+			self.select_prev();
+		}
+	}
+
+	/// Switch focus between panels: Categories -> Settings -> Footer -> Categories
+	pub fn toggle_focus(&mut self) {
+		let old_panel = self.focus_panel();
+		self.focus.focus_next();
+		self.on_panel_changed(old_panel, true);
+	}
+
+	/// Switch focus to the previous panel: Categories <- Settings <- Footer <- Categories
+	pub fn toggle_focus_backward(&mut self) {
+		let old_panel = self.focus_panel();
+		self.focus.focus_prev();
+		self.on_panel_changed(old_panel, false);
+	}
+
+	/// Common logic after panel focus changes
+	fn on_panel_changed(&mut self, old_panel: FocusPanel, forward: bool) {
+		// Unfocus control when leaving Settings panel
+		if old_panel == FocusPanel::Settings {
+			self.update_control_focus(false);
+		}
+
+		// Reset item selection when switching to settings
+		if self.focus_panel() == FocusPanel::Settings
+			&& self.selected_item >= self.current_page().map_or(0, |p| p.items.len())
+		{
+			self.selected_item = 0;
+		}
+		self.sub_focus = None;
+
+		if self.focus_panel() == FocusPanel::Settings {
+			self.init_map_focus(forward); // entering from above if forward
+			self.update_control_focus(true); // Focus the control
+		}
+
+		// Reset footer button when entering Footer panel
+		if self.focus_panel() == FocusPanel::Footer {
+			self.footer_button_index = if forward {
+				0 // Start at first button (Layer) when tabbing forward
+			} else {
+				4 // Start at last button (Edit) when tabbing backward
+			};
+		}
+
+		self.ensure_visible();
+	}
+
+	/// Toggle the visual style applied to every item.
+	///
+	/// Style is cached per-item so the `ScrollItem::height(width)` trait impl
+	/// can compute the correct height without taking a style parameter; this
+	/// method propagates the change to every item across every page in one
+	/// pass. Recomputes the scroll panel content height too, since heights
+	/// just changed.
+	pub fn set_item_style(&mut self, style: super::items::ItemBoxStyle) {
+		if self.item_style == style {
+			return;
+		}
+		self.item_style = style;
+		for page in &mut self.pages {
+			for item in &mut page.items {
+				item.style = style;
+			}
+		}
+	}
+
+	/// Ensure the selected item is visible in the viewport.
+	pub fn ensure_visible(&mut self) {
+		if self.focus_panel() != FocusPanel::Settings {
+			return;
+		}
+
+		// Need to avoid borrowing self for both page and scroll_panel
+		let selected_item = self.selected_item;
+		let sub_focus = self.sub_focus;
+		let width = self.layout_width;
+		let prev_offset = self.scroll_panel.scroll.offset;
+		if let Some(page) = self.pages.get(self.selected_category) {
+			self.scroll_panel.ensure_focused_visible(&page.items, selected_item, sub_focus, width);
+		}
+		// If body Up/Down moved the scroll, the tree cursor must follow
+		// so the left-panel highlight tracks the section the user is
+		// looking at — same contract as wheel/scrollbar scroll.
+		if self.scroll_panel.scroll.offset != prev_offset {
+			self.sync_tree_cursor_to_body_scroll();
+		}
+	}
+
+	/// Record a pending change for a setting
+	pub fn set_pending_change(&mut self, path: &str, value: serde_json::Value) {
+		let value = normalize_pending_change(path, value);
+		if self.value_matches_effective_original(path, &value) {
+			self.pending_changes.remove(path);
+		} else {
+			self.pending_changes.insert(path.to_string(), value);
+		}
+	}
+
+	/// Check if there are unsaved changes
+	pub fn has_changes(&self) -> bool {
+		!self.pending_changes.is_empty() || !self.pending_deletions.is_empty()
+	}
+
+	/// Apply pending changes to a config
+	pub fn apply_changes(&self, config: &Config) -> Result<Config, serde_json::Error> {
+		let mut config_value = serde_json::to_value(config)?;
+
+		// Process deletions first so a `pending_changes` write on the
+		// same path (rare but possible) still wins.
+		//
+		// Writing `null` at a map-entry path would fail to round-trip
+		// through the Config schema whenever the map's value type is
+		// non-nullable (e.g. `HashMap<String, LspLanguageConfig>`) —
+		// hence the dedicated removal path here, mirroring the
+		// remove-then-write order used by `save_changes_to_layer` when
+		// writing to disk.
+		for path in &self.pending_deletions {
+			crate::config_io::remove_json_pointer(&mut config_value, path);
+		}
+
+		for (path, value) in &self.pending_changes {
+			let value = normalize_pending_change(path, value.clone());
+			// `pointer_mut` only succeeds when the path already exists,
+			// which is the common case (most settings are statically
+			// declared in the Rust Config struct). For plugin settings
+			// the user may be setting a brand-new leaf under
+			// `/plugins/<name>/settings/...` — fall back to a
+			// create-intermediate write so those land.
+			if let Some(target) = config_value.pointer_mut(path) {
+				*target = value;
+			} else {
+				set_json_pointer_create(&mut config_value, path, value);
+			}
+		}
+
+		serde_json::from_value(config_value)
+	}
+
+	/// Discard all pending changes
+	pub fn discard_changes(&mut self) {
+		self.pending_changes.clear();
+		self.pending_deletions.clear();
+		// Rebuild pages from original config with layer info
+		self.rebuild_pages();
+	}
+
+	/// Set the target layer for saving changes.
+	pub fn set_target_layer(&mut self, layer: ConfigLayer) {
+		if layer != ConfigLayer::System {
+			// Cannot target System layer (read-only)
+			self.target_layer = layer;
+			// Clear pending changes when switching layers
+			self.pending_changes.clear();
+			self.pending_deletions.clear();
+			// Rebuild pages with new target layer (affects "modified" indicators)
+			self.rebuild_pages();
+		}
+	}
+
+	/// Cycle through writable layers: User -> Project -> Session -> User
+	pub fn cycle_target_layer(&mut self) {
+		self.target_layer = match self.target_layer {
+			ConfigLayer::System => ConfigLayer::User, // Should never be System, but handle it
+			ConfigLayer::User => ConfigLayer::Project,
+			ConfigLayer::Project => ConfigLayer::Session,
+			ConfigLayer::Session => ConfigLayer::User,
+		};
+		// Clear pending changes when switching layers
+		self.pending_changes.clear();
+		self.pending_deletions.clear();
+		// Rebuild pages with new target layer (affects "modified" indicators)
+		self.rebuild_pages();
+	}
+
+	/// Get a display name for the current target layer.
+	pub fn target_layer_name(&self) -> &'static str {
+		match self.target_layer {
+			ConfigLayer::System => "System (read-only)",
+			ConfigLayer::User => "User",
+			ConfigLayer::Project => "Project",
+			ConfigLayer::Session => "Session",
+		}
+	}
+
+	/// Set the layer sources map (called by Editor when opening settings).
+	/// This also rebuilds pages to update modified indicators.
+	pub fn set_layer_sources(&mut self, sources: HashMap<String, ConfigLayer>) {
+		self.layer_sources = sources;
+		// Rebuild pages with new layer sources (affects "modified" indicators)
+		self.rebuild_pages();
+	}
+
+	/// Refresh the snapshot of plugin-registered status-bar tokens
+	/// (called by Editor when opening settings).
+	pub fn set_status_bar_tokens(&mut self, tokens: HashMap<String, String>) {
+		self.available_status_bar_tokens = tokens;
+		self.rebuild_pages();
+	}
+
+	/// Get the source layer for a setting path.
+	/// Returns the layer where this value was defined, or System if it's the default.
+	pub fn get_layer_source(&self, path: &str) -> ConfigLayer {
+		self.layer_sources.get(path).copied().unwrap_or(ConfigLayer::System)
+	}
+
+	/// Get a short label for a layer source (for UI display).
+	pub fn layer_source_label(layer: ConfigLayer) -> &'static str {
+		match layer {
+			ConfigLayer::System => "default",
+			ConfigLayer::User => "user",
+			ConfigLayer::Project => "project",
+			ConfigLayer::Session => "session",
+		}
+	}
+
+	/// Reset the current item by removing it from the target layer.
+	///
+	/// NEW SEMANTICS: Instead of setting to schema default, we remove the value
+	/// from the current layer's delta. The value then falls back to inherited
+	/// (from lower-precedence layers) or to the schema default.
+	///
+	/// Only items defined in the target layer can be reset.
+	/// Reset the focused entry-dialog field to its schema default.
+	///
+	/// Per-field counterpart of [`reset_current_to_default`], scoped to
+	/// the active entry dialog rather than the main settings page. Skips
+	/// read-only / non-modified / no-default fields. The dialog itself
+	/// becomes dirty (user_edited = true) so the title flips to
+	/// `• modified`, signalling that the parent still owes a save.
+	/// If keyboard focus is on a field's per-field action button
+	/// (`[Reset]`/`[Inherit]`/`[Clear]`), perform it and return true (so
+	/// Enter/Space consume the key). These buttons are reached by Tab.
+	pub fn entry_dialog_activate_focused_field_button(&mut self) -> bool {
+		match self.entry_dialog_mut() {
+			Some(dialog) => dialog.activate_focused_field_button(),
+			None => false,
+		}
+	}
+
+	pub fn reset_current_to_default(&mut self) {
+		// Get the info we need first, then release the borrow
+		let reset_info = self.current_item().and_then(|item| {
+			// Only allow reset if the item is defined in the target layer
+			// (i.e., if it's "modified" in the new semantics)
+			if !item.modified || item.is_auto_managed {
+				return None;
+			}
+			item.default.as_ref().map(|default| (item.path.clone(), default.clone()))
+		});
+
+		if let Some((path, default)) = reset_info {
+			let original_source = self.get_layer_source(&path);
+
+			if original_source != self.target_layer {
+				// The row is only modified because of an unsaved pending edit.
+				// Reset should cancel that edit and return to the inherited
+				// resolved value, not record a no-op deletion against a layer
+				// that did not define the setting in the first place.
+				self.pending_changes.remove(&path);
+				self.pending_deletions.remove(&path);
+				let original = self.effective_original_value(&path).unwrap_or(default);
+				if let Some(item) = self.current_item_mut() {
+					update_control_from_value(&mut item.control, &original);
+					item.modified = false;
+					item.layer_source = original_source;
+					item.is_null = item.nullable && original.is_null();
+				}
+				return;
+			}
+
+			// Mark this path for deletion from the target layer
+			self.pending_deletions.insert(path.clone());
+			// Remove any pending change for this path
+			self.pending_changes.remove(&path);
+
+			// Update the control state to show the inherited value.
+			// Since we don't have access to other layers' values here,
+			// we use the schema default as the fallback display value.
+			if let Some(item) = self.current_item_mut() {
+				update_control_from_value(&mut item.control, &default);
+				item.modified = false;
+				// Update layer source to show where value now comes from
+				item.layer_source = ConfigLayer::System; // Falls back to default
+			}
+		}
+	}
+
+	/// Set the current nullable setting to null (inherit value).
+	///
+	/// This explicitly sets the value to null in the current layer,
+	/// indicating that the setting should be inherited rather than overridden.
+	/// Only applies to nullable settings that are not currently null.
+	pub fn set_current_to_null(&mut self) {
+		let target_layer = self.target_layer;
+		let change_info = self.current_item().and_then(|item| {
+			if !item.nullable || item.is_null || item.read_only {
+				return None;
+			}
+			Some(item.path.clone())
+		});
+
+		if let Some(path) = change_info {
+			// Set value to null (not a deletion — this is an explicit null value)
+			self.pending_changes.insert(path.clone(), serde_json::Value::Null);
+			self.pending_deletions.remove(&path);
+
+			// Update the item's visual state
+			if let Some(item) = self.current_item_mut() {
+				item.is_null = true;
+				item.modified = true;
+				item.layer_source = target_layer;
+			}
+		}
+	}
+
+	/// Clear a nullable category by setting its path to null and updating all items.
+	///
+	/// This sets the category's root path (e.g., `/fallback`) to null in the target layer,
+	/// effectively removing the entire section. All items within the category are marked
+	/// as null/inherited.
+	pub fn clear_current_category(&mut self) {
+		let target_layer = self.target_layer;
+		let page = match self.current_page() {
+			Some(p) if p.nullable => p,
+			_ => return,
+		};
+		let page_path = page.path.clone();
+
+		// Set the category root to null
+		self.pending_changes.insert(page_path.clone(), serde_json::Value::Null);
+
+		// Also remove any pending changes/deletions for child paths
+		let prefix = format!("{}/", page_path);
+		self.pending_changes.retain(|path, _| !path.starts_with(&prefix));
+		self.pending_deletions.retain(|path| !path.starts_with(&prefix));
+
+		// Update all items on the current page to reflect null/inherited state
+		if let Some(page) = self.current_page_mut() {
+			for item in &mut page.items {
+				if item.nullable {
+					item.is_null = true;
+					item.modified = false;
+					item.layer_source = target_layer;
+				}
+			}
+		}
+	}
+
+	/// Check if any items in the current nullable category have non-null values.
+	pub fn current_category_has_values(&self) -> bool {
+		match self.current_page() {
+			Some(page) if page.nullable => {
+				page.items.iter().any(|item| !item.is_null && item.nullable)
+					|| page.items.iter().any(|item| item.modified)
+			}
+			_ => false,
+		}
+	}
+
+	/// Handle a value change from user interaction
+	pub fn on_value_changed(&mut self) {
+		// Capture target_layer before any borrows
+		let target_layer = self.target_layer;
+
+		// Get value and path first, then release borrow
+		let change_info = self.current_item().map(|item| {
+			let value = control_to_value(&item.control);
+			(item.path.clone(), value)
+		});
+
+		if let Some((path, value)) = change_info {
+			let original_value = self.effective_original_value(&path);
+			let matches_original = original_value.as_ref() == Some(&value);
+			let original_source = self.get_layer_source(&path);
+
+			// When user changes a value, it becomes "modified" (defined in target layer)
+			// Remove from pending deletions if it was scheduled for removal
+			self.pending_deletions.remove(&path);
+			self.set_pending_change(&path, value);
+
+			// Update the item's state
+			if let Some(item) = self.current_item_mut() {
+				if matches_original {
+					item.modified = !item.is_auto_managed && original_source == target_layer;
+					item.layer_source = original_source;
+					item.is_null = item.nullable
+						&& original_value
+							.as_ref()
+							.map(|v| v.is_null())
+							.unwrap_or_else(|| item.default.as_ref().map(|d| d.is_null()).unwrap_or(true));
+				} else {
+					item.modified = true; // New semantic: value is now defined in target layer
+					item.layer_source = target_layer; // Value now comes from target layer
+					item.is_null = false; // Explicit value clears the inherited state
+				}
+			}
+		}
+	}
+
+	/// Update focus states for rendering
+	pub fn update_focus_states(&mut self) {
+		let current_focus = self.focus_panel();
+		for (page_idx, page) in self.pages.iter_mut().enumerate() {
+			for (item_idx, item) in page.items.iter_mut().enumerate() {
+				let is_focused = current_focus == FocusPanel::Settings
+					&& page_idx == self.selected_category
+					&& item_idx == self.selected_item;
+
+				let focus = if is_focused { FocusState::Focused } else { FocusState::Normal };
+
+				match &mut item.control {
+					SettingControl::Toggle(state) => state.focus = focus,
+					SettingControl::Number(state) => state.focus = focus,
+					SettingControl::Dropdown(state) => state.focus = focus,
+					SettingControl::Text(state) => state.focus = focus,
+					SettingControl::TextList(state) => state.focus = focus,
+					SettingControl::DualList(state) => state.focus = focus,
+					SettingControl::Map(state) => state.focus = focus,
+					SettingControl::ObjectArray(state) => state.focus = focus,
+					SettingControl::Json(state) => state.focus = focus,
+					SettingControl::Complex { .. } => {}
+				}
+			}
+		}
+	}
+
+	/// The current search filter text.
+	pub fn search_query(&self) -> &str {
+		self.search_input.value_str()
+	}
+
+	/// The search caret position, as a byte offset into
+	/// [`SettingsState::search_query`] (always on a grapheme boundary).
+	pub fn search_cursor(&self) -> usize {
+		self.search_input.cursor_byte()
+	}
+
+	/// Start search mode
+	pub fn start_search(&mut self) {
+		self.search_active = true;
+		self.search_input.clear();
+		self.search_results.clear();
+		self.selected_search_result = 0;
+		self.search_scroll_offset = 0;
+	}
+
+	/// Cancel search mode
+	pub fn cancel_search(&mut self) {
+		self.search_active = false;
+		self.search_input.clear();
+		self.search_results.clear();
+		self.selected_search_result = 0;
+		self.search_scroll_offset = 0;
+	}
+
+	/// Update search query and refresh results
+	pub fn set_search_query(&mut self, query: String) {
+		self.search_input.set_value(query);
+		self.refresh_search_results();
+	}
+
+	/// Recompute results after the query text changed and reset the
+	/// results selection/scroll to the top.
+	fn refresh_search_results(&mut self) {
+		self.search_results = search_settings(&self.pages, &self.search_input.value());
+		self.selected_search_result = 0;
+		self.search_scroll_offset = 0;
+	}
+
+	/// Insert a character at the cursor position in the search query.
+	pub fn search_insert_char(&mut self, c: char) {
+		self.search_input.insert(c);
+		self.refresh_search_results();
+	}
+
+	/// Add a character to the search query.
+	///
+	/// Kept for backwards compatibility; delegates to `search_insert_char`.
+	pub fn search_push_char(&mut self, c: char) {
+		self.search_insert_char(c);
+	}
+
+	/// Delete the grapheme cluster before the cursor (Backspace).
+	pub fn search_backspace(&mut self) {
+		self.search_input.backspace();
+		self.refresh_search_results();
+	}
+
+	/// Remove the grapheme cluster before the cursor.
+	///
+	/// Kept for backwards compatibility; delegates to `search_backspace`.
+	pub fn search_pop_char(&mut self) {
+		self.search_backspace();
+	}
+
+	/// Delete the grapheme cluster at the cursor (Delete key).
+	pub fn search_delete(&mut self) {
+		self.search_input.delete();
+		self.refresh_search_results();
+	}
+
+	/// Move the search cursor left by one grapheme cluster.
+	///
+	/// Movement is grapheme-aware (via the shared control) so combining
+	/// marks — Thai diacritics, emoji modifiers — move as a single unit,
+	/// matching the Command Palette.
+	pub fn search_cursor_left(&mut self) {
+		self.search_input.move_left();
+	}
+
+	/// Move the search cursor right by one grapheme cluster.
+	pub fn search_cursor_right(&mut self) {
+		self.search_input.move_right();
+	}
+
+	/// Move the search cursor to the start of the query.
+	pub fn search_cursor_home(&mut self) {
+		self.search_input.move_home();
+	}
+
+	/// Move the search cursor to the end of the query.
+	pub fn search_cursor_end(&mut self) {
+		self.search_input.move_end();
+	}
+
+	/// Navigate to previous search result
+	pub fn search_prev(&mut self) {
+		if !self.search_results.is_empty() && self.selected_search_result > 0 {
+			self.selected_search_result -= 1;
+			// Scroll up if selection moved above visible area
+			if self.selected_search_result < self.search_scroll_offset {
+				self.search_scroll_offset = self.selected_search_result;
+			}
+		}
+	}
+
+	/// Navigate to next search result
+	pub fn search_next(&mut self) {
+		if !self.search_results.is_empty()
+			&& self.selected_search_result + 1 < self.search_results.len()
+		{
+			self.selected_search_result += 1;
+			// Scroll down if selection moved below visible area
+			if self.selected_search_result >= self.search_scroll_offset + self.search_max_visible {
+				self.search_scroll_offset = self.selected_search_result - self.search_max_visible + 1;
+			}
+		}
+	}
+
+	/// Scroll search results up by delta items
+	pub fn search_scroll_up(&mut self, delta: usize) -> bool {
+		if self.search_results.is_empty() || self.search_scroll_offset == 0 {
+			return false;
+		}
+		self.search_scroll_offset = self.search_scroll_offset.saturating_sub(delta);
+		// Keep selection visible
+		if self.selected_search_result >= self.search_scroll_offset + self.search_max_visible {
+			self.selected_search_result = self.search_scroll_offset + self.search_max_visible - 1;
+		}
+		true
+	}
+
+	/// Scroll search results down by delta items
+	pub fn search_scroll_down(&mut self, delta: usize) -> bool {
+		if self.search_results.is_empty() {
+			return false;
+		}
+		let max_offset = self.search_results.len().saturating_sub(self.search_max_visible);
+		if self.search_scroll_offset >= max_offset {
+			return false;
+		}
+		self.search_scroll_offset = (self.search_scroll_offset + delta).min(max_offset);
+		// Keep selection visible
+		if self.selected_search_result < self.search_scroll_offset {
+			self.selected_search_result = self.search_scroll_offset;
+		}
+		true
+	}
+
+	/// Scroll search results to a ratio (0.0 = top, 1.0 = bottom)
+	pub fn search_scroll_to_ratio(&mut self, ratio: f32) -> bool {
+		if self.search_results.is_empty() {
+			return false;
+		}
+		let max_offset = self.search_results.len().saturating_sub(self.search_max_visible);
+		let new_offset = (ratio * max_offset as f32) as usize;
+		if new_offset != self.search_scroll_offset {
+			self.search_scroll_offset = new_offset.min(max_offset);
+			// Keep selection visible
+			if self.selected_search_result < self.search_scroll_offset {
+				self.selected_search_result = self.search_scroll_offset;
+			} else if self.selected_search_result >= self.search_scroll_offset + self.search_max_visible {
+				self.selected_search_result = self.search_scroll_offset + self.search_max_visible - 1;
+			}
+			return true;
+		}
+		false
+	}
+
+	/// Jump to the currently selected search result
+	pub fn jump_to_search_result(&mut self) {
+		// Extract values first to avoid borrow issues
+		let Some(result) = self.search_results.get(self.selected_search_result).cloned() else {
+			return;
+		};
+		let page_index = result.page_index;
+		let item_index = result.item_index;
+
+		// Unfocus old item first
+		self.update_control_focus(false);
+		self.selected_category = page_index;
+		self.selected_item = item_index;
+		self.focus.set(FocusPanel::Settings);
+		// Reset scroll offset but preserve viewport for ensure_visible
+		self.scroll_panel.scroll.offset = 0;
+		self.sub_focus = None;
+		self.init_map_focus(true);
+
+		// Navigate into the deep match target if present
+		if let Some(ref deep_match) = result.deep_match {
+			self.jump_to_deep_match(deep_match);
+		}
+
+		self.update_control_focus(true); // Focus the new item
+		self.auto_expand_current_category();
+		// Whichever section the matched item lives in becomes the tree
+		// cursor — so when the user closes search and Tabs to the
+		// categories panel, Up/Down resumes from the right place.
+		self.tree_cursor_section = self.current_section_index();
+		self.ensure_visible();
+		self.cancel_search();
+	}
+
+	/// Navigate into a composite control to focus a specific deep match
+	fn jump_to_deep_match(&mut self, deep_match: &DeepMatch) {
+		match deep_match {
+			DeepMatch::MapKey { entry_index, .. } | DeepMatch::MapValue { entry_index, .. } => {
+				if let Some(item) = self.current_item_mut() {
+					if let SettingControl::Map(ref mut map_state) = item.control {
+						map_state.focused_entry = Some(*entry_index);
+					}
+				}
+				self.update_map_sub_focus();
+			}
+			DeepMatch::TextListItem { item_index, .. } => {
+				if let Some(item) = self.current_item_mut() {
+					if let SettingControl::TextList(ref mut list_state) = item.control {
+						list_state.focused_item = Some(*item_index);
+					}
+				}
+				// Update sub_focus for TextList
+				self.sub_focus = Some(1 + *item_index);
+			}
+		}
+	}
+
+	/// Get the currently selected search result
+	pub fn current_search_result(&self) -> Option<&SearchResult> {
+		self.search_results.get(self.selected_search_result)
+	}
+
+	/// Show the unsaved changes confirmation dialog
+	pub fn show_confirm_dialog(&mut self) {
+		self.showing_confirm_dialog = true;
+		self.confirm_dialog_selection = 0; // Default to "Save and Exit"
+	}
+
+	/// Hide the confirmation dialog
+	pub fn hide_confirm_dialog(&mut self) {
+		self.showing_confirm_dialog = false;
+		self.confirm_dialog_selection = 0;
+	}
+
+	/// Move to next option in confirmation dialog
+	pub fn confirm_dialog_next(&mut self) {
+		self.confirm_dialog_selection = (self.confirm_dialog_selection + 1) % 3;
+	}
+
+	/// Move to previous option in confirmation dialog
+	pub fn confirm_dialog_prev(&mut self) {
+		self.confirm_dialog_selection =
+			if self.confirm_dialog_selection == 0 { 2 } else { self.confirm_dialog_selection - 1 };
+	}
+
+	/// Toggle the help overlay
+	pub fn toggle_help(&mut self) {
+		self.showing_help = !self.showing_help;
+	}
+
+	/// Hide the help overlay
+	pub fn hide_help(&mut self) {
+		self.showing_help = false;
+	}
+
+	/// Check if the entry dialog is showing
+	pub fn showing_entry_dialog(&self) -> bool {
+		self.has_entry_dialog()
+	}
+
+	/// Open the entry dialog for the currently focused map entry
+	pub fn open_entry_dialog(&mut self) {
+		let Some(item) = self.current_item() else {
+			return;
+		};
+
+		// Determine what type of entry we're editing based on the path
+		let path = item.path.as_str();
+		let SettingControl::Map(map_state) = &item.control else {
+			return;
+		};
+
+		// Get the focused entry
+		let Some(entry_idx) = map_state.focused_entry else {
+			return;
+		};
+		let Some((key, value)) = map_state.entries.get(entry_idx) else {
+			return;
+		};
+
+		// Get the value schema for this map
+		let Some(schema) = map_state.value_schema.as_ref() else {
+			return; // No schema available, can't create dialog
+		};
+
+		// If the map doesn't allow adding, it also doesn't allow deleting (auto-managed entries)
+		let no_delete = map_state.no_add;
+
+		// Per-field [Reset] targets must be this entry's *built-in* values
+		// (e.g. `languages.html.grammar = "HTML"`), not the generic schema
+		// default for the field type (`""`). Look the entry up in the bundled
+		// default config so Reset restores the right value.
+		let entry_pointer = format!("{}/{}", path, key);
+		let key = key.clone();
+		let value = value.clone();
+
+		// Create dialog from schema
+		let mut dialog = EntryDialogState::from_schema(
+			key,
+			&value,
+			schema,
+			path,
+			false,
+			no_delete,
+			&self.available_status_bar_tokens,
+		);
+		apply_builtin_defaults(&mut dialog, &entry_pointer);
+		dialog.inheritable_fields = inheritable_fields_for(path);
+		self.entry_dialog_stack.push(dialog);
+	}
+
+	/// Open entry dialog for adding a new entry (with empty key)
+	pub fn open_add_entry_dialog(&mut self) {
+		let Some(item) = self.current_item() else {
+			return;
+		};
+		let SettingControl::Map(map_state) = &item.control else {
+			return;
+		};
+		let Some(schema) = map_state.value_schema.as_ref() else {
+			return;
+		};
+		let path = item.path.clone();
+
+		// Create dialog with empty key - user will fill it in
+		// no_delete is false for new entries (Delete button is not shown anyway for new entries)
+		let dialog = EntryDialogState::from_schema(
+			String::new(),
+			&serde_json::json!({}),
+			schema,
+			&path,
+			true,
+			false,
+			&self.available_status_bar_tokens,
+		);
+		self.entry_dialog_stack.push(dialog);
+	}
+
+	/// Open dialog for adding a new array item
+	pub fn open_add_array_item_dialog(&mut self) {
+		let Some(item) = self.current_item() else {
+			return;
+		};
+		let SettingControl::ObjectArray(array_state) = &item.control else {
+			return;
+		};
+		let Some(schema) = array_state.item_schema.as_ref() else {
+			return;
+		};
+		let path = item.path.clone();
+
+		// Create dialog with empty value - user will fill it in
+		let dialog = EntryDialogState::for_array_item(
+			None,
+			&serde_json::json!({}),
+			schema,
+			&path,
+			true,
+			&self.available_status_bar_tokens,
+		);
+		self.entry_dialog_stack.push(dialog);
+	}
+
+	/// Open dialog for editing an existing array item
+	pub fn open_edit_array_item_dialog(&mut self) {
+		let Some(item) = self.current_item() else {
+			return;
+		};
+		let SettingControl::ObjectArray(array_state) = &item.control else {
+			return;
+		};
+		let Some(schema) = array_state.item_schema.as_ref() else {
+			return;
+		};
+		let Some(index) = array_state.focused_index else {
+			return;
+		};
+		let Some(value) = array_state.bindings.get(index) else {
+			return;
+		};
+		let path = item.path.clone();
+
+		let dialog = EntryDialogState::for_array_item(
+			Some(index),
+			value,
+			schema,
+			&path,
+			false,
+			&self.available_status_bar_tokens,
+		);
+		self.entry_dialog_stack.push(dialog);
+	}
+
+	/// Close the entry dialog without saving (pops from stack)
+	pub fn close_entry_dialog(&mut self) {
+		self.entry_dialog_stack.pop();
+	}
+
+	/// Open a nested entry dialog for a Map or ObjectArray field within the current dialog
+	///
+	/// This enables recursive editing: if a dialog field is itself a Map or ObjectArray,
+	/// pressing Enter will open a new dialog on top of the stack for that nested structure.
+	pub fn open_nested_entry_dialog(&mut self) {
+		// Get info from the current dialog's focused field
+		let nested_info = self.entry_dialog().and_then(|dialog| {
+			let item = dialog.current_item()?;
+			// The nested dialog path must root at the current entry's full
+			// path, not just at `map_path`. Otherwise the entry key segment
+			// (e.g. `quicklsp` under `/universal_lsp`) is dropped and the
+			// nested save records a pending change at `/universal_lsp/`,
+			// which eventually writes an empty-string key into the config.
+			let base = dialog.entry_path();
+			let relative = item.path.trim_start_matches('/');
+			let path = if relative.is_empty() {
+				// `is_single_value` dialogs use an empty item path because
+				// the single non-key item IS the entry's value. In that
+				// case the nested dialog lives at the entry path itself.
+				base
+			} else {
+				format!("{}/{}", base, relative)
+			};
+
+			match &item.control {
+				SettingControl::Map(map_state) => {
+					let schema = map_state.value_schema.as_ref()?;
+					let no_delete = map_state.no_add; // If can't add, can't delete either
+					if let Some(entry_idx) = map_state.focused_entry {
+						// Edit existing entry
+						let (key, value) = map_state.entries.get(entry_idx)?;
+						Some(NestedDialogInfo::MapEntry {
+							key: key.clone(),
+							value: value.clone(),
+							schema: schema.as_ref().clone(),
+							path,
+							is_new: false,
+							no_delete,
+						})
+					} else {
+						// Add new entry
+						Some(NestedDialogInfo::MapEntry {
+							key: String::new(),
+							value: serde_json::json!({}),
+							schema: schema.as_ref().clone(),
+							path,
+							is_new: true,
+							no_delete: false, // New entries don't show Delete anyway
+						})
+					}
+				}
+				SettingControl::ObjectArray(array_state) => {
+					let schema = array_state.item_schema.as_ref()?;
+					if let Some(index) = array_state.focused_index {
+						// Edit existing item
+						let value = array_state.bindings.get(index)?;
+						Some(NestedDialogInfo::ArrayItem {
+							index: Some(index),
+							value: value.clone(),
+							schema: schema.as_ref().clone(),
+							path,
+							is_new: false,
+						})
+					} else {
+						// Add new item
+						Some(NestedDialogInfo::ArrayItem {
+							index: None,
+							value: serde_json::json!({}),
+							schema: schema.as_ref().clone(),
+							path,
+							is_new: true,
+						})
+					}
+				}
+				_ => None,
+			}
+		});
+
+		// Now create and push the dialog (outside the borrow)
+		if let Some(info) = nested_info {
+			let dialog = match info {
+				NestedDialogInfo::MapEntry { key, value, schema, path, is_new, no_delete } => {
+					EntryDialogState::from_schema(
+						key,
+						&value,
+						&schema,
+						&path,
+						is_new,
+						no_delete,
+						&self.available_status_bar_tokens,
+					)
+				}
+				NestedDialogInfo::ArrayItem { index, value, schema, path, is_new } => {
+					EntryDialogState::for_array_item(
+						index,
+						&value,
+						&schema,
+						&path,
+						is_new,
+						&self.available_status_bar_tokens,
+					)
+				}
+			};
+			self.entry_dialog_stack.push(dialog);
+		}
+	}
+
+	/// Save the entry dialog and apply changes
+	///
+	/// Automatically detects whether this is a Map or ObjectArray dialog
+	/// and handles saving appropriately.
+	pub fn save_entry_dialog(&mut self) {
+		// Determine if this is an array dialog by checking where we need to save
+		// For nested dialogs (stack len > 1), check the parent dialog's item type
+		// For top-level dialogs (stack len == 1), check current_item()
+		let is_array = if self.entry_dialog_stack.len() > 1 {
+			// Nested dialog - check parent dialog's focused item
+			self
+				.entry_dialog_stack
+				.get(self.entry_dialog_stack.len() - 2)
+				.and_then(|parent| parent.current_item())
+				.map(|item| matches!(item.control, SettingControl::ObjectArray(_)))
+				.unwrap_or(false)
+		} else {
+			// Top-level dialog - check main settings page item
+			self
+				.current_item()
+				.map(|item| matches!(item.control, SettingControl::ObjectArray(_)))
+				.unwrap_or(false)
+		};
+
+		if is_array {
+			self.save_array_item_dialog_inner();
+		} else {
+			self.save_map_entry_dialog_inner();
+		}
+	}
+
+	/// Save a Map entry dialog
+	fn save_map_entry_dialog_inner(&mut self) {
+		let Some(mut dialog) = self.entry_dialog_stack.pop() else {
+			return;
+		};
+		// Treat any draft text in a TextList's `[+] Add new` slot as
+		// committed (F21). Otherwise typing an item and hitting Ctrl+S
+		// without a separate Enter silently dropped the text.
+		dialog.commit_pending_list_drafts();
+
+		// Get key from the dialog's key field (may have been edited)
+		let key = dialog.get_key();
+		if key.is_empty() {
+			return; // Can't save with empty key
+		}
+
+		let value = dialog.to_value();
+		let map_path = dialog.map_path.clone();
+		let original_key = dialog.entry_key.clone();
+		let is_new = dialog.is_new;
+		let key_changed = !is_new && key != original_key;
+
+		// Update the map control with the new value
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Map(map_state) = &mut item.control {
+				// If key was changed, remove old entry first
+				if key_changed {
+					if let Some(idx) = map_state.entries.iter().position(|(k, _)| k == &original_key) {
+						map_state.entries.remove(idx);
+					}
+				}
+
+				// Find or add the entry with the (possibly new) key
+				if let Some(entry) = map_state.entries.iter_mut().find(|(k, _)| k == &key) {
+					entry.1 = value.clone();
+				} else {
+					map_state.entries.push((key.clone(), value.clone()));
+					map_state.entries.sort_by(|a, b| a.0.cmp(&b.0));
+				}
+			}
+		}
+
+		// Record deletion of old key if key was changed
+		if key_changed {
+			let old_path = format!("{}/{}", map_path, original_key);
+			self.pending_changes.insert(old_path, serde_json::Value::Null);
+		}
+
+		// Record the pending change
+		let path = format!("{}/{}", map_path, key);
+		self.set_pending_change(&path, value);
+	}
+
+	/// Save an ObjectArray item dialog
+	fn save_array_item_dialog_inner(&mut self) {
+		let Some(mut dialog) = self.entry_dialog_stack.pop() else {
+			return;
+		};
+		// Commit any pending TextList draft (F21).
+		dialog.commit_pending_list_drafts();
+
+		let value = dialog.to_value();
+		let array_path = dialog.map_path.clone();
+		let is_new = dialog.is_new;
+		let entry_key = dialog.entry_key.clone();
+
+		// Determine if this is a nested dialog (parent still in stack)
+		let is_nested = !self.entry_dialog_stack.is_empty();
+
+		if is_nested {
+			// Nested dialog - update the parent dialog's ObjectArray item.
+			// Extract the item path within the parent dialog by stripping the
+			// parent's full entry path (map_path + "/" + entry_key) from the
+			// nested dialog's array path. For an is_single_value parent (e.g.
+			// a quicklsp entry whose value schema is an array), the inner
+			// ObjectArray item has path "" and the nested dialog lives exactly
+			// at the entry path, so the stripped item path is "".
+			let parent_entry_path =
+				self.entry_dialog_stack.last().map(|p| p.entry_path()).unwrap_or_default();
+			let item_path = array_path
+				.strip_prefix(parent_entry_path.as_str())
+				.unwrap_or(&array_path)
+				.trim_end_matches('/')
+				.to_string();
+
+			// Find and update the ObjectArray in the parent dialog. Mark
+			// the parent dirty so its title flips to `• modified` —
+			// without this, a Ctrl+S in the inner dialog quietly mutated
+			// the parent and the user had to guess whether they still
+			// owed another save.
+			if let Some(parent) = self.entry_dialog_stack.last_mut() {
+				if let Some(item) = parent.items.iter_mut().find(|i| i.path == item_path) {
+					if let SettingControl::ObjectArray(array_state) = &mut item.control {
+						if is_new {
+							array_state.bindings.push(value.clone());
+						} else if let Ok(index) = entry_key.parse::<usize>() {
+							if index < array_state.bindings.len() {
+								array_state.bindings[index] = value.clone();
+							}
+						}
+						parent.user_edited = true;
+					}
+				}
+			}
+
+			// For nested arrays, the pending change will be recorded when parent dialog saves
+			// We still record a pending change so the value persists
+			if let Some(parent) = self.entry_dialog_stack.last() {
+				if let Some(item) = parent.items.iter().find(|i| i.path == item_path) {
+					if let SettingControl::ObjectArray(array_state) = &item.control {
+						let array_value = serde_json::Value::Array(array_state.bindings.clone());
+						self.set_pending_change(&array_path, array_value);
+					}
+				}
+			}
+		} else {
+			// Top-level dialog - update the main settings page item
+			if let Some(item) = self.current_item_mut() {
+				if let SettingControl::ObjectArray(array_state) = &mut item.control {
+					if is_new {
+						array_state.bindings.push(value.clone());
+					} else if let Ok(index) = entry_key.parse::<usize>() {
+						if index < array_state.bindings.len() {
+							array_state.bindings[index] = value.clone();
+						}
+					}
+				}
+			}
+
+			// Record the pending change for the entire array
+			if let Some(item) = self.current_item() {
+				if let SettingControl::ObjectArray(array_state) = &item.control {
+					let array_value = serde_json::Value::Array(array_state.bindings.clone());
+					self.set_pending_change(&array_path, array_value);
+				}
+			}
+		}
+	}
+
+	/// Delete the entry from the map and close the dialog
+	/// Pop the "Delete <name>?" confirmation prompt. The actual
+	/// delete only fires once the user confirms via the prompt.
+	/// Cancel (selection 0) is the safe default, so a misplaced
+	/// Tab+Enter on the Delete button no longer destroys data.
+	pub fn request_entry_delete_confirm(&mut self) {
+		let (name, is_array_item) =
+			self.entry_dialog().map(|d| (d.entry_key.clone(), d.is_array_item)).unwrap_or_default();
+		// For array items the entry_key is a numeric index — meaningless
+		// to the user. Drop it and let the confirm render fall back to
+		// the generic "item" phrasing.
+		self.entry_delete_target_name = if is_array_item { String::new() } else { name };
+		self.entry_delete_target_is_array_item = is_array_item;
+		self.entry_delete_confirm_selection = 0;
+		self.showing_entry_delete_confirm = true;
+	}
+
+	pub fn delete_entry_dialog(&mut self) {
+		// Check if this is a nested dialog BEFORE popping
+		let is_nested = self.entry_dialog_stack.len() > 1;
+
+		let Some(dialog) = self.entry_dialog_stack.pop() else {
+			return;
+		};
+
+		let path = format!("{}/{}", dialog.map_path, dialog.entry_key);
+
+		// Remove from the map control
+		if is_nested {
+			// Nested dialog - update the parent dialog's Map item
+			// Extract the map field name from the path (last segment of map_path)
+			let map_field = dialog.map_path.rsplit('/').next().unwrap_or("").to_string();
+			let item_path = format!("/{}", map_field);
+
+			// Find and update the Map in the parent dialog
+			if let Some(parent) = self.entry_dialog_stack.last_mut() {
+				if let Some(item) = parent.items.iter_mut().find(|i| i.path == item_path) {
+					if let SettingControl::Map(map_state) = &mut item.control {
+						if let Some(idx) = map_state.entries.iter().position(|(k, _)| k == &dialog.entry_key) {
+							map_state.remove_entry(idx);
+						}
+					}
+				}
+			}
+		} else {
+			// Top-level dialog - remove from the main settings page item
+			if let Some(item) = self.current_item_mut() {
+				if let SettingControl::Map(map_state) = &mut item.control {
+					if let Some(idx) = map_state.entries.iter().position(|(k, _)| k == &dialog.entry_key) {
+						map_state.remove_entry(idx);
+					}
+				}
+			}
+		}
+
+		// Record the deletion. Earlier this wrote `null` via
+		// `set_pending_change`, but that round-trips through the Config
+		// schema as `<map>/<key> = null` — invalid whenever the map's
+		// value type is non-nullable. Routing through `pending_deletions`
+		// both removes the key cleanly from the in-memory Config (via
+		// `apply_changes`) and writes the removal to disk (via
+		// `save_changes_to_layer`'s `remove_json_pointer` step).
+		self.pending_changes.remove(&path);
+		self.pending_deletions.insert(path);
+	}
+
+	/// Get the maximum scroll offset for the current page (in rows)
+	pub fn max_scroll(&self) -> u16 {
+		self.scroll_panel.scroll.max_offset()
+	}
+
+	/// Scroll up by a given number of rows
+	/// Returns true if the scroll offset changed
+	pub fn scroll_up(&mut self, delta: usize) -> bool {
+		let old = self.scroll_panel.scroll.offset;
+		self.scroll_panel.scroll_up(delta as u16);
+		let changed = old != self.scroll_panel.scroll.offset;
+		if changed {
+			self.sync_tree_cursor_to_body_scroll();
+		}
+		changed
+	}
+
+	/// Scroll down by a given number of rows
+	/// Returns true if the scroll offset changed
+	pub fn scroll_down(&mut self, delta: usize) -> bool {
+		let old = self.scroll_panel.scroll.offset;
+		self.scroll_panel.scroll_down(delta as u16);
+		let changed = old != self.scroll_panel.scroll.offset;
+		if changed {
+			self.sync_tree_cursor_to_body_scroll();
+		}
+		changed
+	}
+
+	/// Scroll to a position based on a ratio (0.0 to 1.0)
+	/// Returns true if the scroll offset changed
+	pub fn scroll_to_ratio(&mut self, ratio: f32) -> bool {
+		let old = self.scroll_panel.scroll.offset;
+		self.scroll_panel.scroll_to_ratio(ratio);
+		let changed = old != self.scroll_panel.scroll.offset;
+		if changed {
+			self.sync_tree_cursor_to_body_scroll();
+		}
+		changed
+	}
+
+	/// After the body scroll position changes, snap the tree cursor to
+	/// the section that now contains the topmost visible item — so the
+	/// left-panel highlight follows wheel/scrollbar interaction in both
+	/// directions, and a subsequent Up/Down on the tree resumes from
+	/// the section the user is actually looking at.
+	pub(super) fn sync_tree_cursor_to_body_scroll(&mut self) {
+		if let Some(section_idx) = self.current_section_index() {
+			self.tree_cursor_section = Some(section_idx);
+		}
+		// No section under the topmost visible item (e.g. above the
+		// first section) → leave the cursor where it is. Forcing it to
+		// None would be a worse UX: the user typically wants the
+		// highlight to *track* something, not blink off entirely.
+	}
+
+	/// Start text editing mode for TextList, Text, or Map controls
+	/// Check if the current control is a number input
+	pub fn is_number_control(&self) -> bool {
+		self.current_item().is_some_and(|item| matches!(item.control, SettingControl::Number(_)))
+	}
+
+	pub fn start_editing(&mut self) {
+		// Snapshot a plain Text field before mutating it, so Esc can revert an
+		// abandoned edit to its pre-edit value (Enter/Tab commit, Esc cancels).
+		// Only plain Text gets this treatment; TextList/Map/Json/DualList keep
+		// their own in-place dismiss semantics.
+		self.text_edit_snapshot = None;
+		let text_snap = self.current_item().and_then(|item| {
+			matches!(item.control, SettingControl::Text(_)).then(|| {
+				(item.path.clone(), item.control.clone(), item.modified, item.layer_source, item.is_null)
+			})
+		});
+		if let Some((path, control, modified, layer_source, is_null)) = text_snap {
+			let pending = self.pending_changes.get(&path).cloned();
+			let was_pending_deletion = self.pending_deletions.contains(&path);
+			self.text_edit_snapshot = Some(TextEditSnapshot {
+				path,
+				control,
+				modified,
+				layer_source,
+				is_null,
+				pending,
+				was_pending_deletion,
+			});
+		}
+
+		if let Some(item) = self.current_item() {
+			if matches!(
+				item.control,
+				SettingControl::TextList(_)
+					| SettingControl::DualList(_)
+					| SettingControl::Text(_)
+					| SettingControl::Map(_)
+					| SettingControl::Json(_)
+			) {
+				self.editing_text = true;
+			}
+		}
+		if let Some(item) = self.current_item_mut() {
+			match item.control {
+				SettingControl::DualList(ref mut dl) => {
+					dl.editing = true;
+				}
+				SettingControl::Text(ref mut state) => {
+					state.editing = true;
+					// Mirror the spinner's "select-all on enter edit"
+					// UX: the first printable keystroke replaces the
+					// current value. Arrow keys or deletion cancel it
+					// and the input behaves normally from then on.
+					state.arm_replace_on_type();
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// Commit the currently-edited `Text` control's value into the pending
+	/// change set, mirroring what the `Enter` path does via `text_add_item`.
+	///
+	/// A `Text` field's typed value lives only in the control's own state until
+	/// `on_value_changed()` flushes it into `pending_changes` (the set that Save
+	/// persists). The `Enter` path commits, but exiting the edit with `Tab` only
+	/// called `stop_editing`, so the typed value was silently dropped on Save
+	/// even though the row still showed as modified (issue #2515). Returns
+	/// `true` when a `Text` value was committed. Other editable controls
+	/// (DualList/Map/TextList) already record their changes as they are mutated,
+	/// and `Esc` keeps its dismiss semantics, so this is only wired into the
+	/// `Tab` exit path.
+	pub fn commit_text_edit(&mut self) -> bool {
+		let is_text =
+			matches!(self.current_item().map(|item| &item.control), Some(SettingControl::Text(_)));
+		if is_text {
+			self.on_value_changed();
+		}
+		is_text
+	}
+
+	/// Stop text editing mode. This is the *accept* path — Enter, Tab, and
+	/// clicking away all land here and keep the typed value, so any pending
+	/// revert snapshot is dropped.
+	pub fn stop_editing(&mut self) {
+		self.editing_text = false;
+		self.text_edit_snapshot = None;
+		if let Some(item) = self.current_item_mut() {
+			match item.control {
+				SettingControl::DualList(ref mut dl) => {
+					dl.editing = false;
+				}
+				SettingControl::Text(ref mut state) => {
+					state.editing = false;
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// True while editing a plain single-line `Text` field (not a
+	/// TextList/Map/Json/DualList). These get the platform edit convention:
+	/// Enter/Tab commit the typed value, Esc reverts it.
+	pub fn is_editing_plain_text(&self) -> bool {
+		self.editing_text
+			&& matches!(self.current_item().map(|item| &item.control), Some(SettingControl::Text(_)))
+	}
+
+	/// Cancel a plain `Text` edit, discarding what was typed and restoring the
+	/// field to its pre-edit state — the Esc path, matching the Windows/macOS/
+	/// web convention where Esc reverts an edit while Enter/Tab commit it.
+	/// Restores both the control's buffer and the pending-change bookkeeping
+	/// (in case a mid-edit `on_value_changed` already flushed the buffer). With
+	/// no snapshot (a non-Text control), this just exits edit mode cleanly.
+	pub fn revert_editing(&mut self) {
+		self.editing_text = false;
+		let Some(snap) = self.text_edit_snapshot.take() else {
+			return;
+		};
+		if let Some(item) = self.current_item_mut() {
+			item.control = snap.control;
+			item.modified = snap.modified;
+			item.layer_source = snap.layer_source;
+			item.is_null = snap.is_null;
+		}
+		// Restore pending_changes / pending_deletions for this path to exactly
+		// what they were before the edit began.
+		match snap.pending {
+			Some(value) => {
+				self.pending_changes.insert(snap.path.clone(), value);
+			}
+			None => {
+				self.pending_changes.remove(&snap.path);
+			}
+		}
+		if snap.was_pending_deletion {
+			self.pending_deletions.insert(snap.path);
+		} else {
+			self.pending_deletions.remove(&snap.path);
+		}
+	}
+
+	/// Check if the current item is editable (TextList, DualList, Text, Map, or Json)
+	pub fn is_editable_control(&self) -> bool {
+		self.current_item().is_some_and(|item| {
+			matches!(
+				item.control,
+				SettingControl::TextList(_)
+					| SettingControl::DualList(_)
+					| SettingControl::Text(_)
+					| SettingControl::Map(_)
+					| SettingControl::Json(_)
+			)
+		})
+	}
+
+	/// Check if currently editing a JSON control
+	pub fn is_editing_json(&self) -> bool {
+		if !self.editing_text {
+			return false;
+		}
+		self
+			.current_item()
+			.map(|item| matches!(&item.control, SettingControl::Json(_)))
+			.unwrap_or(false)
+	}
+
+	/// Insert a character into the current editable control
+	pub fn text_insert(&mut self, c: char) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.insert(c),
+				SettingControl::Text(state) => state.insert(c),
+				SettingControl::Map(state) => {
+					state.new_key_text.insert(state.cursor, c);
+					state.cursor += c.len_utf8();
+				}
+				SettingControl::Json(state) => state.insert(c),
+				_ => {}
+			}
+		}
+	}
+
+	/// Insert a whole string into the current editable control. Mirrors
+	/// [`Self::text_insert`] but inserts in one pass so single-line text
+	/// fields can flatten embedded newlines (used by the paste path).
+	pub fn text_insert_str(&mut self, s: &str) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.insert_str(s),
+				SettingControl::Text(state) => state.insert_str(s),
+				SettingControl::Map(state) => {
+					for c in s.chars() {
+						state.new_key_text.insert(state.cursor, c);
+						state.cursor += c.len_utf8();
+					}
+				}
+				SettingControl::Json(state) => state.insert_str(s),
+				_ => {}
+			}
+		}
+	}
+
+	/// Route a paste to whichever Settings text input currently has focus
+	/// — the entry-dialog field when an entry dialog is open, otherwise the
+	/// main-panel control being edited. Returns `true` when a text field
+	/// accepted the paste. The bracketed-paste router relies on this so a
+	/// paste lands in the focused field instead of the buffer behind the
+	/// dialog (issue #2268).
+	pub fn paste_into_focused_text(&mut self, text: &str) -> bool {
+		if let Some(dialog) = self.entry_dialog_mut() {
+			if dialog.editing_text {
+				dialog.insert_str(text);
+				return true;
+			}
+			return false;
+		}
+		if self.editing_text {
+			self.text_insert_str(text);
+			return true;
+		}
+		false
+	}
+
+	/// Backspace in the current editable control
+	pub fn text_backspace(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.backspace(),
+				SettingControl::Text(state) => state.backspace(),
+				SettingControl::Map(state) if state.cursor > 0 => {
+					let mut char_start = state.cursor - 1;
+					while char_start > 0 && !state.new_key_text.is_char_boundary(char_start) {
+						char_start -= 1;
+					}
+					state.new_key_text.remove(char_start);
+					state.cursor = char_start;
+				}
+				SettingControl::Json(state) => state.backspace(),
+				_ => {}
+			}
+		}
+	}
+
+	/// Run `f` against the focused plain `Text` control, if that's what
+	/// is being edited. Backs the selection / clipboard key arms.
+	fn with_editing_text<R>(
+		&mut self,
+		f: impl FnOnce(&mut crate::view::controls::TextInputState) -> R,
+	) -> Option<R> {
+		if !self.is_editing_plain_text() {
+			return None;
+		}
+		match self.current_item_mut().map(|item| &mut item.control) {
+			Some(SettingControl::Text(state)) => Some(f(state)),
+			_ => None,
+		}
+	}
+
+	/// Extend the selection left in the focused plain Text control
+	/// (Shift+Left).
+	pub fn text_move_left_selecting(&mut self) {
+		self.with_editing_text(|state| state.move_left_selecting());
+	}
+
+	/// Extend the selection right in the focused plain Text control
+	/// (Shift+Right).
+	pub fn text_move_right_selecting(&mut self) {
+		self.with_editing_text(|state| state.move_right_selecting());
+	}
+
+	/// Select the focused plain Text control's whole value (Ctrl+A).
+	pub fn text_select_all(&mut self) {
+		self.with_editing_text(|state| state.select_all());
+	}
+
+	/// The focused plain Text control's selected text (Ctrl+C).
+	pub fn text_selected_text(&mut self) -> Option<String> {
+		self.with_editing_text(|state| state.selected_text()).flatten()
+	}
+
+	/// Move cursor left in the current editable control
+	pub fn text_move_left(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.move_left(),
+				SettingControl::Text(state) => state.move_left(),
+				SettingControl::Map(state) if state.cursor > 0 => {
+					let mut new_pos = state.cursor - 1;
+					while new_pos > 0 && !state.new_key_text.is_char_boundary(new_pos) {
+						new_pos -= 1;
+					}
+					state.cursor = new_pos;
+				}
+				SettingControl::Json(state) => state.move_left(),
+				_ => {}
+			}
+		}
+	}
+
+	/// Move cursor right in the current editable control
+	pub fn text_move_right(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.move_right(),
+				SettingControl::Text(state) => state.move_right(),
+				SettingControl::Map(state) if state.cursor < state.new_key_text.len() => {
+					let mut new_pos = state.cursor + 1;
+					while new_pos < state.new_key_text.len() && !state.new_key_text.is_char_boundary(new_pos)
+					{
+						new_pos += 1;
+					}
+					state.cursor = new_pos;
+				}
+				SettingControl::Json(state) => state.move_right(),
+				_ => {}
+			}
+		}
+	}
+
+	/// Move focus to previous item in TextList/Map (wraps within control)
+	pub fn text_focus_prev(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.focus_prev(),
+				SettingControl::Map(state) => {
+					state.focus_prev();
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// Move focus to next item in TextList/Map (wraps within control)
+	pub fn text_focus_next(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.focus_next(),
+				SettingControl::Map(state) => {
+					state.focus_next();
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// Add new item in TextList/Map (from the new item field)
+	pub fn text_add_item(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => state.add_item(),
+				SettingControl::Map(state) => state.add_entry_from_input(),
+				_ => {}
+			}
+		}
+		// Record the change
+		self.on_value_changed();
+	}
+
+	/// Remove the currently focused item in TextList/Map
+	pub fn text_remove_focused(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::TextList(state) => {
+					if let Some(idx) = state.focused_item {
+						state.remove_item(idx);
+					}
+				}
+				SettingControl::Map(state) => {
+					if let Some(idx) = state.focused_entry {
+						state.remove_entry(idx);
+					}
+				}
+				_ => {}
+			}
+		}
+		// Record the change
+		self.on_value_changed();
+	}
+
+	/// Check if currently editing a DualList control
+	pub fn is_editing_dual_list(&self) -> bool {
+		if !self.editing_text {
+			return false;
+		}
+		self
+			.current_item()
+			.map(|item| matches!(&item.control, SettingControl::DualList(_)))
+			.unwrap_or(false)
+	}
+
+	// =========== DualList methods ===========
+
+	/// Access the DualList at `item_idx` in the current page and run `f` on it.
+	/// Returns `None` if the item isn't a DualList or the index is out of bounds.
+	pub fn with_dual_list_mut<R>(
+		&mut self,
+		item_idx: usize,
+		f: impl FnOnce(&mut crate::view::controls::DualListState) -> R,
+	) -> Option<R> {
+		let page = self.pages.get_mut(self.selected_category)?;
+		let item = page.items.get_mut(item_idx)?;
+		if let SettingControl::DualList(ref mut state) = item.control { Some(f(state)) } else { None }
+	}
+
+	/// Access the currently selected DualList and run `f` on it.
+	/// Returns `None` if the current item isn't a DualList.
+	pub fn with_current_dual_list_mut<R>(
+		&mut self,
+		f: impl FnOnce(&mut crate::view::controls::DualListState) -> R,
+	) -> Option<R> {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::DualList(ref mut state) = item.control {
+				return Some(f(state));
+			}
+		}
+		None
+	}
+
+	/// After changing a DualList, refresh the sibling's excluded set.
+	///
+	/// Assumes the sibling setting lives on the same page as the current item.
+	/// This holds for the current use case (`status_bar.left` and `.right` are both
+	/// flattened into the Editor page under the "Status Bar" section). Cross-category
+	/// siblings would silently no-op until the next `build_pages()`.
+	pub fn refresh_dual_list_sibling(&mut self) {
+		let (new_included, sibling_path) = {
+			let Some(item) = self.current_item() else {
+				return;
+			};
+			let SettingControl::DualList(state) = &item.control else {
+				return;
+			};
+			let Some(ref sib_path) = item.dual_list_sibling else {
+				return;
+			};
+			(state.included.clone(), sib_path.clone())
+		};
+
+		// Find sibling item in same page and update its excluded
+		if let Some(page) = self.pages.get_mut(self.selected_category) {
+			for other in page.items.iter_mut() {
+				if other.path == sibling_path {
+					if let SettingControl::DualList(ref mut sib_state) = other.control {
+						sib_state.excluded = new_included;
+					}
+					break;
+				}
+			}
+		}
+	}
+
+	// =========== JSON editing methods ===========
+
+	/// Move cursor up in JSON editor
+	pub fn json_cursor_up(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.move_up();
+			}
+		}
+	}
+
+	/// Move cursor down in JSON editor
+	pub fn json_cursor_down(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.move_down();
+			}
+		}
+	}
+
+	/// Insert newline in JSON editor
+	pub fn json_insert_newline(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.insert('\n');
+			}
+		}
+	}
+
+	/// Delete character at cursor in JSON editor
+	pub fn json_delete(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.delete();
+			}
+		}
+	}
+
+	/// Stop JSON editing: commit if valid, revert if invalid
+	pub fn json_exit_editing(&mut self) {
+		let is_valid = self
+			.current_item()
+			.map(
+				|item| {
+					if let SettingControl::Json(state) = &item.control { state.is_valid() } else { true }
+				},
+			)
+			.unwrap_or(true);
+
+		if is_valid {
+			if let Some(item) = self.current_item_mut() {
+				if let SettingControl::Json(state) = &mut item.control {
+					state.commit();
+				}
+			}
+			self.on_value_changed();
+		} else if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.revert();
+			}
+		}
+		self.editing_text = false;
+	}
+
+	/// Select all text in JSON editor
+	pub fn json_select_all(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.select_all();
+			}
+		}
+	}
+
+	/// Get selected text from JSON editor
+	pub fn json_selected_text(&self) -> Option<String> {
+		if let Some(item) = self.current_item() {
+			if let SettingControl::Json(state) = &item.control {
+				return state.selected_text();
+			}
+		}
+		None
+	}
+
+	/// Move cursor up with selection in JSON editor
+	pub fn json_cursor_up_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.editor.move_up_selecting();
+			}
+		}
+	}
+
+	/// Move cursor down with selection in JSON editor
+	pub fn json_cursor_down_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.editor.move_down_selecting();
+			}
+		}
+	}
+
+	/// Move cursor left with selection in JSON editor
+	pub fn json_cursor_left_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.editor.move_left_selecting();
+			}
+		}
+	}
+
+	/// Move cursor right with selection in JSON editor
+	pub fn json_cursor_right_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Json(state) = &mut item.control {
+				state.editor.move_right_selecting();
+			}
+		}
+	}
+
+	// =========== Dropdown methods ===========
+
+	/// Check if current item is a dropdown with menu open
+	pub fn is_dropdown_open(&self) -> bool {
+		self.current_item().is_some_and(|item| {
+			if let SettingControl::Dropdown(ref d) = item.control { d.open } else { false }
+		})
+	}
+
+	/// Toggle dropdown open/closed
+	pub fn dropdown_toggle(&mut self) {
+		let mut opened = false;
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				d.toggle_open();
+				opened = d.open;
+			}
+		}
+
+		// When dropdown opens, update content height and ensure it's visible
+		if opened {
+			// Update content height since item is now taller
+			let selected_item = self.selected_item;
+			let width = self.layout_width;
+			if let Some(page) = self.pages.get(self.selected_category) {
+				// Ensure the dropdown item is visible with its new expanded height
+				self.scroll_panel.ensure_focused_visible(&page.items, selected_item, None, width);
+			}
+		}
+	}
+
+	/// Select previous option in dropdown
+	pub fn dropdown_prev(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				d.select_prev();
+			}
+		}
+	}
+
+	/// Select next option in dropdown
+	pub fn dropdown_next(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				d.select_next();
+			}
+		}
+	}
+
+	/// Jump to first option in dropdown
+	pub fn dropdown_home(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				if !d.options.is_empty() {
+					d.selected = 0;
+					d.ensure_visible();
+				}
+			}
+		}
+	}
+
+	/// Jump to last option in dropdown
+	pub fn dropdown_end(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				if !d.options.is_empty() {
+					d.selected = d.options.len() - 1;
+					d.ensure_visible();
+				}
+			}
+		}
+	}
+
+	/// Confirm dropdown selection (close and record change)
+	pub fn dropdown_confirm(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				d.confirm();
+			}
+		}
+		self.on_value_changed();
+	}
+
+	/// Cancel dropdown (restore original value and close)
+	pub fn dropdown_cancel(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				d.cancel();
+			}
+		}
+	}
+
+	/// Select a specific dropdown option by index and confirm
+	pub fn dropdown_select(&mut self, option_idx: usize) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				if option_idx < d.options.len() {
+					d.selected = option_idx;
+					d.confirm();
+				}
+			}
+		}
+		self.on_value_changed();
+	}
+
+	/// Set dropdown hover index (for mouse hover indication)
+	/// Returns true if the hover index changed
+	pub fn set_dropdown_hover(&mut self, hover_idx: Option<usize>) -> bool {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				if d.open && d.hover_index != hover_idx {
+					d.hover_index = hover_idx;
+					return true;
+				}
+			}
+		}
+		false
+	}
+
+	/// Scroll open dropdown by delta (positive = down, negative = up)
+	pub fn dropdown_scroll(&mut self, delta: i32) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Dropdown(ref mut d) = item.control {
+				if d.open {
+					d.scroll_by(delta);
+				}
+			}
+		}
+	}
+
+	// =========== Number editing methods ===========
+
+	/// Check if current item is a number input being edited
+	pub fn is_number_editing(&self) -> bool {
+		self.current_item().is_some_and(|item| {
+			if let SettingControl::Number(ref n) = item.control { n.editing() } else { false }
+		})
+	}
+
+	/// Start number editing mode
+	pub fn start_number_editing(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.start_editing();
+			}
+		}
+	}
+
+	/// Insert a character into number input
+	pub fn number_insert(&mut self, c: char) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.insert_char(c);
+			}
+		}
+	}
+
+	/// Backspace in number input
+	pub fn number_backspace(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.backspace();
+			}
+		}
+	}
+
+	/// Confirm number editing
+	pub fn number_confirm(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.confirm_editing();
+			}
+		}
+		self.on_value_changed();
+	}
+
+	/// Cancel number editing
+	pub fn number_cancel(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.cancel_editing();
+			}
+		}
+	}
+
+	/// Delete character forward in number input
+	pub fn number_delete(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.delete();
+			}
+		}
+	}
+
+	/// Move cursor left in number input
+	pub fn number_move_left(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_left();
+			}
+		}
+	}
+
+	/// Move cursor right in number input
+	pub fn number_move_right(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_right();
+			}
+		}
+	}
+
+	/// Move cursor to start of number input
+	pub fn number_move_home(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_home();
+			}
+		}
+	}
+
+	/// Move cursor to end of number input
+	pub fn number_move_end(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_end();
+			}
+		}
+	}
+
+	/// Move cursor left selecting in number input
+	pub fn number_move_left_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_left_selecting();
+			}
+		}
+	}
+
+	/// Move cursor right selecting in number input
+	pub fn number_move_right_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_right_selecting();
+			}
+		}
+	}
+
+	/// Move cursor to start selecting in number input
+	pub fn number_move_home_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_home_selecting();
+			}
+		}
+	}
+
+	/// Move cursor to end selecting in number input
+	pub fn number_move_end_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_end_selecting();
+			}
+		}
+	}
+
+	/// Move word left in number input
+	pub fn number_move_word_left(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_word_left();
+			}
+		}
+	}
+
+	/// Move word right in number input
+	pub fn number_move_word_right(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_word_right();
+			}
+		}
+	}
+
+	/// Move word left selecting in number input
+	pub fn number_move_word_left_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_word_left_selecting();
+			}
+		}
+	}
+
+	/// Move word right selecting in number input
+	pub fn number_move_word_right_selecting(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.move_word_right_selecting();
+			}
+		}
+	}
+
+	/// Select all text in number input
+	pub fn number_select_all(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.select_all();
+			}
+		}
+	}
+
+	/// Delete word backward in number input
+	pub fn number_delete_word_backward(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.delete_word_backward();
+			}
+		}
+	}
+
+	/// Delete word forward in number input
+	pub fn number_delete_word_forward(&mut self) {
+		if let Some(item) = self.current_item_mut() {
+			if let SettingControl::Number(ref mut n) = item.control {
+				n.delete_word_forward();
+			}
+		}
+	}
+
+	/// Get list of pending changes for display
+	pub fn get_change_descriptions(&self) -> Vec<String> {
+		let mut descriptions: Vec<String> = self
+			.pending_changes
+			.iter()
+			.map(|(path, value)| {
+				let value_str = match value {
+					serde_json::Value::Bool(b) => b.to_string(),
+					serde_json::Value::Number(n) => n.to_string(),
+					serde_json::Value::String(s) => format!("\"{}\"", s),
+					_ => value.to_string(),
+				};
+				format!("{}: {}", path, value_str)
+			})
+			.collect();
+		// Also include pending deletions (resets)
+		for path in &self.pending_deletions {
+			descriptions.push(format!("{}: (reset to default)", path));
+		}
+		descriptions.sort();
+		descriptions
+	}
+}
+
+/// Update a control's state from a JSON value
+/// Field names whose per-entry "set to null" genuinely *inherits* a parent
+/// value (so the button reads `[Inherit]`) rather than just clearing the field
+/// (`[Clear]`). For a `/languages` entry a field inherits when the global
+/// `editor` config has a same-named setting (e.g. `line_wrap`, `tab_size`);
+/// fields with no global fallback (e.g. `formatter`) are clear-only. Other maps
+/// have no such parent scope, so nothing inherits.
+fn inheritable_fields_for(map_path: &str) -> std::collections::HashSet<String> {
+	if map_path == "/languages" {
+		serde_json::to_value(crate::config::EditorConfig::default())
+			.ok()
+			.and_then(|v| {
+				v.as_object().map(|o| o.keys().cloned().collect::<std::collections::HashSet<String>>())
+			})
+			.unwrap_or_default()
+	} else {
+		std::collections::HashSet::new()
+	}
+}
+
+/// Override each dialog field's `default` with the bundled config's value for
+/// this map entry (e.g. `languages.html.grammar = "HTML"`), so `[Reset]`
+/// restores the built-in per-entry value rather than the generic schema default
+/// for the field type. Falls back to the schema defaults when the entry isn't
+/// in the bundled config (e.g. a brand-new map key).
+fn apply_builtin_defaults(dialog: &mut EntryDialogState, entry_pointer: &str) {
+	let Ok(default_cfg) = serde_json::to_value(Config::default()) else {
+		return;
+	};
+	let Some(entry) = default_cfg.pointer(entry_pointer) else {
+		return;
+	};
+	for item in &mut dialog.items {
+		if item.path == "__key__" {
+			continue;
+		}
+		let field = item.path.trim_start_matches('/');
+		if let Some(v) = entry.get(field) {
+			item.default = Some(v.clone());
+		}
+	}
+}
+
+pub(crate) fn update_control_from_value(control: &mut SettingControl, value: &serde_json::Value) {
+	match control {
+		SettingControl::Toggle(state) => {
+			if let Some(b) = value.as_bool() {
+				state.checked = b;
+			}
+		}
+		SettingControl::Number(state) => {
+			if let Some(n) = value.as_i64() {
+				state.value = n;
+			}
+		}
+		SettingControl::Dropdown(state) => {
+			if let Some(s) = value.as_str() {
+				if let Some(idx) = state.options.iter().position(|o| o == s) {
+					state.selected = idx;
+				}
+			}
+		}
+		SettingControl::Text(state) => {
+			if let Some(s) = value.as_str() {
+				// Model update, not user input: apply unconditionally
+				// (`set_value` is gated on the control being enabled,
+				// but a reset/inherit must land even on a control whose
+				// focus state is Disabled).
+				state.force_value(s);
+			}
+		}
+		SettingControl::TextList(state) => {
+			if let Some(arr) = value.as_array() {
+				state.items = arr
+					.iter()
+					.filter_map(|v| {
+						if state.is_integer {
+							v.as_i64()
+								.map(|n| n.to_string())
+								.or_else(|| v.as_u64().map(|n| n.to_string()))
+								.or_else(|| v.as_f64().map(|n| n.to_string()))
+						} else {
+							v.as_str().map(String::from)
+						}
+					})
+					.collect();
+			}
+		}
+		SettingControl::DualList(state) => {
+			if let Some(arr) = value.as_array() {
+				state.included = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+			}
+		}
+		SettingControl::Map(state) => {
+			if let Some(obj) = value.as_object() {
+				state.entries = obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+				state.entries.sort_by(|a, b| a.0.cmp(&b.0));
+			}
+		}
+		SettingControl::ObjectArray(state) => {
+			if let Some(arr) = value.as_array() {
+				state.bindings = arr.clone();
+			}
+		}
+		SettingControl::Json(state) => {
+			// Re-create from value with pretty printing
+			let json_str = serde_json::to_string_pretty(value).unwrap_or_else(|_| "null".to_string());
+			let json_str = if json_str.is_empty() { "null".to_string() } else { json_str };
+			state.original_text = json_str.clone();
+			state.editor.set_value(&json_str);
+			state.scroll_offset = 0;
+		}
+		SettingControl::Complex { .. } => {}
+	}
+}
+
+fn normalize_pending_change(path: &str, value: serde_json::Value) -> serde_json::Value {
+	if path == "/editor/indentation_guide_glyph" {
+		if let serde_json::Value::String(value) = value {
+			return serde_json::Value::String(crate::config::normalize_indentation_guide_glyph(&value));
+		}
+	}
+
+	value
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const TEST_SCHEMA: &str = r#"
+{
+  "type": "object",
+  "properties": {
+    "theme": {
+      "type": "string",
+      "default": "dark"
+    },
+    "line_numbers": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "$defs": {}
+}
+"#;
+
+	fn test_config() -> Config {
+		Config::default()
+	}
+
+	#[test]
+	fn test_settings_state_creation() {
+		let config = test_config();
+		let state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		assert!(!state.visible);
+		assert_eq!(state.selected_category, 0);
+		assert!(!state.has_changes());
+	}
+
+	#[test]
+	fn test_navigation() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// Start in category focus
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		// Toggle to settings
+		state.toggle_focus();
+		assert_eq!(state.focus_panel(), FocusPanel::Settings);
+
+		// Navigate items
+		state.select_next();
+		assert_eq!(state.selected_item, 1);
+
+		state.select_prev();
+		assert_eq!(state.selected_item, 0);
+	}
+
+	#[test]
+	fn test_pending_changes() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		assert!(!state.has_changes());
+
+		state.set_pending_change("/theme", serde_json::Value::String("light".to_string()));
+		assert!(state.has_changes());
+
+		state.discard_changes();
+		assert!(!state.has_changes());
+	}
+
+	/// Regression test for issue #2515: committing a text-field edit with Tab
+	/// (which routes through `stop_editing`, unlike Enter which routes through
+	/// `text_add_item`) must still flush the typed value into `pending_changes`
+	/// so Save persists it. Previously only the Enter path committed, so a
+	/// value typed and then dismissed with Tab/Esc was lost on Save even though
+	/// the row showed as modified.
+	#[test]
+	fn test_text_edit_committed_on_stop_editing() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// `theme` is a plain string property -> a Text control. Items are
+		// sorted within the page, so select it explicitly by path.
+		let theme_idx =
+			state.pages[0].items.iter().position(|i| i.path == "/theme").expect("theme item present");
+		state.selected_category = 0;
+		state.selected_item = theme_idx;
+
+		assert!(matches!(state.current_item().map(|i| &i.control), Some(SettingControl::Text(_))));
+
+		// Enter edit mode and type a new value (first keystroke replaces the
+		// armed default, mirroring the real key flow).
+		state.start_editing();
+		for c in "light".chars() {
+			state.text_insert(c);
+		}
+
+		// Exit via the Tab path (NOT Enter): commit then stop. This is the bug
+		// surface — Tab previously skipped the commit.
+		assert!(state.commit_text_edit());
+		state.stop_editing();
+
+		assert_eq!(
+			state.pending_changes.get("/theme"),
+			Some(&serde_json::Value::String("light".to_string())),
+			"typed value must be flushed to pending_changes on Tab commit"
+		);
+
+		// And it survives a Save into the live config.
+		let config = state.apply_changes(&config).unwrap();
+		assert_eq!(config.theme.0, "light");
+	}
+
+	/// `Esc` keeps its dismiss semantics: it stops editing without flushing the
+	/// in-progress value into `pending_changes`, so it must not record a change
+	/// the way the Tab/Enter commit paths do.
+	#[test]
+	fn test_text_edit_esc_does_not_commit() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		let theme_idx =
+			state.pages[0].items.iter().position(|i| i.path == "/theme").expect("theme item present");
+		state.selected_category = 0;
+		state.selected_item = theme_idx;
+
+		state.start_editing();
+		for c in "light".chars() {
+			state.text_insert(c);
+		}
+
+		// Esc path: stop_editing without commit_text_edit.
+		state.stop_editing();
+
+		assert!(!state.pending_changes.contains_key("/theme"), "Esc must not record a pending change");
+	}
+
+	#[test]
+	fn test_indentation_guide_glyph_pending_change_is_normalized() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		state.set_pending_change(
+			"/editor/indentation_guide_glyph",
+			serde_json::Value::String("  ┊  ".to_string()),
+		);
+		assert_eq!(
+			state.pending_changes.get("/editor/indentation_guide_glyph"),
+			Some(&serde_json::Value::String("┊".to_string()))
+		);
+
+		let config = state.apply_changes(&config).unwrap();
+		assert_eq!(config.editor.indentation_guide_glyph, "┊");
+
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+		state.set_pending_change(
+			"/editor/indentation_guide_glyph",
+			serde_json::Value::String("   ".to_string()),
+		);
+		assert_eq!(
+			state.pending_changes.get("/editor/indentation_guide_glyph"),
+			Some(&serde_json::Value::String("▏".to_string()))
+		);
+
+		// Backstop for text-edit paths that may already have written a raw
+		// pending value before normalization was added: apply_changes must
+		// still produce the same normalized live config that reload would.
+		state.pending_changes.insert(
+			"/editor/indentation_guide_glyph".to_string(),
+			serde_json::Value::String("  A  ".to_string()),
+		);
+		let config = state.apply_changes(&config).unwrap();
+		assert_eq!(config.editor.indentation_guide_glyph, "A");
+	}
+
+	#[test]
+	fn test_show_hide() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		assert!(!state.visible);
+
+		state.show();
+		assert!(state.visible);
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		state.hide();
+		assert!(!state.visible);
+	}
+
+	// Schema with dropdown (enum) and number controls for testing
+	const TEST_SCHEMA_CONTROLS: &str = r#"
+{
+  "type": "object",
+  "properties": {
+    "theme": {
+      "type": "string",
+      "enum": ["dark", "light", "high-contrast"],
+      "default": "dark"
+    },
+    "tab_size": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8,
+      "default": 4
+    },
+    "line_numbers": {
+      "type": "boolean",
+      "default": true
+    }
+  },
+  "$defs": {}
+}
+"#;
+
+	const TEST_SCHEMA_THEME_DEFAULT: &str = r#"
+{
+  "type": "object",
+  "properties": {
+    "theme": {
+      "type": "string",
+      "enum": ["dark", "light", "high-contrast"],
+      "default": "high-contrast"
+    }
+  },
+  "$defs": {}
+}
+"#;
+
+	fn open_theme_dropdown_state() -> SettingsState {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_THEME_DEFAULT, &config).unwrap();
+		state.show();
+		state.toggle_focus();
+		state
+	}
+
+	#[test]
+	fn test_dropdown_toggle() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_CONTROLS, &config).unwrap();
+		state.show();
+		state.toggle_focus(); // Move to settings
+
+		// Items are sorted alphabetically: line_numbers, tab_size, theme
+		// Navigate to theme (dropdown) at index 2
+		state.select_next();
+		state.select_next();
+		assert!(!state.is_dropdown_open());
+
+		state.dropdown_toggle();
+		assert!(state.is_dropdown_open());
+
+		state.dropdown_toggle();
+		assert!(!state.is_dropdown_open());
+	}
+
+	#[test]
+	fn test_dropdown_cancel_restores() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_CONTROLS, &config).unwrap();
+		state.show();
+		state.toggle_focus();
+
+		// Items are sorted alphabetically: line_numbers, tab_size, theme
+		// Navigate to theme (dropdown) at index 2
+		state.select_next();
+		state.select_next();
+
+		// Open dropdown
+		state.dropdown_toggle();
+		assert!(state.is_dropdown_open());
+
+		// Get initial selection
+		let initial = state.current_item().and_then(|item| {
+			if let SettingControl::Dropdown(ref d) = item.control { Some(d.selected) } else { None }
+		});
+
+		// Change selection
+		state.dropdown_next();
+		let after_change = state.current_item().and_then(|item| {
+			if let SettingControl::Dropdown(ref d) = item.control { Some(d.selected) } else { None }
+		});
+		assert_ne!(initial, after_change);
+
+		// Cancel - should restore
+		state.dropdown_cancel();
+		assert!(!state.is_dropdown_open());
+
+		let after_cancel = state.current_item().and_then(|item| {
+			if let SettingControl::Dropdown(ref d) = item.control { Some(d.selected) } else { None }
+		});
+		assert_eq!(initial, after_cancel);
+	}
+
+	#[test]
+	fn test_dropdown_confirm_keeps_selection() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_CONTROLS, &config).unwrap();
+		state.show();
+		state.toggle_focus();
+
+		// Open dropdown
+		state.dropdown_toggle();
+
+		// Change selection
+		state.dropdown_next();
+		let after_change = state.current_item().and_then(|item| {
+			if let SettingControl::Dropdown(ref d) = item.control { Some(d.selected) } else { None }
+		});
+
+		// Confirm - should keep new selection
+		state.dropdown_confirm();
+		assert!(!state.is_dropdown_open());
+
+		let after_confirm = state.current_item().and_then(|item| {
+			if let SettingControl::Dropdown(ref d) = item.control { Some(d.selected) } else { None }
+		});
+		assert_eq!(after_change, after_confirm);
+	}
+
+	#[test]
+	fn dropdown_reverting_to_original_value_clears_pending_and_row_modified() {
+		let mut state = open_theme_dropdown_state();
+
+		state.dropdown_select(0); // dark
+		assert!(state.has_changes());
+		assert!(state.current_item().unwrap().modified);
+
+		state.dropdown_select(2); // high-contrast, matching Config::default()
+		assert!(!state.has_changes());
+		let item = state.current_item().unwrap();
+		assert!(!item.modified);
+		assert_eq!(item.layer_source, ConfigLayer::System);
+	}
+
+	#[test]
+	fn reset_after_unsaved_inherited_dropdown_change_cancels_pending_edit() {
+		let mut state = open_theme_dropdown_state();
+
+		state.dropdown_select(1); // light
+		assert!(state.has_changes());
+		assert!(state.current_item().unwrap().modified);
+
+		state.reset_current_to_default();
+		assert!(!state.has_changes());
+		let item = state.current_item().unwrap();
+		assert!(!item.modified);
+		assert_eq!(item.layer_source, ConfigLayer::System);
+		if let SettingControl::Dropdown(dropdown) = &item.control {
+			assert_eq!(dropdown.selected_value(), Some("high-contrast"));
+		} else {
+			panic!("theme should render as a dropdown");
+		}
+	}
+
+	#[test]
+	fn test_number_editing() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_CONTROLS, &config).unwrap();
+		state.show();
+		state.toggle_focus();
+
+		// Navigate to tab_size (second item)
+		state.select_next();
+
+		// Should not be editing yet
+		assert!(!state.is_number_editing());
+
+		// Start editing
+		state.start_number_editing();
+		assert!(state.is_number_editing());
+
+		// Insert characters
+		state.number_insert('8');
+
+		// Confirm
+		state.number_confirm();
+		assert!(!state.is_number_editing());
+	}
+
+	#[test]
+	fn test_number_cancel_editing() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_CONTROLS, &config).unwrap();
+		state.show();
+		state.toggle_focus();
+
+		// Navigate to tab_size
+		state.select_next();
+
+		// Get initial value
+		let initial_value = state.current_item().and_then(|item| {
+			if let SettingControl::Number(ref n) = item.control { Some(n.value) } else { None }
+		});
+
+		// Start editing and make changes
+		state.start_number_editing();
+		state.number_backspace();
+		state.number_insert('9');
+		state.number_insert('9');
+
+		// Cancel
+		state.number_cancel();
+		assert!(!state.is_number_editing());
+
+		// Value should be unchanged (edit text was just cleared)
+		let after_cancel = state.current_item().and_then(|item| {
+			if let SettingControl::Number(ref n) = item.control { Some(n.value) } else { None }
+		});
+		assert_eq!(initial_value, after_cancel);
+	}
+
+	#[test]
+	fn test_number_backspace() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA_CONTROLS, &config).unwrap();
+		state.show();
+		state.toggle_focus();
+		state.select_next();
+
+		state.start_number_editing();
+		state.number_backspace();
+
+		// Check edit text was modified
+		let display_text = state.current_item().and_then(|item| {
+			if let SettingControl::Number(ref n) = item.control { Some(n.display_text()) } else { None }
+		});
+		// Original "4" should have last char removed, leaving ""
+		assert_eq!(display_text, Some(String::new()));
+
+		state.number_cancel();
+	}
+
+	#[test]
+	fn test_layer_selection() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// Default is User layer
+		assert_eq!(state.target_layer, ConfigLayer::User);
+		assert_eq!(state.target_layer_name(), "User");
+
+		// Cycle through layers
+		state.cycle_target_layer();
+		assert_eq!(state.target_layer, ConfigLayer::Project);
+		assert_eq!(state.target_layer_name(), "Project");
+
+		state.cycle_target_layer();
+		assert_eq!(state.target_layer, ConfigLayer::Session);
+		assert_eq!(state.target_layer_name(), "Session");
+
+		state.cycle_target_layer();
+		assert_eq!(state.target_layer, ConfigLayer::User);
+
+		// Set directly
+		state.set_target_layer(ConfigLayer::Project);
+		assert_eq!(state.target_layer, ConfigLayer::Project);
+
+		// Setting to System should be ignored (read-only)
+		state.set_target_layer(ConfigLayer::System);
+		assert_eq!(state.target_layer, ConfigLayer::Project);
+	}
+
+	#[test]
+	fn test_layer_switch_clears_pending_changes() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// Add a pending change
+		state.set_pending_change("/theme", serde_json::Value::String("light".to_string()));
+		assert!(state.has_changes());
+
+		// Switching layers clears pending changes
+		state.cycle_target_layer();
+		assert!(!state.has_changes());
+	}
+
+	/// Regression test for the quicklsp settings-save bug.
+	///
+	/// When editing an existing map entry whose value schema is itself an
+	/// array (the `is_single_value` case — e.g. `universal_lsp.quicklsp`
+	/// where the value schema is `LspLanguageConfig` = array of
+	/// `LspServerConfig`), opening a nested ArrayItem dialog used to
+	/// compute its `map_path` from `parent.map_path + item.path` only —
+	/// dropping the entry key segment whenever `item.path` was `""`.
+	/// The nested dialog's save would then record a pending change at
+	/// `/universal_lsp/`, which downstream wrote an empty-string key
+	/// under `universal_lsp` in the saved config file.
+	///
+	/// This test exercises the real `open_nested_entry_dialog` + save
+	/// path using a schema shaped like `LspLanguageConfig` and asserts:
+	/// 1. The nested dialog's `map_path` is the full entry path.
+	/// 2. The recorded pending-change path is the full entry path, not
+	///    `/universal_lsp/` and not any `/universal_lsp/*` path with a
+	///    trailing slash.
+	#[test]
+	fn nested_array_save_records_full_entry_path() {
+		// EntryDialogState is already re-exported via `use super::*;`.
+		// Pull in SettingType from the sibling schema module explicitly.
+		use crate::view::settings::schema::SettingType;
+
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// LspServerConfig-ish: a single "enabled" boolean field.
+		let item_schema = SettingSchema {
+			path: "/item".to_string(),
+			name: "Server".to_string(),
+			description: None,
+			setting_type: SettingType::Object {
+				properties: vec![SettingSchema {
+					path: "/enabled".to_string(),
+					name: "Enabled".to_string(),
+					description: None,
+					setting_type: SettingType::Boolean,
+					default: Some(serde_json::json!(false)),
+					read_only: false,
+					section: None,
+					order: None,
+					nullable: false,
+					enum_from: None,
+					dual_list_sibling: None,
+					dynamically_extendable_status_bar_elements: false,
+				}],
+			},
+			default: None,
+			read_only: false,
+			section: None,
+			order: None,
+			nullable: false,
+			enum_from: None,
+			dual_list_sibling: None,
+			dynamically_extendable_status_bar_elements: false,
+		};
+
+		// universal_lsp's value schema: ObjectArray of the item schema above.
+		// Note: path is "" just like the real schema parser produces for
+		// `parse_setting("value", "", ...)` — this is what drives the
+		// `is_single_value` code path in EntryDialogState::from_schema.
+		let value_schema = SettingSchema {
+			path: String::new(),
+			name: "value".to_string(),
+			description: None,
+			setting_type: SettingType::ObjectArray {
+				item_schema: Box::new(item_schema.clone()),
+				display_field: None,
+			},
+			default: None,
+			read_only: false,
+			section: None,
+			order: None,
+			nullable: false,
+			enum_from: None,
+			dual_list_sibling: None,
+			dynamically_extendable_status_bar_elements: false,
+		};
+
+		// Parent dialog: user is editing the existing "quicklsp" entry
+		// under /universal_lsp. This is the MapEntry dialog the real UI
+		// opened via `open_entry_dialog`.
+		let parent = EntryDialogState::from_schema(
+			"quicklsp".to_string(),
+			&serde_json::json!([{ "enabled": true }]),
+			&value_schema,
+			"/universal_lsp",
+			false, // existing entry
+			false,
+			&HashMap::new(),
+		);
+
+		// Precondition: is_single_value triggers and entry_path is correct.
+		assert!(parent.is_single_value, "array value_schema should trigger is_single_value path");
+		assert_eq!(parent.entry_path(), "/universal_lsp/quicklsp");
+
+		state.entry_dialog_stack.push(parent);
+
+		// Exercise the REAL open_nested_entry_dialog — this is the code
+		// path that used to produce the wrong path. The outer dialog's
+		// ObjectArray item is already focused with its first entry
+		// selected (init_object_array_focus in from_schema).
+		state.open_nested_entry_dialog();
+
+		// A nested dialog should have been pushed.
+		assert_eq!(
+			state.entry_dialog_stack.len(),
+			2,
+			"open_nested_entry_dialog should have pushed a nested dialog"
+		);
+
+		// CRITICAL (part 1): the nested dialog must root at the full
+		// entry path, not at the parent's map_path alone.
+		let nested_map_path = state.entry_dialog_stack.last().map(|d| d.map_path.clone()).unwrap();
+		assert_eq!(
+			nested_map_path, "/universal_lsp/quicklsp",
+			"BUG: nested dialog's map_path dropped the 'quicklsp' key segment"
+		);
+
+		// Save the nested dialog via the normal dispatch.
+		state.save_entry_dialog();
+
+		// Nested dialog should be popped, parent still on the stack.
+		assert_eq!(state.entry_dialog_stack.len(), 1);
+
+		// CRITICAL (part 2): the pending change must be rooted at the
+		// full entry path, not at `/universal_lsp/` with a trailing slash.
+		assert!(
+			!state.pending_changes.contains_key("/universal_lsp/"),
+			"regression: pending change recorded under empty-key path /universal_lsp/. \
+             All keys: {:?}",
+			state.pending_changes.keys().collect::<Vec<_>>()
+		);
+		assert!(
+			!state.pending_changes.keys().any(|k| k.starts_with("/universal_lsp") && k.ends_with('/')),
+			"no /universal_lsp/* path should end in a trailing slash; got {:?}",
+			state.pending_changes.keys().collect::<Vec<_>>()
+		);
+		assert!(
+			state.pending_changes.contains_key("/universal_lsp/quicklsp"),
+			"expected pending change at /universal_lsp/quicklsp, got {:?}",
+			state.pending_changes.keys().collect::<Vec<_>>()
+		);
+	}
+
+	#[test]
+	fn test_refresh_dual_list_sibling_updates_excluded() {
+		use crate::view::controls::DualListState;
+
+		// Uses the real config schema (which has /editor/status_bar/left and /right
+		// as DualList siblings).
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = test_config();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+
+		// Find the Editor page and the status bar left/right items
+		let editor_page_idx =
+			state.pages.iter().position(|p| p.path == "/editor").expect("editor page");
+		state.selected_category = editor_page_idx;
+
+		let (left_idx, right_idx) = {
+			let page = &state.pages[editor_page_idx];
+			let l =
+				page.items.iter().position(|i| i.path == "/editor/status_bar/left").expect("left item");
+			let r =
+				page.items.iter().position(|i| i.path == "/editor/status_bar/right").expect("right item");
+			(l, r)
+		};
+
+		// Sanity: both should be DualList controls
+		assert!(matches!(
+			&state.pages[editor_page_idx].items[left_idx].control,
+			SettingControl::DualList(_)
+		));
+
+		// Capture the initial left.excluded — should match right's default values.
+		let default_right_items: Vec<String> =
+			match &state.pages[editor_page_idx].items[right_idx].control {
+				SettingControl::DualList(dl) => dl.included.clone(),
+				_ => panic!("right should be DualList"),
+			};
+		let initial_left_excluded: Vec<String> =
+			match &state.pages[editor_page_idx].items[left_idx].control {
+				SettingControl::DualList(dl) => dl.excluded.clone(),
+				_ => panic!("left should be DualList"),
+			};
+		assert_eq!(
+			initial_left_excluded, default_right_items,
+			"left.excluded should mirror right's included on initial build"
+		);
+
+		// Mutate left: add a new element that's not in right
+		let new_element = "{chord}".to_string();
+		state.selected_item = left_idx;
+		state
+			.with_current_dual_list_mut(|dl: &mut DualListState| {
+				if !dl.included.contains(&new_element) {
+					dl.included.push(new_element.clone());
+				}
+			})
+			.expect("current item is a DualList");
+
+		// Refresh the sibling: right.excluded should now contain the new element
+		state.refresh_dual_list_sibling();
+
+		match &state.pages[editor_page_idx].items[right_idx].control {
+			SettingControl::DualList(dl) => {
+				assert!(
+					dl.excluded.contains(&new_element),
+					"right.excluded should be updated to reflect left's new inclusion"
+				);
+			}
+			_ => panic!("right should be DualList"),
+		}
+	}
+
+	#[test]
+	fn test_with_dual_list_mut_returns_none_for_non_dual_list() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// TEST_SCHEMA has no DualList items, so all calls should return None
+		let result = state.with_dual_list_mut(0, |_| ());
+		assert!(result.is_none());
+	}
+
+	/// The search filter moves by grapheme cluster (like the Command
+	/// Palette), so a single Left crosses a multi-codepoint Thai cluster
+	/// rather than landing between its combining marks.
+	#[test]
+	fn test_search_cursor_moves_by_grapheme_cluster() {
+		let config = test_config();
+		let mut state = SettingsState::new(TEST_SCHEMA, &config).unwrap();
+
+		// "aที่b": 'a' (1 byte) + Thai cluster "ที่" (9 bytes) + 'b' (1 byte)
+		state.start_search();
+		for c in "aที่b".chars() {
+			state.search_insert_char(c);
+		}
+		let end = state.search_query().len();
+		assert_eq!(state.search_cursor(), end);
+
+		// Left: past 'b' (1 byte)
+		state.search_cursor_left();
+		assert_eq!(state.search_cursor(), end - 1);
+
+		// Left: skip the whole Thai cluster in one step (9 bytes)
+		state.search_cursor_left();
+		assert_eq!(state.search_cursor(), 1);
+
+		// Left: before 'a'
+		state.search_cursor_left();
+		assert_eq!(state.search_cursor(), 0);
+
+		// Backspace at start is a no-op; the query is untouched
+		state.search_backspace();
+		assert_eq!(state.search_query(), "aที่b");
+
+		// Delete at the start removes the leading 'a' only
+		state.search_delete();
+		assert_eq!(state.search_query(), "ที่b");
+		assert_eq!(state.search_cursor(), 0);
+
+		// One Right skips the Thai cluster; Delete then removes the 'b'
+		state.search_cursor_right();
+		assert_eq!(state.search_cursor(), "ที่".len());
+		state.search_delete();
+		assert_eq!(state.search_query(), "ที่");
+	}
+}

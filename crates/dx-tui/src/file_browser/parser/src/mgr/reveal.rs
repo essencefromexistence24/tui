@@ -1,0 +1,48 @@
+use mlua::{ExternalError, FromLua, IntoLua, Lua, Value};
+use fb_fs::path::{clean_url, expand_url};
+use fb_shared::{event::ActionCow, url::UrlBuf};
+use fb_vfs::provider;
+
+use crate::mgr::CdSource;
+
+#[derive(Debug)]
+pub struct RevealOpt {
+	pub target:   UrlBuf,
+	pub source:   CdSource,
+	pub no_dummy: bool,
+}
+
+impl From<ActionCow> for RevealOpt {
+	fn from(mut a: ActionCow) -> Self {
+		let mut target = a.take_first().unwrap_or_default();
+
+		if !a.bool("raw") {
+			target = expand_url(target);
+		}
+
+		if let Some(u) = provider::try_absolute(&target)
+			&& u.is_owned()
+		{
+			target = u.into_static();
+		}
+
+		Self { target: clean_url(target), source: CdSource::Reveal, no_dummy: a.bool("no-dummy") }
+	}
+}
+
+impl From<UrlBuf> for RevealOpt {
+	fn from(target: UrlBuf) -> Self { Self { target, source: CdSource::Reveal, no_dummy: false } }
+}
+
+impl From<(UrlBuf, CdSource)> for RevealOpt {
+	fn from((target, source): (UrlBuf, CdSource)) -> Self { Self { target, source, no_dummy: false } }
+}
+
+impl FromLua for RevealOpt {
+	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+}
+
+impl IntoLua for RevealOpt {
+	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+}
+

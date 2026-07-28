@@ -1,0 +1,949 @@
+use crate::common::harness::EditorTestHarness;
+use tempfile::TempDir;
+
+/// Test rendering of empty buffer
+#[test]
+fn test_empty_buffer_rendering() {
+    let mut harness = EditorTestHarness::new(80, 24).unwrap();
+    harness.render().unwrap();
+
+    let screen = harness.screen_to_string();
+
+    // Should have some output (status bar, etc.)
+    assert!(!screen.is_empty());
+
+    // Should show empty buffer indicator
+    harness.assert_screen_contains("[No Name]");
+}
+
+/// Test rendering of file with content
+#[test]
+fn test_file_content_rendering() {
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("render_test.txt");
+
+    // Create a test file with multiple lines
+    std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\n").unwrap();
+
+    let mut harness = EditorTestHarness::new(80, 24).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    // Should show file content on screen
+    harness.assert_screen_contains("Line 1");
+    harness.assert_screen_contains("Line 2");
+    harness.assert_screen_contains("Line 3");
+
+    // Should show filename in status bar
+    harness.assert_screen_contains("render_test.txt");
+}
+
+/// Test that screen cursor position matches actual cursor position
+#[test]
+fn test_screen_cursor_position() {
+    let mut harness = EditorTestHarness::new_no_wrap(80, 24).unwrap();
+
+    // Type "abc" on first line
+    harness.type_text("abc").unwrap();
+    harness.assert_buffer_content("abc");
+
+    // Render and check cursor position
+    harness.render().unwrap();
+
+    // Get content area bounds from harness (accounts for menu bar, tab bar, status bar)
+    let (content_first_row, _content_last_row) = harness.content_area_rows();
+
+    // Get the actual screen cursor position from the terminal
+    let cursor_pos = harness.screen_cursor_position();
+
+    // After typing "abc", cursor should be just past the gutter + "abc":
+    //   indicator (1) + line-number digits + separator (3) + "abc" (3)
+    // The gutter width adapts to the line count (see issue #1204), so query it
+    // from the margin manager instead of hard-coding a value.
+    let gutter_width = harness.editor().active_state().margins.left_total_width() as u16;
+    let expected_x = gutter_width + 3;
+
+    println!("Cursor position after typing 'abc': {cursor_pos:?}");
+    println!("Expected: x={expected_x} (gutter {gutter_width} + 3), y={content_first_row}");
+
+    assert_eq!(
+        cursor_pos.1, content_first_row as u16,
+        "Cursor Y should be at row {content_first_row} (content area start)"
+    );
+    assert_eq!(
+        cursor_pos.0, expected_x,
+        "Cursor X should be at column {expected_x} (after 'abc')"
+    );
+}
+
+/// Test cursor position as we type more characters
+#[test]
+fn test_cursor_x_position_advances() {
+    let mut harness = EditorTestHarness::new_no_wrap(80, 24).unwrap();
+
+    // Start with empty buffer
+    harness.render().unwrap();
+
+    // Get content area bounds from harness (accounts for menu bar, tab bar, status bar)
+    let (content_first_row, _content_last_row) = harness.content_area_rows();
+
+    let pos0 = harness.screen_cursor_position();
+    println!("Initial cursor position: {{pos0:?}}");
+
+    // Type first character
+    harness.type_text("a").unwrap();
+    harness.render().unwrap();
+    let pos1 = harness.screen_cursor_position();
+    println!("After 'a': {{pos1:?}}");
+
+    // Type second character
+    harness.type_text("b").unwrap();
+    harness.render().unwrap();
+    let pos2 = harness.screen_cursor_position();
+    println!("After 'ab': {{pos2:?}}");
+
+    // Type third character
+    harness.type_text("c").unwrap();
+    harness.render().unwrap();
+    let pos3 = harness.screen_cursor_position();
+    println!("After 'abc': {{pos3:?}}");
+
+    // Y position should stay constant (at content_first_row)
+    let expected_y = content_first_row as u16;
+    assert_eq!(pos0.1, expected_y, "Initial Y should be {expected_y}");
+    assert_eq!(
+        pos1.1, expected_y,
+        "Y should stay at {expected_y} after 'a'"
+    );
+    assert_eq!(
+        pos2.1, expected_y,
+        "Y should stay at {expected_y} after 'ab'"
+    );
+    assert_eq!(
+        pos3.1, expected_y,
+        "Y should stay at {expected_y} after 'abc'"
+    );
+
+    // X position should advance by 1 each time
+    assert_eq!(pos1.0, pos0.0 + 1, "X should advance by 1 after 'a'");
+    assert_eq!(pos2.0, pos1.0 + 1, "X should advance by 1 after 'b'");
+    assert_eq!(pos3.0, pos2.0 + 1, "X should advance by 1 after 'c'");
+}
+
+/// Test cursor positioning with large line numbers (1000000+)
+/// Verifies that when a file is large enough to have 7-digit line numbers,
+/// the gutter width expands appropriately and cursor positioning is correct.
+#[test]
+fn test_cursor_position_with_large_line_numbers() {
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("large_file.txt");
+
+    // Create a large file to trigger 7-digit line numbers
+    // We need estimated_lines > 1,000,000
+    // estimated_lines = buffer_len / 80
+    // So buffer_len = 1,000,000 * 80 = 80,000,000 bytes
+    // Create ~81MB file with simple content (each line ~80 chars)
+    let mut content = String::new();
+    for i in 0..1_000_000 {
+        content.push_str(&format!(
+            "Line {i:07} with some padding text to reach approximately 80 characters\n"
+        ));
+    }
+    std::fs::write(&file_path, &content).unwrap();
+
+    let mut harness = EditorTestHarness::new(80, 24).unwrap();
+    harness.open_file(&file_path).unwrap();
+
+    // Jump to end of file with Ctrl+End to see the large line numbers
+    harness
+        .send_key(
+            crossterm::event::KeyCode::End,
+            crossterm::event::KeyModifiers::CONTROL,
+        )
+        .unwrap();
+
+    // Check buffer length and gutter width calculation
+    let buffer_len = harness.editor().active_state().buffer.len();
+    let gutter_width = harness
+        .editor()
+        .active_viewport()
+        .gutter_width(&harness.editor().active_state().buffer);
+
+    println!("\nBuffer length: {buffer_len} bytes");
+    println!("Estimated lines (buffer_len / 80): {}", buffer_len / 80);
+    println!("Calculated gutter_width: {gutter_width}");
+
+    harness.render().unwrap();
+    let screen_pos = harness.screen_cursor_position();
+
+    // Get the screen lines to see what's actually rendered
+    let screen = harness.screen_to_string();
+    let lines: Vec<&str> = screen.lines().collect();
+
+    println!("\nWith 7-digit line numbers (file with 1,000,000 lines - at end of file):");
+    println!("Full screen dump (last visible lines):");
+    for (i, line) in lines.iter().take(5).enumerate() {
+        println!("Row {i}: {line:?}");
+    }
+
+    println!("\nVisual character position ruler:");
+    println!("          1111111111222222222233333333334");
+    println!("01234567890123456789012345678901234567890");
+    if let Some(content_line) = lines.get(screen_pos.1 as usize) {
+        println!("{}", &content_line.chars().take(40).collect::<String>());
+        println!("{}^", " ".repeat(screen_pos.0 as usize));
+        println!(" cursor is here (pos {})", screen_pos.0);
+    }
+
+    println!(
+        "\nScreen cursor position: ({}, {})",
+        screen_pos.0, screen_pos.1
+    );
+
+    // First, verify that the line numbers are correct
+    // Filter for lines with line number separator " │ " (not just scrollbar "│")
+    let content_lines: Vec<&str> = lines
+        .iter()
+        .skip(1) // Skip tab bar
+        .filter(|line| line.contains(" │ "))
+        .copied()
+        .collect();
+
+    println!("\nValidating line numbers:");
+
+    // Get the last visible line number (skip continuation lines from wrapped text)
+    // Note: For large files, line numbers are estimated when jumping to end
+    // The estimation is based on buffer_len / 80 (average line length)
+    // Continuation lines have only whitespace before "│", so filter those out
+    // In byte offset mode (large file without line scan), gutter shows byte offsets
+    // Parse all gutter values as byte offsets
+    let mut gutter_offsets: Vec<usize> = content_lines
+        .iter()
+        .filter_map(|line| {
+            let part = line.split("│").next().unwrap_or("").trim();
+            if !part.is_empty() && part.chars().all(|c| c.is_ascii_digit()) {
+                part.parse::<usize>().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    gutter_offsets.sort();
+
+    // Find the largest non-zero byte offset (the last content line before EOF)
+    let max_offset = gutter_offsets.iter().rev().find(|&&v| v > 0).copied();
+    if let Some(byte_offset) = max_offset {
+        println!("Largest visible byte offset in gutter: {byte_offset}");
+
+        // The byte offset should be near the end of the file
+        let expected_near = buffer_len;
+        println!("Expected byte offset near: {expected_near}");
+
+        // Byte offset should be reasonably close to file size (within 10%)
+        let lower_bound = expected_near.saturating_sub(expected_near / 10);
+        assert!(
+            byte_offset >= lower_bound && byte_offset <= expected_near,
+            "Expected byte offset near {expected_near}, but got {byte_offset}"
+        );
+
+        // Verify this is a 7+ digit number (for ~73MB file)
+        assert!(
+            byte_offset.to_string().len() >= 7,
+            "Expected 7+ digit byte offset, but {} has {} digits",
+            byte_offset,
+            byte_offset.to_string().len()
+        );
+    } else {
+        panic!("No non-zero byte offsets found in gutter!");
+    }
+
+    // Now verify cursor positioning is correct for the gutter width
+    // In byte offset mode, gutter sized for file size (~73,000,000 bytes = 8 digits)
+    // Format: [indicator (1)] + [max(4, digits)] + [" │ " (3 chars)]
+    let digits = ((buffer_len as f64).log10().floor() as usize) + 1;
+    let expected_gutter = 1 + digits.max(4) + 3;
+    println!("\nExpected gutter width: {expected_gutter} (1 + {digits}-digit byte offset + 3)",);
+    println!("Actual gutter_width: {gutter_width}");
+
+    assert_eq!(
+        gutter_width, expected_gutter,
+        "Gutter width {gutter_width} doesn't match expected {expected_gutter}"
+    );
+
+    // The cursor should be positioned AFTER the gutter (at position gutter_width)
+    println!("Expected: cursor x = {gutter_width} (at gutter width)");
+    println!("Actual: cursor x = {}", screen_pos.0);
+
+    assert_eq!(
+        screen_pos.0 as usize, gutter_width,
+        "Cursor x position {} should be at gutter width {}",
+        screen_pos.0, gutter_width
+    );
+}
+
+/// Test that line numbers are rendered correctly for files of various sizes
+#[test]
+#[ignore] // TODO: Fix line numbering with trailing newlines
+fn test_line_numbers_rendered_correctly() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use tempfile::TempDir;
+
+    let test_cases = vec![
+        (1, "1-line file"),
+        (100, "100-line file"),
+        (3900, "3900-line file (just under 4k)"),
+        (4000, "4000-line file"),
+        (4100, "4100-line file (just over 4k)"),
+        (10000, "10000-line file"),
+    ];
+
+    for (line_count, description) in test_cases {
+        println!(
+            "\n{}\nTesting: {}\n{}",
+            "=".repeat(60),
+            description,
+            "=".repeat(60)
+        );
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join(format!("test_{line_count}_lines.txt"));
+
+        // Create a file with the specified number of lines
+        let mut content = String::new();
+        for i in 1..=line_count {
+            content.push_str(&format!("Line {i}\n"));
+        }
+        std::fs::write(&file_path, &content).unwrap();
+
+        let mut harness = EditorTestHarness::new(80, 24).unwrap();
+        harness.open_file(&file_path).unwrap();
+
+        // Jump to end with Ctrl+End
+        harness
+            .send_key(KeyCode::End, KeyModifiers::CONTROL)
+            .unwrap();
+
+        harness.render().unwrap();
+
+        // Get the screen to see what's rendered
+        let screen = harness.screen_to_string();
+        let lines: Vec<&str> = screen.lines().collect();
+
+        println!("Full screen dump:");
+        for (i, line) in lines.iter().enumerate() {
+            println!("Row {i:2}: {line:?}");
+        }
+
+        // Check that we can see the last line number
+        // Filter for lines with line number separator " │ " (not just scrollbar "│")
+        let content_lines: Vec<&str> = lines
+            .iter()
+            .skip(1) // Skip tab bar
+            .filter(|line| line.contains(" │ "))
+            .copied()
+            .collect();
+
+        if let Some(last_line) = content_lines.last() {
+            println!("\nLast content line: {last_line:?}");
+
+            // Extract the line number
+            let line_num_part = last_line.split("│").next().unwrap_or("").trim();
+            println!("Line number extracted: {line_num_part:?}");
+
+            let line_num: usize = line_num_part.parse().unwrap_or(0);
+            println!("Parsed line number: {line_num}");
+
+            // For files with more than 20 lines, we should see a line number
+            // close to the total line count (within visible range)
+            let expected_min = if line_count > 20 { line_count - 20 } else { 1 };
+
+            assert!(
+                line_num >= expected_min && line_num <= line_count,
+                "{description}: Expected to see line numbers between {expected_min} and {line_count}, but got line {line_num}"
+            );
+
+            // Verify the last visible line matches the expected line number
+            assert_eq!(
+                line_num, line_count,
+                "{description}: Expected last visible line to be {line_count}, but got {line_num}"
+            );
+        } else {
+            panic!("{description}: No content lines found on screen!");
+        }
+    }
+}
+
+/// Test that page down correctly updates line numbers in the viewport
+/// This test loads a buffer with more lines than visible, presses page down twice,
+/// and verifies that the top line number is updated correctly and content changes
+#[test]
+#[ignore] // TODO: Fix line numbering edge cases
+fn test_page_down_line_numbers() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use tempfile::TempDir;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("test.txt");
+
+    // Create a file with 100 lines, each with unique content like "x1", "x2", etc.
+    let content: String = (1..=100).map(|i| format!("x{i}\n")).collect();
+    std::fs::write(&file_path, content).unwrap();
+
+    // Create harness with 24 lines visible (minus status bar and tabs)
+    let mut harness = EditorTestHarness::new(80, 24).unwrap();
+    harness.open_file(&file_path).unwrap();
+
+    // Initial state: should be at line 0 (first line)
+    let initial_line = harness.top_line_number();
+    assert_eq!(initial_line, 0, "Should start at line 0");
+
+    // Verify the first line is visible on screen
+    harness.assert_screen_contains("x1");
+    let initial_cursor = harness.cursor_position();
+    println!("Initial state: line {initial_line}, cursor at {initial_cursor}, screen contains x1");
+    println!("Initial screen:\n{}", harness.screen_to_string());
+
+    // Press page down once
+    harness
+        .send_key(KeyCode::PageDown, KeyModifiers::NONE)
+        .unwrap();
+    harness.render().unwrap();
+    let after_first_pagedown = harness.top_line_number();
+    let cursor_after_first = harness.cursor_position();
+
+    println!("\nAfter first PageDown: line {after_first_pagedown}, cursor at {cursor_after_first}");
+    println!(
+        "Screen after first PageDown:\n{}",
+        harness.screen_to_string()
+    );
+
+    assert!(
+        after_first_pagedown > 0,
+        "After first PageDown, should have scrolled down from line 0, but got line {after_first_pagedown}"
+    );
+
+    // Verify content has changed - we should see a line number greater than what was initially visible
+    // The content "xN" corresponds to line N-1 (0-indexed), so line 39 contains "x40"
+    // We verify that we see content from somewhere past the initial viewport
+    let screen = harness.screen_to_string();
+    assert!(
+        screen.contains("x") && after_first_pagedown > 0,
+        "Should see content after scrolling"
+    );
+    println!(
+        "After first PageDown: screen contains lines starting from line {after_first_pagedown}"
+    );
+
+    // Press page down again to ensure scroll is triggered
+    harness
+        .send_key(KeyCode::PageDown, KeyModifiers::NONE)
+        .unwrap();
+    harness.render().unwrap();
+    let after_second_pagedown = harness.top_line_number();
+    let cursor_after_second = harness.cursor_position();
+
+    println!(
+        "\nAfter second PageDown: line {after_second_pagedown}, cursor at {cursor_after_second}"
+    );
+    println!(
+        "Screen after second PageDown:\n{}",
+        harness.screen_to_string()
+    );
+
+    assert!(
+        after_second_pagedown > after_first_pagedown,
+        "After second PageDown, should have scrolled down more (from {after_first_pagedown} to {after_second_pagedown})"
+    );
+
+    // Verify we can see content from later in the file
+    let screen = harness.screen_to_string();
+    assert!(
+        screen.contains("x") && after_second_pagedown > after_first_pagedown,
+        "Should see content after second page down"
+    );
+    println!(
+        "After second PageDown: screen contains lines starting from line {after_second_pagedown}"
+    );
+
+    // Verify we no longer see the initial content
+    harness.assert_screen_not_contains("x1");
+
+    // Now move up multiple times to trigger scrolling back up
+    println!("\n=== Testing upward movement ===");
+    let line_before_up = harness.top_line_number();
+
+    // Move up enough times to go past the scroll offset and trigger upward scrolling
+    // We need to move up more than scroll_offset (3) lines to trigger scroll
+    for i in 0..10 {
+        harness.send_key(KeyCode::Up, KeyModifiers::NONE).unwrap();
+        harness.render().unwrap();
+        let current_line = harness.top_line_number();
+        let cursor_pos = harness.cursor_position();
+
+        if current_line < line_before_up {
+            println!(
+                "After {} Up presses: line {} (scrolled up!), cursor at {}",
+                i + 1,
+                current_line,
+                cursor_pos
+            );
+
+            // Verify the line number decreased
+            assert!(
+                current_line < line_before_up,
+                "Line number should decrease when scrolling up"
+            );
+
+            // Verify content changed - we should see earlier content
+            let expected_content = format!("x{}", current_line + 1);
+            harness.assert_screen_contains(&expected_content);
+            println!("Screen now shows {expected_content}");
+            break;
+        }
+    }
+
+    let final_line = harness.top_line_number();
+    assert!(
+        final_line < after_second_pagedown,
+        "After moving up, viewport should have scrolled up from line {after_second_pagedown} to {final_line}"
+    );
+}
+
+/// Test ANSI escape sequence rendering with RGB colors
+/// Verifies that ANSI RGB color codes in files are properly parsed and rendered
+/// with the correct foreground colors instead of being displayed as raw text.
+/// This tests the specific bug where col_offset was not incremented for ANSI
+/// escape sequence characters, causing the view_mapping to be out of sync.
+#[test]
+fn test_ansi_rgb_color_rendering() {
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("ansi_rgb_test.txt");
+
+    // Create a file with multiple ANSI RGB color codes in sequence
+    // This pattern mimics ANSI art files like landscape-wide.txt
+    // Each block character (█) has its own RGB color escape sequence
+    // Pattern: \x1b[38;2;R;G;Bm█ repeated
+    let mut content = String::new();
+    for i in 0..20 {
+        // Vary the RGB values slightly for each block
+        let r = 100 + i * 5;
+        let g = 50 + i * 3;
+        let b = 150 + i * 2;
+        content.push_str(&format!("\x1b[38;2;{r};{g};{b}m█"));
+    }
+    content.push_str("\x1b[0m"); // Reset at end
+    std::fs::write(&file_path, &content).unwrap();
+
+    // Use default harness which has line wrapping enabled
+    // The ANSI-aware wrapping should handle this correctly
+    let mut harness = EditorTestHarness::new(80, 24).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    // Get the content area start row (after menu bar and tab bar)
+    let (content_row, _) = harness.content_area_rows();
+
+    // Gutter: indicator (1) + line-number digits + separator (3).
+    // Queried from the margin manager so the test tracks the actual rendered width.
+    let gutter_width = harness.editor().active_state().margins.left_total_width() as u16;
+
+    let screen = harness.screen_to_string();
+    println!("Screen content:\n{screen}");
+
+    // Critical test: The screen should NOT contain raw ANSI escape code fragments
+    // If the col_offset bug exists, we'd see partial codes like ";2;100;50;150m" displayed
+    harness.assert_screen_not_contains(";2;"); // Partial RGB escape should not be visible
+    harness.assert_screen_not_contains("38;2"); // ANSI code prefix should not be visible
+    harness.assert_screen_not_contains(";50;"); // Middle of RGB params should not be visible
+
+    // Verify that block characters (█) are displayed with correct RGB colors
+    // Check the first block character
+    let first_block_style = harness.get_cell_style(gutter_width, content_row as u16);
+    println!(
+        "Style at first block position ({gutter_width}, {content_row}): {first_block_style:?}"
+    );
+
+    assert!(
+        first_block_style.is_some(),
+        "Expected to find a cell at position ({gutter_width}, {content_row})"
+    );
+    let style = first_block_style.unwrap();
+
+    // The first block should have RGB(100, 50, 150) foreground
+    assert_eq!(
+        style.fg,
+        Some(Color::Rgb(100, 50, 150)),
+        "Expected first block to have RGB(100,50,150) foreground from ANSI code, got {:?}",
+        style.fg
+    );
+
+    // Check a block in the middle (index 10 -> RGB(150, 80, 170))
+    let mid_block_style = harness.get_cell_style(gutter_width + 10, content_row as u16);
+    println!("Style at block 10 position: {mid_block_style:?}");
+
+    if let Some(mid_style) = mid_block_style {
+        assert_eq!(
+            mid_style.fg,
+            Some(Color::Rgb(150, 80, 170)),
+            "Expected block 10 to have RGB(150,80,170) foreground, got {:?}",
+            mid_style.fg
+        );
+    }
+}
+
+/// Test that current line highlighting renders the correct background color
+/// across the entire width of the content area (not just where characters exist).
+#[test]
+fn test_current_line_highlight_spans_full_width() {
+    use dx::config::Config;
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("highlight_test.txt");
+    std::fs::write(&file_path, "abc\ndef\nghi\n").unwrap();
+
+    // Default config has highlight_current_line = true and dark theme.
+    // Disable frame-buffer animations: this test inspects a single settled
+    // frame, but the harness only force-disables animations when *no* config is
+    // passed (see EditorTestHarness). Because we pass one for the dark theme,
+    // the default `animations: true` would otherwise leak in, and a mid-slide
+    // open frame could show a not-yet-settled current-line background — an
+    // intermittent failure of the assertions below.
+    let mut config = Config {
+        theme: "dark".into(),
+        ..Default::default()
+    };
+    config.editor.animations = false;
+    let mut harness = EditorTestHarness::with_config(80, 24, config).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    let (content_row, _) = harness.content_area_rows();
+    let current_line_bg = Color::Rgb(40, 40, 40); // dark theme current_line_bg
+
+    // Cursor starts on line 0 (content_row).
+    // Check a cell in the content area on the cursor line — both within text
+    // and well past the end of the 3-char content.
+    let gutter_width: u16 = 8; // indicator(1) + line_numbers(4) + separator(3)
+
+    // Character within content on cursor line
+    let style_in_text = harness
+        .get_cell_style(gutter_width, content_row as u16)
+        .expect("cell should exist");
+    assert_eq!(
+        style_in_text.bg,
+        Some(current_line_bg),
+        "Character on cursor line should have current_line_bg"
+    );
+
+    // Cell past end of text on cursor line — should still have current_line_bg
+    let style_past_text = harness
+        .get_cell_style(gutter_width + 20, content_row as u16)
+        .expect("cell should exist");
+    assert_eq!(
+        style_past_text.bg,
+        Some(current_line_bg),
+        "Cell past end of text on cursor line should have current_line_bg (full width)"
+    );
+
+    // Non-cursor line (line 1) should NOT have current_line_bg
+    let style_other_line = harness
+        .get_cell_style(gutter_width, content_row as u16 + 1)
+        .expect("cell should exist");
+    assert_ne!(
+        style_other_line.bg,
+        Some(current_line_bg),
+        "Non-cursor line should NOT have current_line_bg"
+    );
+
+    // Gutter on cursor line should also have current_line_bg
+    // Check the line number area (after the indicator column)
+    let style_gutter = harness
+        .get_cell_style(1, content_row as u16)
+        .expect("gutter cell should exist");
+    assert_eq!(
+        style_gutter.bg,
+        Some(current_line_bg),
+        "Gutter on cursor line should have current_line_bg"
+    );
+}
+
+/// Test that disabling highlight_current_line removes the background color.
+#[test]
+fn test_current_line_highlight_disabled() {
+    use dx::config::Config;
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("highlight_off_test.txt");
+    std::fs::write(&file_path, "abc\ndef\nghi\n").unwrap();
+
+    let mut config = Config {
+        theme: "dark".into(),
+        ..Default::default()
+    };
+    config.editor.highlight_current_line = false;
+
+    let mut harness = EditorTestHarness::with_config(80, 24, config).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    let (content_row, _) = harness.content_area_rows();
+    let current_line_bg = Color::Rgb(40, 40, 40);
+    let gutter_width: u16 = 8;
+
+    // Cursor line content cell should NOT have current_line_bg
+    let style = harness
+        .get_cell_style(gutter_width, content_row as u16)
+        .expect("cell should exist");
+    assert_ne!(
+        style.bg,
+        Some(current_line_bg),
+        "Cursor line should NOT have current_line_bg when feature is disabled"
+    );
+
+    // Past-text cell should also not have it
+    let style_past = harness
+        .get_cell_style(gutter_width + 20, content_row as u16)
+        .expect("cell should exist");
+    assert_ne!(
+        style_past.bg,
+        Some(current_line_bg),
+        "Past-text cell should NOT have current_line_bg when feature is disabled"
+    );
+}
+
+/// Test that current line highlight moves when cursor moves to a different line.
+#[test]
+fn test_current_line_highlight_follows_cursor_movement() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use dx::config::Config;
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("highlight_move_test.txt");
+    std::fs::write(&file_path, "abc\ndef\nghi\n").unwrap();
+
+    let config = Config {
+        theme: "dark".into(),
+        ..Default::default()
+    };
+    let mut harness = EditorTestHarness::with_config(80, 24, config).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    let (content_row, _) = harness.content_area_rows();
+    let current_line_bg = Color::Rgb(40, 40, 40);
+    let gutter_width: u16 = 8;
+
+    // Initially cursor is on line 0
+    let style_line0 = harness
+        .get_cell_style(gutter_width + 20, content_row as u16)
+        .unwrap();
+    assert_eq!(
+        style_line0.bg,
+        Some(current_line_bg),
+        "Line 0 should be highlighted initially"
+    );
+
+    // Move cursor down to line 1
+    harness.send_key(KeyCode::Down, KeyModifiers::NONE).unwrap();
+    harness.render().unwrap();
+
+    // Line 0 should no longer be highlighted
+    let style_line0_after = harness
+        .get_cell_style(gutter_width + 20, content_row as u16)
+        .unwrap();
+    assert_ne!(
+        style_line0_after.bg,
+        Some(current_line_bg),
+        "Line 0 should NOT be highlighted after cursor moves away"
+    );
+
+    // Line 1 should now be highlighted (including past end of text)
+    let style_line1 = harness
+        .get_cell_style(gutter_width + 20, content_row as u16 + 1)
+        .unwrap();
+    assert_eq!(
+        style_line1.bg,
+        Some(current_line_bg),
+        "Line 1 should be highlighted after cursor moves there"
+    );
+}
+
+/// `highlight_current_column` paints the cursor's column (across the full
+/// viewport height) with the same tint as the current line.
+#[test]
+fn test_current_column_highlight_tints_full_column() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use dx::config::Config;
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("col_highlight_test.txt");
+    std::fs::write(&file_path, "abcdef\nghijkl\nmnopqr\n").unwrap();
+
+    let mut config = Config {
+        theme: "dark".into(),
+        ..Default::default()
+    };
+    config.editor.highlight_current_column = true;
+
+    let mut harness = EditorTestHarness::with_config(80, 24, config).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    // Move the cursor to column 3 (byte 3) on line 0.
+    for _ in 0..3 {
+        harness
+            .send_key(KeyCode::Right, KeyModifiers::NONE)
+            .unwrap();
+    }
+    let cursor_x = harness
+        .render_observing_cursor()
+        .unwrap()
+        .expect("cursor should be visible after moving")
+        .0;
+
+    let (content_row, _) = harness.content_area_rows();
+    let current_line_bg = Color::Rgb(40, 40, 40);
+    let other_row = content_row as u16 + 1;
+
+    // Cursor column should be tinted on a non-cursor line (e.g. line 1),
+    // where it would otherwise have the default editor background.
+    let col_cell = harness
+        .get_cell_style(cursor_x, other_row)
+        .expect("cell should exist");
+    assert_eq!(
+        col_cell.bg,
+        Some(current_line_bg),
+        "Cursor column should be tinted on non-cursor lines when highlight_current_column is enabled"
+    );
+
+    // A cell one column over on the same non-cursor line should NOT be tinted.
+    let neighbor_cell = harness
+        .get_cell_style(cursor_x + 1, other_row)
+        .expect("cell should exist");
+    assert_ne!(
+        neighbor_cell.bg,
+        Some(current_line_bg),
+        "Neighboring column should not be tinted"
+    );
+
+    // The gutter on non-cursor lines should remain untouched (highlight only
+    // tints the text column).
+    let gutter_cell = harness
+        .get_cell_style(1, other_row)
+        .expect("gutter cell should exist");
+    assert_ne!(
+        gutter_cell.bg,
+        Some(current_line_bg),
+        "Gutter on non-cursor lines should not be tinted by column highlight"
+    );
+}
+
+/// When `highlight_current_column` is disabled, no extra column is tinted.
+#[test]
+fn test_current_column_highlight_disabled_is_noop() {
+    use dx::config::Config;
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("col_highlight_off_test.txt");
+    std::fs::write(&file_path, "abcdef\nghijkl\nmnopqr\n").unwrap();
+
+    // Default keeps current line highlight but leaves column highlight off.
+    let config = Config {
+        theme: "dark".into(),
+        ..Default::default()
+    };
+    let mut harness = EditorTestHarness::with_config(80, 24, config).unwrap();
+    harness.open_file(&file_path).unwrap();
+    let cursor_x = harness
+        .render_observing_cursor()
+        .unwrap()
+        .expect("cursor should be visible")
+        .0;
+
+    let (content_row, _) = harness.content_area_rows();
+    let current_line_bg = Color::Rgb(40, 40, 40);
+
+    // On a non-cursor line, the cursor's column should not be tinted.
+    let col_cell = harness
+        .get_cell_style(cursor_x, content_row as u16 + 1)
+        .expect("cell should exist");
+    assert_ne!(
+        col_cell.bg,
+        Some(current_line_bg),
+        "No column should be tinted when highlight_current_column is disabled"
+    );
+}
+/// Test that hide_current_line_on_selection removes the background color when text is selected.
+#[test]
+fn test_hide_current_line_on_selection() {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    use dx::config::Config;
+    use ratatui::style::Color;
+
+    let temp_dir = TempDir::new().unwrap();
+    let file_path = temp_dir.path().join("hide_current_line_test.txt");
+    std::fs::write(&file_path, "abc\ndef\nghi\n").unwrap();
+
+    let mut config = Config {
+        theme: "dark".into(),
+        ..Default::default()
+    };
+    config.editor.highlight_current_line = true;
+    config.editor.hide_current_line_on_selection = true;
+
+    let mut harness = EditorTestHarness::with_config(80, 24, config).unwrap();
+    harness.open_file(&file_path).unwrap();
+    harness.render().unwrap();
+
+    let (content_row, _) = harness.content_area_rows();
+    let current_line_bg = Color::Rgb(40, 40, 40);
+    let gutter_width: u16 = 8;
+
+    // Initially with no selection, current_line_bg should be present in the gutter
+    let style_gutter_initial = harness
+        .get_cell_style(1, content_row as u16)
+        .expect("gutter cell should exist");
+    assert_eq!(
+        style_gutter_initial.bg,
+        Some(current_line_bg),
+        "Gutter should have current_line_bg initially"
+    );
+
+    // Create a selection by holding Shift and pressing Right
+    harness
+        .send_key(KeyCode::Right, KeyModifiers::SHIFT)
+        .unwrap();
+    harness.render().unwrap();
+    assert!(
+        harness.has_selection(),
+        "Should have selection after Shift+Right"
+    );
+
+    // After selection, current_line_bg should be hidden
+    let style_past = harness
+        .get_cell_style(gutter_width + 20, content_row as u16)
+        .expect("cell should exist");
+    assert_ne!(
+        style_past.bg,
+        Some(current_line_bg),
+        "Past-text cell should NOT have current_line_bg after selection"
+    );
+
+    let style_gutter = harness
+        .get_cell_style(1, content_row as u16)
+        .expect("gutter cell should exist");
+    assert_ne!(
+        style_gutter.bg,
+        Some(current_line_bg),
+        "Gutter should NOT have current_line_bg after selection"
+    );
+}

@@ -1,0 +1,1158 @@
+//! Text encoding detection and conversion
+//!
+//! This module handles:
+//! - Detecting text encodings from byte content (UTF-8, UTF-16, Latin-1, CJK, etc.)
+//! - Binary file detection (distinguishing text from binary content)
+//! - Converting between encodings (normalizing to UTF-8 on load, converting back on save)
+//!
+//! # Encoding Detection Strategy
+//!
+//! 1. **BOM Detection**: Check for Byte Order Marks (UTF-8 BOM, UTF-16 LE/BE)
+//! 2. **UTF-8 Validation**: Fast path for most modern files
+//! 3. **UTF-16 Heuristics**: Detect UTF-16 without BOM via null byte patterns
+//! 4. **Binary Detection**: Check for control characters that indicate binary content
+//! 5. **Statistical Detection**: Use chardetng for legacy encoding detection
+//! 6. **Fallback**: Default to Windows-1252 for ambiguous cases
+
+use super::encoding_heuristics::{has_windows1250_pattern, has_windows1251_pattern};
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
+
+// ============================================================================
+// Encoding Type
+// ============================================================================
+
+/// Supported text encodings for file I/O
+///
+/// The editor internally uses UTF-8 for all text processing. When loading files,
+/// content is converted from the detected encoding to UTF-8. When saving, content
+/// is converted back to the original (or user-selected) encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+pub enum Encoding {
+	/// UTF-8 (default, most common)
+	#[default]
+	Utf8,
+	/// UTF-8 with Byte Order Mark
+	Utf8Bom,
+	/// UTF-16 Little Endian (Windows default for Unicode files)
+	Utf16Le,
+	/// UTF-16 Big Endian
+	Utf16Be,
+	/// ASCII (7-bit, subset of UTF-8)
+	Ascii,
+	/// Latin-1 / ISO-8859-1 (Western European)
+	Latin1,
+	/// Windows-1252 / CP-1252 (Windows Western European, often called "ANSI")
+	Windows1252,
+	/// Windows-1250 / CP-1250 (Windows Central European)
+	Windows1250,
+	/// Windows-1251 / CP-1251 (Windows Cyrillic)
+	Windows1251,
+	/// GB18030 (Chinese, superset of GBK)
+	Gb18030,
+	/// GBK (Chinese Simplified, subset of GB18030)
+	Gbk,
+	/// Shift-JIS (Japanese)
+	ShiftJis,
+	/// EUC-KR (Korean)
+	EucKr,
+}
+
+impl Encoding {
+	/// Get the display name for status bar
+	pub fn display_name(&self) -> &'static str {
+		match self {
+			Self::Utf8 => "UTF-8",
+			Self::Utf8Bom => "UTF-8 BOM",
+			Self::Utf16Le => "UTF-16 LE",
+			Self::Utf16Be => "UTF-16 BE",
+			Self::Ascii => "ASCII",
+			Self::Latin1 => "Latin-1",
+			Self::Windows1252 => "Windows-1252",
+			Self::Windows1250 => "Windows-1250",
+			Self::Windows1251 => "Windows-1251",
+			Self::Gb18030 => "GB18030",
+			Self::Gbk => "GBK",
+			Self::ShiftJis => "Shift-JIS",
+			Self::EucKr => "EUC-KR",
+		}
+	}
+
+	/// Get a longer description for UI (e.g., command palette)
+	pub fn description(&self) -> &'static str {
+		match self {
+			Self::Utf8 => "UTF-8",
+			Self::Utf8Bom => "UTF-8 with BOM",
+			Self::Utf16Le => "UTF-16 Little Endian",
+			Self::Utf16Be => "UTF-16 Big Endian",
+			Self::Ascii => "US-ASCII",
+			Self::Latin1 => "ISO-8859-1 / Latin-1 – Western European",
+			Self::Windows1252 => "Windows-1252 / CP1252 – Western European",
+			Self::Windows1250 => "Windows-1250 / CP1250 – Central European",
+			Self::Windows1251 => "Windows-1251 / CP1251 – Cyrillic",
+			Self::Gb18030 => "GB18030 – Chinese",
+			Self::Gbk => "GBK / CP936 – Simplified Chinese",
+			Self::ShiftJis => "Shift_JIS – Japanese",
+			Self::EucKr => "EUC-KR – Korean",
+		}
+	}
+
+	/// Get the encoding_rs Encoding for this type
+	pub fn to_encoding_rs(&self) -> &'static encoding_rs::Encoding {
+		match self {
+			Self::Utf8 | Self::Utf8Bom | Self::Ascii => encoding_rs::UTF_8,
+			Self::Utf16Le => encoding_rs::UTF_16LE,
+			Self::Utf16Be => encoding_rs::UTF_16BE,
+			Self::Latin1 => encoding_rs::WINDOWS_1252, // ISO-8859-1 maps to Windows-1252 per WHATWG
+			Self::Windows1252 => encoding_rs::WINDOWS_1252,
+			Self::Windows1250 => encoding_rs::WINDOWS_1250,
+			Self::Windows1251 => encoding_rs::WINDOWS_1251,
+			Self::Gb18030 => encoding_rs::GB18030,
+			Self::Gbk => encoding_rs::GBK,
+			Self::ShiftJis => encoding_rs::SHIFT_JIS,
+			Self::EucKr => encoding_rs::EUC_KR,
+		}
+	}
+
+	/// Returns true if this encoding uses a BOM (Byte Order Mark)
+	pub fn has_bom(&self) -> bool {
+		matches!(self, Self::Utf8Bom | Self::Utf16Le | Self::Utf16Be)
+	}
+
+	/// Get the BOM bytes for this encoding (if any)
+	pub fn bom_bytes(&self) -> Option<&'static [u8]> {
+		match self {
+			Self::Utf8Bom => Some(&[0xEF, 0xBB, 0xBF]),
+			Self::Utf16Le => Some(&[0xFF, 0xFE]),
+			Self::Utf16Be => Some(&[0xFE, 0xFF]),
+			_ => None,
+		}
+	}
+
+	/// All available encodings for UI display
+	pub fn all() -> &'static [Encoding] {
+		&[
+			Self::Utf8,
+			Self::Utf8Bom,
+			Self::Utf16Le,
+			Self::Utf16Be,
+			Self::Ascii,
+			Self::Latin1,
+			Self::Windows1252,
+			Self::Windows1250,
+			Self::Windows1251,
+			Self::Gb18030,
+			Self::Gbk,
+			Self::ShiftJis,
+			Self::EucKr,
+		]
+	}
+
+	/// Returns true if this encoding supports "resynchronization" - the ability to
+	/// find character boundaries when jumping into the middle of a file.
+	///
+	/// Resynchronizable encodings can be safely used with lazy/streaming file loading
+	/// because you can determine character boundaries from any position.
+	///
+	/// - **UTF-8**: Excellent - unique bit patterns distinguish lead/continuation bytes
+	/// - **ASCII/Latin-1/Windows-1252**: Trivial - every byte is a character
+	/// - **UTF-16**: Good with 2-byte alignment - can detect surrogate pairs
+	/// - **UTF-32**: Good with 4-byte alignment
+	///
+	/// Non-resynchronizable encodings (legacy CJK like Shift-JIS, GB18030, GBK, Big5)
+	/// have ambiguous byte sequences where a byte could be either a standalone character
+	/// or part of a multi-byte sequence. You must scan from the beginning to be certain.
+	pub fn is_resynchronizable(&self) -> bool {
+		match self {
+			// Fixed-width single byte - every byte is a character
+			Self::Ascii | Self::Latin1 | Self::Windows1252 | Self::Windows1250 | Self::Windows1251 => {
+				true
+			}
+
+			// UTF-8 has unique bit patterns for lead vs continuation bytes
+			Self::Utf8 | Self::Utf8Bom => true,
+
+			// UTF-16 is resynchronizable with 2-byte alignment
+			// (can detect surrogate pairs by checking 0xD800-0xDFFF range)
+			Self::Utf16Le | Self::Utf16Be => true,
+
+			// Legacy CJK encodings are NOT resynchronizable
+			// The second byte of a double-byte char can equal a valid single-byte char
+			Self::Gb18030 | Self::Gbk | Self::ShiftJis | Self::EucKr => false,
+		}
+	}
+
+	/// Returns the byte alignment required for this encoding when doing random access.
+	///
+	/// For lazy loading of large files, reads must be aligned to this boundary.
+	/// Returns None if the encoding is not resynchronizable (requires full file scan).
+	pub fn alignment(&self) -> Option<usize> {
+		match self {
+			// Single-byte encodings - no alignment needed
+			Self::Ascii | Self::Latin1 | Self::Windows1252 | Self::Windows1250 | Self::Windows1251 => {
+				Some(1)
+			}
+
+			// UTF-8 - no alignment needed (self-synchronizing)
+			Self::Utf8 | Self::Utf8Bom => Some(1),
+
+			// UTF-16 - must be 2-byte aligned
+			Self::Utf16Le | Self::Utf16Be => Some(2),
+
+			// Legacy CJK - not resynchronizable, no valid alignment
+			Self::Gb18030 | Self::Gbk | Self::ShiftJis | Self::EucKr => None,
+		}
+	}
+
+	/// Returns true if this encoding requires the entire file to be loaded
+	/// for correct decoding (cannot use lazy/streaming loading).
+	///
+	/// This is the inverse of `is_resynchronizable()` and indicates that
+	/// the user should be warned before loading large files in this encoding.
+	pub fn requires_full_file_load(&self) -> bool {
+		!self.is_resynchronizable()
+	}
+}
+
+// ============================================================================
+// Encoding Detection
+// ============================================================================
+
+/// Detect the text encoding from a sample of bytes
+///
+/// This function delegates to `detect_encoding_or_binary` and returns only
+/// the encoding, ignoring the binary flag. Use `detect_encoding_or_binary`
+/// when you need to know if the content should be treated as binary.
+pub fn detect_encoding(bytes: &[u8]) -> Encoding {
+	detect_encoding_or_binary(bytes, false).0
+}
+
+/// Detect the text encoding and whether content is binary.
+///
+/// Returns (Encoding, is_binary) where:
+/// - Encoding is the detected encoding (or default if binary)
+/// - is_binary is true if the content should be treated as raw binary
+///
+/// When `truncated` is true, an incomplete multi-byte UTF-8 sequence at the
+/// end of the sample is tolerated (up to 3 bytes) since it likely results from
+/// the caller truncating a larger stream. When false, such trailing bytes cause
+/// the sample to be rejected as UTF-8.
+///
+/// # Detection Strategy
+///
+/// 1. Check for BOM (Byte Order Mark) - highest priority, definitely not binary
+/// 2. Try UTF-8 validation (fast path for most files), definitely not binary
+/// 3. Check for UTF-16 patterns without BOM, definitely not binary
+/// 4. Check for binary control characters (null bytes, etc.) - if found, it's binary
+/// 5. Use chardetng for statistical detection of legacy encodings
+/// 6. If encoding detection is uncertain, default to Windows-1252
+pub fn detect_encoding_or_binary(bytes: &[u8], truncated: bool) -> (Encoding, bool) {
+	// Only check the first 8KB for encoding detection.
+	let check_len = bytes.len().min(8 * 1024);
+	let sample = &bytes[..check_len];
+
+	// The caller's `truncated` flag says whether the bytes they passed were
+	// already cut from a larger stream. The detector additionally clamps the
+	// sample to 8 KB internally, which is its own source of truncation — a
+	// multi-byte UTF-8 sequence straddling that cutoff would otherwise fail
+	// strict validation even though the full buffer is valid UTF-8 (#1635).
+	let sample_truncated = truncated || check_len < bytes.len();
+
+	// Run the detection phases in priority order, returning at the first one
+	// that reaches a verdict. See the doc comment above for the strategy.
+	if let Some(result) = detect_by_bom(sample) {
+		return result;
+	}
+	if let Some(result) = detect_utf8(sample, sample_truncated) {
+		return result;
+	}
+	if let Some(result) = detect_utf16_without_bom(sample) {
+		return result;
+	}
+	detect_legacy_encoding(sample)
+}
+
+/// Phase 1: detect a leading Byte Order Mark. A BOM is definitive — the content
+/// is text in the marked encoding. Returns `None` when no BOM is present.
+fn detect_by_bom(sample: &[u8]) -> Option<(Encoding, bool)> {
+	if sample.starts_with(&[0xEF, 0xBB, 0xBF]) {
+		Some((Encoding::Utf8Bom, false))
+	} else if sample.starts_with(&[0xFF, 0xFE]) {
+		// Could also be UTF-32 LE, but UTF-16 LE is much more common.
+		Some((Encoding::Utf16Le, false))
+	} else if sample.starts_with(&[0xFE, 0xFF]) {
+		Some((Encoding::Utf16Be, false))
+	} else {
+		None
+	}
+}
+
+/// Phase 2: validate as UTF-8 (the fast path for most modern files). Returns
+/// `None` when the sample is not valid UTF-8, leaving the verdict to later
+/// phases.
+fn detect_utf8(sample: &[u8], sample_truncated: bool) -> Option<(Encoding, bool)> {
+	// When we truncate to 8KB we may cut in the middle of a multi-byte UTF-8
+	// sequence. If the only error is an incomplete sequence at the very end,
+	// treat the valid prefix as UTF-8 rather than rejecting the whole sample.
+	let utf8_valid_len = match std::str::from_utf8(sample) {
+		Ok(_) => sample.len(),
+		// error_len() is None for an incomplete sequence at end-of-input (a
+		// likely truncation artifact), vs Some(n) for a genuinely invalid byte.
+		Err(e) if e.error_len().is_none() => e.valid_up_to(),
+		Err(_) => 0,
+	};
+
+	// Accept exact validity; or, when the caller flagged truncation, tolerate
+	// up to 3 trailing bytes of an incomplete multi-byte sequence. Without
+	// truncation a trailing 0xE9 in a short file is a Latin-1 'é', not a cut
+	// codepoint, so we require exact validity there.
+	let is_valid_utf8 = utf8_valid_len == sample.len()
+		|| (sample_truncated && utf8_valid_len > 0 && utf8_valid_len >= sample.len() - 3);
+	if !is_valid_utf8 {
+		return None;
+	}
+
+	let valid_sample = &sample[..utf8_valid_len];
+	if valid_sample.iter().any(|&b| is_binary_control_char(b)) {
+		return Some((Encoding::Utf8, true));
+	}
+	// If the tolerance branch accepted a trailing incomplete multi-byte
+	// sequence, the file is not pure ASCII — the byte at `utf8_valid_len` is a
+	// UTF-8 lead byte — so classify it as UTF-8.
+	let has_non_ascii_tail = utf8_valid_len < sample.len();
+	if !has_non_ascii_tail && valid_sample.iter().all(|&b| b < 128) {
+		return Some((Encoding::Ascii, false));
+	}
+	Some((Encoding::Utf8, false))
+}
+
+/// Phase 3: detect BOM-less UTF-16 (common in some Windows files) by looking
+/// for null bytes alternating with printable characters.
+///
+/// Unlike UTF-8 above, this heuristic is robust to sample truncation: it uses
+/// statistical pattern matching (50% threshold) over complete 2-byte pairs, so
+/// losing one pair out of ~4096 does not affect the verdict. Returns `None`
+/// when neither orientation crosses the threshold.
+fn detect_utf16_without_bom(sample: &[u8]) -> Option<(Encoding, bool)> {
+	if sample.len() < 4 {
+		return None;
+	}
+
+	let is_printable_or_high = |b: u8| (0x20..=0x7E).contains(&b) || b >= 0x80;
+
+	// Align to an even boundary so we only process complete 2-byte pairs.
+	let aligned_len = sample.len() & !1;
+	let aligned_sample = &sample[..aligned_len];
+
+	let le_pairs = aligned_sample
+		.chunks(2)
+		.filter(|chunk| chunk[1] == 0 && is_printable_or_high(chunk[0]))
+		.count();
+	let be_pairs = aligned_sample
+		.chunks(2)
+		.filter(|chunk| chunk[0] == 0 && is_printable_or_high(chunk[1]))
+		.count();
+	let pair_count = aligned_len / 2;
+
+	// More than 50% of pairs looking like UTF-16 text means it is text.
+	if le_pairs > pair_count / 2 {
+		Some((Encoding::Utf16Le, false))
+	} else if be_pairs > pair_count / 2 {
+		Some((Encoding::Utf16Be, false))
+	} else {
+		None
+	}
+}
+
+/// Phase 4-7: the sample is neither valid UTF-8 nor UTF-16. Reject binary
+/// content, then use chardetng plus heuristics to pick a legacy 8-bit (or CJK)
+/// encoding. Always reaches a verdict.
+fn detect_legacy_encoding(sample: &[u8]) -> (Encoding, bool) {
+	// Binary files often contain null bytes and control characters that appear
+	// in no valid text encoding. Check this before chardetng, which can still
+	// be "confident" about an encoding for binary data.
+	if sample.iter().any(|&b| b == 0x00 || is_binary_control_char(b)) {
+		return (Encoding::Utf8, true);
+	}
+
+	// High bytes followed by invalid CJK trail bytes (space, newline,
+	// punctuation < 0x40) indicate Latin-1 rather than GB18030/GBK.
+	let has_latin1_pattern = has_latin1_high_byte_pattern(sample);
+	// Bytes in 0x81-0x9F can only be CJK lead bytes.
+	let has_cjk_only_bytes = sample.iter().any(|&b| (0x81..0xA0).contains(&b));
+
+	let mut detector = chardetng::EncodingDetector::new();
+	detector.feed(sample, true);
+	let (detected_encoding, confident) = detector.guess_assess(None, true);
+
+	if !confident {
+		// No binary indicators (checked above), so this is valid legacy text.
+		return (windows_125x_fallback(sample), false);
+	}
+
+	let is_cjk_encoding = detected_encoding == encoding_rs::GB18030
+		|| detected_encoding == encoding_rs::GBK
+		|| detected_encoding == encoding_rs::SHIFT_JIS
+		|| detected_encoding == encoding_rs::EUC_KR;
+
+	// For CJK encodings with no CJK-only bytes but clear Latin-1 indicators
+	// (a space followed by a high byte), prefer Windows-1252.
+	if is_cjk_encoding && !has_cjk_only_bytes && has_latin1_pattern {
+		return (Encoding::Windows1252, false);
+	}
+
+	// GBK is a subset of GB18030. Because we only inspect the first 8KB, the
+	// sample may lack GB18030-only code points, so treating GBK as GB18030 is
+	// safer and still renders French, Spanish, emoji, etc.
+	let encoding =
+		if detected_encoding == encoding_rs::GB18030 || detected_encoding == encoding_rs::GBK {
+			Encoding::Gb18030
+		} else if detected_encoding == encoding_rs::SHIFT_JIS {
+			Encoding::ShiftJis
+		} else if detected_encoding == encoding_rs::EUC_KR {
+			Encoding::EucKr
+		} else {
+			// chardetng cannot reliably distinguish Latin-1 from Cyrillic for short
+			// samples with ambiguous high bytes — "éééÿ" (Latin-1) shares bytes with
+			// "еёёя" (Cyrillic). It may also report UTF-8 even though validation
+			// failed above. Route every remaining case through the same heuristic,
+			// defaulting to Windows-1252 unless there is strong evidence otherwise.
+			windows_125x_fallback(sample)
+		};
+	(encoding, false)
+}
+
+/// Disambiguate an ambiguous Windows code page from the sample's byte patterns,
+/// defaulting to Windows-1252 (Western European) when no stronger signal is
+/// present.
+fn windows_125x_fallback(sample: &[u8]) -> Encoding {
+	if has_windows1250_pattern(sample) {
+		Encoding::Windows1250
+	} else if has_windows1251_pattern(sample) {
+		Encoding::Windows1251
+	} else {
+		Encoding::Windows1252
+	}
+}
+
+// ============================================================================
+// Binary Detection Helpers
+// ============================================================================
+
+/// Check if a byte is a binary control character
+///
+/// Returns true for control characters that typically indicate binary content,
+/// excluding common text control chars (tab, newline, CR, form feed, etc.)
+pub fn is_binary_control_char(byte: u8) -> bool {
+	if byte < 0x20 {
+		// Allow common text control characters:
+		// 0x09 = Tab, 0x0A = LF, 0x0D = CR, 0x0C = Form Feed, 0x0B = Vertical Tab, 0x1B = ESC
+		!matches!(byte, 0x09 | 0x0A | 0x0D | 0x0C | 0x0B | 0x1B)
+	} else if byte == 0x7F {
+		// DEL character
+		true
+	} else {
+		false
+	}
+}
+
+/// Check if sample has Latin-1 patterns that cannot be valid CJK encoding
+///
+/// In GB18030/GBK, valid sequences are:
+/// - ASCII bytes (0x00-0x7F) as standalone characters
+/// - Lead byte (0x81-0xFE) + Trail byte (0x40-0x7E or 0x80-0xFE)
+///
+/// This function looks for patterns that indicate Latin-1:
+/// 1. High bytes followed by invalid CJK trail bytes (space, newline, etc.)
+/// 2. ASCII word followed by space followed by high byte (like "Hello é")
+/// 3. High byte immediately after ASCII space (like " é")
+fn has_latin1_high_byte_pattern(sample: &[u8]) -> bool {
+	let mut latin1_indicators = 0;
+	let mut i = 0;
+
+	while i < sample.len() {
+		let byte = sample[i];
+
+		if byte < 0x80 {
+			// ASCII byte
+			// Check for pattern: space followed by high byte (0xA0-0xFF)
+			// This is common in Latin-1 text like "Hello é" or "Café résumé"
+			if byte == 0x20 && i + 1 < sample.len() {
+				let next = sample[i + 1];
+				// Space followed by Latin-1 extended char (not CJK-only lead byte)
+				if next >= 0xA0 {
+					latin1_indicators += 1;
+				}
+			}
+			i += 1;
+			continue;
+		}
+
+		// High byte (0x80-0xFF) - could be Latin-1 or CJK lead byte
+		if i + 1 < sample.len() {
+			let next = sample[i + 1];
+
+			// Check if this could be a valid CJK double-byte sequence
+			let is_valid_cjk_lead = (0x81..=0xFE).contains(&byte);
+			let is_valid_cjk_trail = (0x40..=0x7E).contains(&next) || (0x80..=0xFE).contains(&next);
+
+			if is_valid_cjk_lead && is_valid_cjk_trail {
+				// Valid CJK pair - skip both bytes
+				i += 2;
+				continue;
+			}
+
+			// Not a valid CJK pair - check for Latin-1 indicator
+			// High byte followed by space, newline, or other low ASCII
+			if byte >= 0xA0 && next < 0x40 {
+				latin1_indicators += 1;
+			}
+		}
+
+		i += 1;
+	}
+
+	// Latin-1 is likely if we have indicators
+	latin1_indicators > 0
+}
+
+// ============================================================================
+// Encoding Conversion
+// ============================================================================
+
+/// Detect encoding and convert bytes to UTF-8
+///
+/// Returns the detected encoding and the UTF-8 converted content.
+/// This is the core function for normalizing file content to UTF-8 on load.
+pub fn detect_and_convert(bytes: &[u8]) -> (Encoding, Vec<u8>) {
+	if bytes.is_empty() {
+		return (Encoding::Utf8, Vec::new());
+	}
+
+	let encoding = detect_encoding(bytes);
+
+	// For UTF-8 (with or without BOM), we can use the content directly
+	match encoding {
+		Encoding::Utf8 | Encoding::Ascii => {
+			// Already UTF-8, just clone
+			(encoding, bytes.to_vec())
+		}
+		Encoding::Utf8Bom => {
+			// Skip the BOM (3 bytes) and use the rest
+			let content = if bytes.len() > 3 { bytes[3..].to_vec() } else { Vec::new() };
+			(encoding, content)
+		}
+		Encoding::Utf16Le | Encoding::Utf16Be => {
+			// Decode UTF-16 to UTF-8
+			let enc_rs = encoding.to_encoding_rs();
+			let start_offset = if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+				2 // Skip BOM
+			} else {
+				0
+			};
+			let data = &bytes[start_offset..];
+
+			let (cow, _had_errors) = enc_rs.decode_without_bom_handling(data);
+			(encoding, cow.into_owned().into_bytes())
+		}
+		_ => {
+			// Use encoding_rs to convert to UTF-8
+			let enc_rs = encoding.to_encoding_rs();
+			let (cow, _had_errors) = enc_rs.decode_without_bom_handling(bytes);
+			(encoding, cow.into_owned().into_bytes())
+		}
+	}
+}
+
+/// Convert bytes from a specific encoding to UTF-8
+///
+/// Used when opening a file with a user-specified encoding instead of auto-detection.
+/// Returns the UTF-8 converted content.
+pub fn convert_to_utf8(bytes: &[u8], encoding: Encoding) -> Vec<u8> {
+	if bytes.is_empty() {
+		return Vec::new();
+	}
+
+	match encoding {
+		Encoding::Utf8 | Encoding::Ascii => {
+			// Already UTF-8, just clone
+			bytes.to_vec()
+		}
+		Encoding::Utf8Bom => {
+			// Skip the BOM (3 bytes) if present and use the rest
+			if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) && bytes.len() > 3 {
+				bytes[3..].to_vec()
+			} else {
+				bytes.to_vec()
+			}
+		}
+		Encoding::Utf16Le | Encoding::Utf16Be => {
+			// Decode UTF-16 to UTF-8
+			let enc_rs = encoding.to_encoding_rs();
+			let start_offset = if bytes.starts_with(&[0xFF, 0xFE]) || bytes.starts_with(&[0xFE, 0xFF]) {
+				2 // Skip BOM
+			} else {
+				0
+			};
+			let data = &bytes[start_offset..];
+
+			let (cow, _had_errors) = enc_rs.decode_without_bom_handling(data);
+			cow.into_owned().into_bytes()
+		}
+		_ => {
+			// Use encoding_rs to convert to UTF-8
+			let enc_rs = encoding.to_encoding_rs();
+			let (cow, _had_errors) = enc_rs.decode_without_bom_handling(bytes);
+			cow.into_owned().into_bytes()
+		}
+	}
+}
+
+/// Convert UTF-8 content to the specified encoding for saving
+///
+/// Used when saving files to convert internal UTF-8 representation
+/// back to the original (or user-selected) encoding.
+///
+/// Note: This does NOT add BOM - the BOM should be handled separately.
+pub fn convert_from_utf8(utf8_bytes: &[u8], encoding: Encoding) -> Vec<u8> {
+	match encoding {
+		Encoding::Utf8 | Encoding::Ascii | Encoding::Utf8Bom => {
+			// UTF-8 (with or without BOM) - just clone, BOM added separately
+			utf8_bytes.to_vec()
+		}
+		Encoding::Utf16Le => {
+			// Convert UTF-8 to UTF-16 LE (no BOM - added separately)
+			let text = String::from_utf8_lossy(utf8_bytes);
+			let mut result = Vec::new();
+			for code_unit in text.encode_utf16() {
+				result.extend_from_slice(&code_unit.to_le_bytes());
+			}
+			result
+		}
+		Encoding::Utf16Be => {
+			// Convert UTF-8 to UTF-16 BE (no BOM - added separately)
+			let text = String::from_utf8_lossy(utf8_bytes);
+			let mut result = Vec::new();
+			for code_unit in text.encode_utf16() {
+				result.extend_from_slice(&code_unit.to_be_bytes());
+			}
+			result
+		}
+		_ => {
+			// Use encoding_rs to convert from UTF-8
+			let enc_rs = encoding.to_encoding_rs();
+			let text = String::from_utf8_lossy(utf8_bytes);
+			let (cow, _encoding_used, _had_errors) = enc_rs.encode(&text);
+			cow.into_owned()
+		}
+	}
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_encoding_display_names() {
+		assert_eq!(Encoding::Utf8.display_name(), "UTF-8");
+		assert_eq!(Encoding::Utf8Bom.display_name(), "UTF-8 BOM");
+		assert_eq!(Encoding::Utf16Le.display_name(), "UTF-16 LE");
+		assert_eq!(Encoding::Gb18030.display_name(), "GB18030");
+		assert_eq!(Encoding::Windows1250.display_name(), "Windows-1250");
+	}
+
+	#[test]
+	fn test_encoding_bom() {
+		assert!(Encoding::Utf8Bom.has_bom());
+		assert!(Encoding::Utf16Le.has_bom());
+		assert!(!Encoding::Utf8.has_bom());
+		assert!(!Encoding::Windows1252.has_bom());
+		assert!(!Encoding::Windows1250.has_bom());
+	}
+
+	#[test]
+	fn test_detect_utf8() {
+		assert_eq!(detect_encoding(b"Hello, world!"), Encoding::Ascii);
+		assert_eq!(detect_encoding("Hello, 世界!".as_bytes()), Encoding::Utf8);
+	}
+
+	#[test]
+	fn test_detect_utf8_bom() {
+		let with_bom = [0xEF, 0xBB, 0xBF, b'H', b'i'];
+		assert_eq!(detect_encoding(&with_bom), Encoding::Utf8Bom);
+	}
+
+	#[test]
+	fn test_detect_utf16_le() {
+		let utf16_le_bom = [0xFF, 0xFE, b'H', 0x00, b'i', 0x00];
+		assert_eq!(detect_encoding(&utf16_le_bom), Encoding::Utf16Le);
+	}
+
+	#[test]
+	fn test_detect_binary() {
+		let binary_data = [0x00, 0x01, 0x02, 0x03];
+		let (_, is_binary) = detect_encoding_or_binary(&binary_data, false);
+		assert!(is_binary);
+	}
+
+	#[test]
+	fn test_is_binary_control_char() {
+		// Binary control chars
+		assert!(is_binary_control_char(0x00)); // NUL
+		assert!(is_binary_control_char(0x01)); // SOH
+		assert!(is_binary_control_char(0x02)); // STX
+		assert!(is_binary_control_char(0x7F)); // DEL
+
+		// Text control chars (allowed)
+		assert!(!is_binary_control_char(0x09)); // Tab
+		assert!(!is_binary_control_char(0x0A)); // LF
+		assert!(!is_binary_control_char(0x0D)); // CR
+		assert!(!is_binary_control_char(0x1B)); // ESC
+
+		// Regular printable chars
+		assert!(!is_binary_control_char(b'A'));
+		assert!(!is_binary_control_char(b' '));
+	}
+
+	#[test]
+	fn test_convert_roundtrip_utf8() {
+		let original = "Hello, 世界!";
+		let bytes = original.as_bytes();
+
+		let (encoding, utf8_content) = detect_and_convert(bytes);
+		assert_eq!(encoding, Encoding::Utf8);
+		assert_eq!(utf8_content, bytes);
+
+		let back = convert_from_utf8(&utf8_content, encoding);
+		assert_eq!(back, bytes);
+	}
+
+	#[test]
+	fn test_convert_roundtrip_utf16le() {
+		// UTF-16 LE with BOM: "Hi"
+		let utf16_le = [0xFF, 0xFE, b'H', 0x00, b'i', 0x00];
+
+		let (encoding, utf8_content) = detect_and_convert(&utf16_le);
+		assert_eq!(encoding, Encoding::Utf16Le);
+		assert_eq!(utf8_content, b"Hi");
+
+		// Note: convert_from_utf8 doesn't add BOM, so result won't have BOM
+		let back = convert_from_utf8(&utf8_content, encoding);
+		assert_eq!(back, [b'H', 0x00, b'i', 0x00]);
+	}
+
+	#[test]
+	fn test_encoding_resynchronizable() {
+		// Self-synchronizing encodings (can find char boundaries from middle of file)
+		assert!(Encoding::Utf8.is_resynchronizable());
+		assert!(Encoding::Utf8Bom.is_resynchronizable());
+		assert!(Encoding::Ascii.is_resynchronizable());
+		assert!(Encoding::Latin1.is_resynchronizable());
+		assert!(Encoding::Windows1252.is_resynchronizable());
+		assert!(Encoding::Windows1250.is_resynchronizable());
+
+		// UTF-16 is resynchronizable with proper alignment
+		assert!(Encoding::Utf16Le.is_resynchronizable());
+		assert!(Encoding::Utf16Be.is_resynchronizable());
+
+		// Legacy CJK encodings are NOT resynchronizable
+		// (second byte of double-byte char can equal a valid single-byte char)
+		assert!(!Encoding::Gb18030.is_resynchronizable());
+		assert!(!Encoding::Gbk.is_resynchronizable());
+		assert!(!Encoding::ShiftJis.is_resynchronizable());
+		assert!(!Encoding::EucKr.is_resynchronizable());
+	}
+
+	#[test]
+	fn test_encoding_alignment() {
+		// Single-byte encodings have alignment of 1
+		assert_eq!(Encoding::Ascii.alignment(), Some(1));
+		assert_eq!(Encoding::Latin1.alignment(), Some(1));
+		assert_eq!(Encoding::Windows1252.alignment(), Some(1));
+		assert_eq!(Encoding::Windows1250.alignment(), Some(1));
+		assert_eq!(Encoding::Utf8.alignment(), Some(1));
+		assert_eq!(Encoding::Utf8Bom.alignment(), Some(1));
+
+		// UTF-16 requires 2-byte alignment
+		assert_eq!(Encoding::Utf16Le.alignment(), Some(2));
+		assert_eq!(Encoding::Utf16Be.alignment(), Some(2));
+
+		// Non-resynchronizable encodings have no valid alignment
+		assert_eq!(Encoding::Gb18030.alignment(), None);
+		assert_eq!(Encoding::Gbk.alignment(), None);
+		assert_eq!(Encoding::ShiftJis.alignment(), None);
+		assert_eq!(Encoding::EucKr.alignment(), None);
+	}
+
+	#[test]
+	fn test_requires_full_file_load() {
+		// Encodings that can be streamed
+		assert!(!Encoding::Utf8.requires_full_file_load());
+		assert!(!Encoding::Ascii.requires_full_file_load());
+		assert!(!Encoding::Latin1.requires_full_file_load());
+		assert!(!Encoding::Windows1250.requires_full_file_load());
+		assert!(!Encoding::Utf16Le.requires_full_file_load());
+
+		// Encodings that require full loading
+		assert!(Encoding::Gb18030.requires_full_file_load());
+		assert!(Encoding::Gbk.requires_full_file_load());
+		assert!(Encoding::ShiftJis.requires_full_file_load());
+		assert!(Encoding::EucKr.requires_full_file_load());
+	}
+
+	#[test]
+	fn test_convert_roundtrip_windows1250() {
+		// Windows-1250 encoded text with Central European characters
+		// "Zażółć" in Windows-1250: Z(0x5A) a(0x61) ż(0xBF) ó(0xF3) ł(0xB3) ć(0xE6)
+		let windows1250_bytes: &[u8] = &[0x5A, 0x61, 0xBF, 0xF3, 0xB3, 0xE6];
+
+		// Convert to UTF-8
+		let enc_rs = Encoding::Windows1250.to_encoding_rs();
+		let (decoded, _had_errors) = enc_rs.decode_without_bom_handling(windows1250_bytes);
+		let utf8_content = decoded.as_bytes();
+
+		// The UTF-8 content should contain the Polish characters
+		let utf8_str = std::str::from_utf8(utf8_content).unwrap();
+		assert!(utf8_str.contains('ż'), "Should contain ż: {}", utf8_str);
+		assert!(utf8_str.contains('ó'), "Should contain ó: {}", utf8_str);
+		assert!(utf8_str.contains('ł'), "Should contain ł: {}", utf8_str);
+		assert!(utf8_str.contains('ć'), "Should contain ć: {}", utf8_str);
+
+		// Convert back to Windows-1250
+		let back = convert_from_utf8(utf8_content, Encoding::Windows1250);
+		assert_eq!(back, windows1250_bytes, "Round-trip should preserve bytes");
+	}
+
+	#[test]
+	fn test_windows1250_description() {
+		assert_eq!(Encoding::Windows1250.description(), "Windows-1250 / CP1250 – Central European");
+	}
+
+	#[test]
+	fn test_detect_windows1250_definitive_bytes() {
+		// Bytes 0x8D (Ť), 0x8F (Ź), 0x9D (ť) are undefined in Windows-1252
+		// but valid in Windows-1250, so they definitively indicate Windows-1250
+
+		// Czech text with ť (0x9D): "měsťo" (city, archaic)
+		let with_t_caron = [0x6D, 0x9D, 0x73, 0x74, 0x6F]; // mťsto
+		assert_eq!(
+			detect_encoding(&with_t_caron),
+			Encoding::Windows1250,
+			"Byte 0x9D (ť) should trigger Windows-1250 detection"
+		);
+
+		// Polish text with Ź (0x8F): "Źródło" (source)
+		let with_z_acute_upper = [0x8F, 0x72, 0xF3, 0x64, 0xB3, 0x6F]; // Źródło
+		assert_eq!(
+			detect_encoding(&with_z_acute_upper),
+			Encoding::Windows1250,
+			"Byte 0x8F (Ź) should trigger Windows-1250 detection"
+		);
+	}
+
+	#[test]
+	fn test_detect_windows1250_strong_indicators() {
+		// Polish text with ś (0x9C) and Ś (0x8C) - strong indicators from 0x80-0x9F range
+		let polish_text = [
+			0x9C, 0x77, 0x69, 0x65, 0x74, 0x79, 0x20, // "świety "
+			0x8C, 0x77, 0x69, 0x61, 0x74, // "Świat"
+		];
+		assert_eq!(
+			detect_encoding(&polish_text),
+			Encoding::Windows1250,
+			"Multiple Polish characters (ś, Ś) should trigger Windows-1250"
+		);
+	}
+
+	#[test]
+	fn test_detect_ambiguous_bytes_as_windows1252() {
+		// Bytes in 0xA0-0xFF range are ambiguous and should default to Windows-1252
+		// Polish "żółć" - ż(0xBF) ó(0xF3) ł(0xB3) ć(0xE6) - all ambiguous
+		let zolc = [0xBF, 0xF3, 0xB3, 0xE6];
+		assert_eq!(
+			detect_encoding(&zolc),
+			Encoding::Windows1252,
+			"Ambiguous bytes should default to Windows-1252"
+		);
+
+		// ą (0xB9) and ł (0xB3) could be ¹ and ³ in Windows-1252
+		let ambiguous = [
+			0x6D, 0xB9, 0x6B, 0x61, 0x20, // "mąka " or "m¹ka "
+			0x6D, 0xB3, 0x6F, 0x64, 0x79, // "młody" or "m³ody"
+		];
+		assert_eq!(
+			detect_encoding(&ambiguous),
+			Encoding::Windows1252,
+			"Ambiguous Polish bytes should default to Windows-1252"
+		);
+	}
+
+	#[test]
+	fn test_detect_windows1250_czech_pangram() {
+		// "Příliš žluťoučký kůň úpěl ďábelské ódy" - Czech pangram in Windows-1250
+		// Contains ť (0x9D) which is a definitive Windows-1250 indicator
+		let czech_pangram: &[u8] = &[
+			0x50, 0xF8, 0xED, 0x6C, 0x69, 0x9A, 0x20, // "Příliš "
+			0x9E, 0x6C, 0x75, 0x9D, 0x6F, 0x75, 0xE8, 0x6B, 0xFD, 0x20, // "žluťoučký "
+			0x6B, 0xF9, 0xF2, 0x20, // "kůň "
+			0xFA, 0x70, 0xEC, 0x6C, 0x20, // "úpěl "
+			0xEF, 0xE1, 0x62, 0x65, 0x6C, 0x73, 0x6B, 0xE9, 0x20, // "ďábelské "
+			0xF3, 0x64, 0x79, // "ódy"
+		];
+		assert_eq!(
+			detect_encoding(czech_pangram),
+			Encoding::Windows1250,
+			"Czech pangram should be detected as Windows-1250 (contains ť = 0x9D)"
+		);
+	}
+
+	#[test]
+	fn test_detect_windows1252_not_1250() {
+		// Pure Windows-1252 text without Central European indicators
+		// "Café résumé" in Windows-1252
+		let windows1252_text = [
+			0x43, 0x61, 0x66, 0xE9, 0x20, // "Café "
+			0x72, 0xE9, 0x73, 0x75, 0x6D, 0xE9, // "résumé"
+		];
+		assert_eq!(
+			detect_encoding(&windows1252_text),
+			Encoding::Windows1252,
+			"French text should remain Windows-1252"
+		);
+	}
+
+	#[test]
+	fn test_convert_roundtrip_windows1251() {
+		// Russian "Привет" (Hello) in Windows-1251:
+		// П=0xCF р=0xF0 и=0xE8 в=0xE2 е=0xE5 т=0xF2
+		let windows1251_bytes: &[u8] = &[0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2];
+
+		// Convert to UTF-8
+		let enc_rs = Encoding::Windows1251.to_encoding_rs();
+		let (decoded, _had_errors) = enc_rs.decode_without_bom_handling(windows1251_bytes);
+		let utf8_content = decoded.as_bytes();
+
+		let utf8_str = std::str::from_utf8(utf8_content).unwrap();
+		assert_eq!(utf8_str, "Привет", "Should decode to Russian 'Привет'");
+
+		// Convert back to Windows-1251
+		let back = convert_from_utf8(utf8_content, Encoding::Windows1251);
+		assert_eq!(back, windows1251_bytes, "Round-trip should preserve bytes");
+	}
+
+	#[test]
+	fn test_windows1251_display_and_description() {
+		assert_eq!(Encoding::Windows1251.display_name(), "Windows-1251");
+		assert_eq!(Encoding::Windows1251.description(), "Windows-1251 / CP1251 – Cyrillic");
+	}
+
+	#[test]
+	fn test_windows1251_is_resynchronizable() {
+		assert!(Encoding::Windows1251.is_resynchronizable());
+		assert_eq!(Encoding::Windows1251.alignment(), Some(1));
+		assert!(!Encoding::Windows1251.requires_full_file_load());
+		assert!(!Encoding::Windows1251.has_bom());
+	}
+
+	#[test]
+	fn test_detect_windows1251_russian() {
+		// Russian sentence "Привет мир" (Hello world) in Windows-1251
+		let privet_mir: &[u8] = &[
+			0xCF, 0xF0, 0xE8, 0xE2, 0xE5, 0xF2, // Привет
+			0x20, // space
+			0xEC, 0xE8, 0xF0, // мир
+		];
+		assert_eq!(
+			detect_encoding(privet_mir),
+			Encoding::Windows1251,
+			"Russian sentence should be detected as Windows-1251"
+		);
+	}
+
+	#[test]
+	fn test_detect_windows1251_russian_pangram() {
+		// Russian pangram fragment: "Съешь ещё этих мягких французских булок"
+		// Contains many Cyrillic letters and the distinctive ё (0xB8) character.
+		// bytes in Windows-1251:
+		// С=0xD1 ъ=0xFA е=0xE5 ш=0xF8 ь=0xFC 0x20
+		// е=0xE5 щ=0xF9 ё=0xB8 0x20
+		// э=0xFD т=0xF2 и=0xE8 х=0xF5 0x20
+		// м=0xEC я=0xFF г=0xE3 к=0xEA и=0xE8 х=0xF5 0x20
+		// ф=0xF4 р=0xF0 а=0xE0 н=0xED ц=0xF6 у=0xF3 з=0xE7 с=0xF1 к=0xEA и=0xE8 х=0xF5 0x20
+		// б=0xE1 у=0xF3 л=0xEB о=0xEE к=0xEA
+		let pangram: &[u8] = &[
+			0xD1, 0xFA, 0xE5, 0xF8, 0xFC, 0x20, 0xE5, 0xF9, 0xB8, 0x20, 0xFD, 0xF2, 0xE8, 0xF5, 0x20,
+			0xEC, 0xFF, 0xE3, 0xEA, 0xE8, 0xF5, 0x20, 0xF4, 0xF0, 0xE0, 0xED, 0xF6, 0xF3, 0xE7, 0xF1,
+			0xEA, 0xE8, 0xF5, 0x20, 0xE1, 0xF3, 0xEB, 0xEE, 0xEA,
+		];
+		assert_eq!(
+			detect_encoding(pangram),
+			Encoding::Windows1251,
+			"Russian pangram should be detected as Windows-1251"
+		);
+	}
+
+	#[test]
+	fn test_detect_not_windows1251_ambiguous_polish() {
+		// Regression: 4 consecutive Polish ambiguous bytes must still default
+		// to Windows-1252, not be mis-detected as Cyrillic by the 1251 heuristic.
+		let zolc = [0xBF, 0xF3, 0xB3, 0xE6];
+		assert_eq!(
+			detect_encoding(&zolc),
+			Encoding::Windows1252,
+			"Short ambiguous Polish bytes must not be detected as Windows-1251"
+		);
+	}
+
+	#[test]
+	fn test_detect_utf8_chinese_truncated_sequence() {
+		// Test that UTF-8 Chinese text is correctly detected even when the sample
+		// is truncated in the middle of a multi-byte sequence.
+		//
+		// Bug context: When sampling first 8KB for detection, the boundary may cut
+		// through a multi-byte UTF-8 character. This caused valid UTF-8 Chinese text
+		// to fail std::str::from_utf8() validation and fall through to Windows-1250
+		// detection (because UTF-8 continuation bytes like 0x9C, 0x9D overlap with
+		// Windows-1250 indicator bytes).
+
+		// Chinese text "更多" (more) = [0xE6, 0x9B, 0xB4, 0xE5, 0xA4, 0x9A]
+		// If we truncate after 0xE5, we get an incomplete sequence
+		let utf8_chinese_truncated = [
+			0xE6, 0x9B, 0xB4, // 更
+			0xE5, 0xA4, 0x9A, // 多
+			0xE5, // Start of another character, incomplete
+		];
+
+		// With truncated=true, this should be detected as UTF-8
+		assert_eq!(
+			detect_encoding_or_binary(&utf8_chinese_truncated, true).0,
+			Encoding::Utf8,
+			"Truncated UTF-8 Chinese text should be detected as UTF-8"
+		);
+
+		// Without truncated flag, the incomplete trailing byte is treated as non-UTF-8
+		assert_ne!(
+			detect_encoding_or_binary(&utf8_chinese_truncated, false).0,
+			Encoding::Utf8,
+			"Non-truncated short sample with trailing 0xE5 should not be detected as UTF-8"
+		);
+
+		// Test with 2 bytes of incomplete sequence
+		let utf8_chinese_truncated_2 = [
+			0xE6, 0x9B, 0xB4, // 更
+			0xE5, 0xA4, 0x9A, // 多
+			0xE5, 0xA4, // Incomplete 3-byte sequence (missing last byte)
+		];
+		assert_eq!(
+			detect_encoding_or_binary(&utf8_chinese_truncated_2, true).0,
+			Encoding::Utf8,
+			"Truncated UTF-8 with 2-byte incomplete sequence should be detected as UTF-8"
+		);
+	}
+
+	#[test]
+	fn test_detect_utf8_chinese_with_high_bytes() {
+		// UTF-8 Chinese text contains many continuation bytes in the 0x80-0xBF range,
+		// including bytes like 0x9C, 0x9D that happen to be Windows-1250 indicators.
+		// These should NOT trigger Windows-1250 detection for valid UTF-8 content.
+
+		// Chinese characters that use continuation bytes that overlap with Windows-1250 indicators:
+		// 集 = E9 9B 86 (contains 0x9B)
+		// 精 = E7 B2 BE (contains 0xB2, 0xBE)
+		// Build a string with many such characters
+		let chinese_text = "更多全本全集精校小说"; // Contains various high continuation bytes
+		let bytes = chinese_text.as_bytes();
+
+		assert_eq!(
+			detect_encoding(bytes),
+			Encoding::Utf8,
+			"UTF-8 Chinese text should be detected as UTF-8, not Windows-1250"
+		);
+
+		// Verify these bytes would have triggered Windows-1250 detection if not valid UTF-8
+		// by checking that the sample contains bytes in the 0x80-0x9F range
+		let has_high_continuation_bytes = bytes.iter().any(|&b| (0x80..0xA0).contains(&b));
+		assert!(
+			has_high_continuation_bytes,
+			"Test should include bytes that could be mistaken for Windows-1250 indicators"
+		);
+	}
+
+	#[test]
+	fn test_detect_utf8_sample_truncation_at_boundary() {
+		// Simulate what happens when we take an 8KB sample that ends mid-character
+		// by creating a buffer that's valid UTF-8 except for the last 1-3 bytes
+
+		// Build a large UTF-8 Chinese text buffer
+		let chinese = "我的美女老师"; // "My Beautiful Teacher"
+		let mut buffer = Vec::new();
+		// Repeat to make it substantial
+		for _ in 0..100 {
+			buffer.extend_from_slice(chinese.as_bytes());
+		}
+
+		// Verify it's valid UTF-8 when complete
+		assert!(std::str::from_utf8(&buffer).is_ok());
+		assert_eq!(detect_encoding(&buffer), Encoding::Utf8);
+
+		// Now truncate at various points that cut through multi-byte sequences
+		// Each Chinese character is 3 bytes in UTF-8
+		for truncate_offset in 1..=3 {
+			let truncated_len = buffer.len() - truncate_offset;
+			let truncated_buf = &buffer[..truncated_len];
+
+			// The truncated buffer should fail strict UTF-8 validation
+			// (unless we happen to cut at a character boundary)
+			let is_strict_valid = std::str::from_utf8(truncated_buf).is_ok();
+
+			// With truncated=true, our detection should still detect it as UTF-8
+			let detected = detect_encoding_or_binary(truncated_buf, true).0;
+			assert_eq!(
+				detected,
+				Encoding::Utf8,
+				"Truncated UTF-8 at offset -{} should be detected as UTF-8, strict_valid={}",
+				truncate_offset,
+				is_strict_valid
+			);
+		}
+	}
+
+	#[test]
+	fn test_detect_utf8_cjk_across_internal_8kb_boundary() {
+		// Regression for #1635: when callers pass the full file bytes with
+		// `truncated=false`, the detector still internally clamps the sample
+		// to the first 8 KB. If a multi-byte UTF-8 sequence straddles that
+		// internal 8192-byte cutoff, the strict UTF-8 check fails and the
+		// CJK continuation bytes get misclassified by the fallback path
+		// (often as Windows-1250/1251/1252), garbling the whole file.
+		//
+		// The full buffer IS valid UTF-8, so detection must return UTF-8.
+
+		// Build padding that is pure ASCII and leaves exactly one byte of
+		// room inside the first 8 KB before we write a 3-byte CJK codepoint.
+		// "项" = [0xE9, 0xA1, 0xB9] — the first byte sits at offset 8191,
+		// the remaining two bytes spill past the internal 8192-byte sample.
+		let mut buffer = Vec::with_capacity(16 * 1024);
+		buffer.resize(8 * 1024 - 1, b'a');
+		// CJK text that crosses the boundary and continues after it.
+		buffer.extend_from_slice("项目设置项目设置项目设置".as_bytes());
+
+		assert!(buffer.len() > 8 * 1024);
+		assert!(std::str::from_utf8(&buffer).is_ok());
+
+		// The caller (load_small_file) passes the full content with
+		// `truncated=false` because no truncation occurred at the call site.
+		// Detection must still return UTF-8.
+		let detected = detect_encoding_or_binary(&buffer, false).0;
+		assert_eq!(
+			detected,
+			Encoding::Utf8,
+			"Valid UTF-8 CJK content must be detected as UTF-8 even when a \
+             multi-byte sequence straddles the detector's internal 8 KB sample boundary"
+		);
+	}
+}

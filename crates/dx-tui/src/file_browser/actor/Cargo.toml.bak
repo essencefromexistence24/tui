@@ -1,0 +1,57 @@
+[package]
+name                   = "dx-actor"
+description            = "dx actor model"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default      = [ "vendored-lua" ]
+vendored-lua = [ "mlua/vendored" ]
+
+[dependencies]
+dx-binding   = { path = "../file_browser/binding", version = "26.2.2" }
+dx-boot      = { path = "../file_browser/boot", version = "26.2.2" }
+dx-config    = { path = "../file_browser/config", version = "26.2.2" }
+dx-core      = { path = "../file_browser/core", version = "26.2.2" }
+dx-dds       = { path = "../file_browser/dds", version = "26.2.2" }
+dx-emulator  = { path = "../file_browser/emulator", version = "26.2.2" }
+dx-fs        = { path = "../file_browser/fs", version = "26.2.2" }
+dx-macro     = { path = "../file_browser/macro", version = "26.2.2" }
+dx-parser    = { path = "../file_browser/parser", version = "26.2.2" }
+dx-plugin    = { path = "../file_browser/plugin", version = "26.2.2" }
+dx-proxy     = { path = "../file_browser/proxy", version = "26.2.2" }
+fb-scheduler = { path = "../file_browser/scheduler", version = "26.2.2" }
+dx-shared    = { path = "../file_browser/shared", version = "26.2.2" }
+dx-term      = { path = "../file_browser/term", version = "26.2.2" }
+dx-tty       = { path = "../file_browser/tty", version = "26.2.2" }
+dx-vfs       = { path = "../file_browser/vfs", version = "26.2.2" }
+dx-watcher   = { path = "../file_browser/watcher", version = "26.2.2" }
+dx-widgets   = { path = "../file_browser/widgets", version = "26.2.2" }
+
+# External dependencies
+anyhow       = { workspace = true }
+crossterm    = { workspace = true }
+either       = { workspace = true }
+futures      = { workspace = true }
+hashbrown    = { workspace = true }
+mlua         = { workspace = true }
+paste        = { workspace = true }
+ratatui      = { workspace = true }
+scopeguard   = { workspace = true }
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+tracing      = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

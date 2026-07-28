@@ -1,0 +1,51 @@
+[package]
+name = "fb-fs"
+description            = "DX TUI file-browser file system"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-ffi = { path = "../ffi" }
+fb-macro = { path = "../macro" }
+fb-shared = { path = "../shared" }
+fb-shim = { path = "../shim" }
+
+# External dependencies
+anyhow           = { workspace = true }
+arc-swap         = "1.8.2"
+bitflags         = { workspace = true }
+dirs             = { workspace = true }
+either           = { workspace = true }
+foldhash         = { workspace = true }
+hashbrown        = { workspace = true }
+parking_lot      = { workspace = true }
+percent-encoding = { workspace = true }
+rand             = { workspace = true }
+regex            = { workspace = true }
+scopeguard       = { workspace = true }
+serde            = { workspace = true }
+tokio            = { workspace = true }
+tracing          = { workspace = true }
+typed-path       = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+libc  = { workspace = true }
+uzers = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [ "Win32_Storage_FileSystem" ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation-sys = { workspace = true }
+objc2               = { workspace = true }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+trash = "5.2.5"

@@ -1,0 +1,64 @@
+[package]
+name = "fb-plugin"
+description            = "DX TUI file-browser plugin system"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default      = []
+vendored-lua = [ "mlua/vendored" ]
+
+[dependencies]
+fb-adapter = { path = "../adapter" }
+fb-binding = { path = "../binding" }
+fb-boot = { path = "../boot" }
+fb-config = { path = "../config" }
+fb-dds = { path = "../dds" }
+fb-emulator = { path = "../emulator" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-parser = { path = "../parser" }
+fb-proxy = { path = "../proxy" }
+fb-shared = { path = "../shared" }
+fb-shim = { path = "../shim" }
+fb-term = { path = "../term" }
+fb-vfs = { path = "../vfs" }
+fb-widgets = { path = "../widgets" }
+
+# External dependencies
+ansi-to-tui   = { workspace = true }
+anyhow        = { workspace = true }
+futures       = { workspace = true }
+hashbrown     = { workspace = true }
+mlua          = { workspace = true }
+parking_lot   = { workspace = true }
+paste         = { workspace = true }
+ratatui       = { workspace = true }
+serde_json    = { workspace = true }
+syntect       = { workspace = true }
+tiktoken-rs   = "0.9"
+tokio         = { workspace = true }
+tokio-stream  = { workspace = true }
+tokio-util    = { workspace = true }
+tracing       = { workspace = true }
+twox-hash     = { workspace = true }
+unicode-width = { workspace = true }
+yazi-prebuilt = "0.1.0"
+
+[target."cfg(unix)".dependencies]
+libc  = { workspace = true }
+uzers = { workspace = true }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = [ "Win32_System_JobObjects" ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

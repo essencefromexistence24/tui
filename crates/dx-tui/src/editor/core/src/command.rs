@@ -1,0 +1,140 @@
+use serde::{Deserialize, Serialize};
+
+/// Source of a command (builtin or from a plugin)
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub enum CommandSource {
+	/// Built-in editor command
+	Builtin,
+	/// Command registered by a plugin (contains plugin filename without extension)
+	Plugin(String),
+}
+
+/// A command registered by a plugin via the service bridge.
+/// This is a simplified version that the editor converts to its internal Command type.
+#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct Command {
+	/// Command name (e.g., "Open File")
+	pub name: String,
+	/// Command description
+	pub description: String,
+	/// The action name to trigger (for plugin commands, this is the function name)
+	pub action_name: String,
+	/// Plugin that registered this command
+	pub plugin_name: String,
+	/// Custom contexts required for this command (plugin-defined contexts like "vi-mode")
+	pub custom_contexts: Vec<String>,
+	/// When `true`, a key bound to this command bypasses terminal
+	/// keyboard capture — the action fires instead of the keystroke
+	/// being forwarded to the PTY child. Use for commands the user
+	/// must always be able to reach (e.g. the orchestrator picker,
+	/// "switch to other session", a global panic-exit) so a focused
+	/// terminal pane doesn't trap them. Default `false` — keys
+	/// bound to non-bypassing commands still go to the PTY when
+	/// keyboard capture is on, matching the existing UX.
+	#[serde(default)]
+	pub terminal_bypass: bool,
+}
+
+/// A single suggestion item for autocomplete
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+#[serde(deny_unknown_fields)]
+#[ts(export, rename = "PromptSuggestion")]
+pub struct Suggestion {
+	/// The text to display
+	pub text: String,
+	/// Optional description
+	#[serde(default)]
+	#[ts(optional)]
+	pub description: Option<String>,
+	/// The value to use when selected (defaults to text if None)
+	#[serde(default)]
+	#[ts(optional)]
+	pub value: Option<String>,
+	/// Whether this suggestion is disabled (greyed out, defaults to false)
+	#[serde(default)]
+	#[ts(optional)]
+	pub disabled: Option<bool>,
+	/// Optional styled rendering of `description`. When present, the
+	/// suggestion list renders these spans (in order) in place of the
+	/// plain `description` text — letting a plugin highlight a portion
+	/// of the row, e.g. the symbol word inside a code-line snippet.
+	#[serde(default)]
+	#[ts(optional)]
+	pub description_spans: Option<Vec<crate::api::StyledText>>,
+	/// Optional keyboard shortcut
+	#[serde(default)]
+	#[ts(optional)]
+	pub keybinding: Option<String>,
+	/// Source of the command (for command palette) - internal, not settable by plugins
+	#[serde(skip)]
+	#[ts(skip)]
+	pub source: Option<CommandSource>,
+}
+
+#[cfg(feature = "plugins")]
+impl<'js> rquickjs::FromJs<'js> for Suggestion {
+	fn from_js(_ctx: &rquickjs::Ctx<'js>, value: rquickjs::Value<'js>) -> rquickjs::Result<Self> {
+		rquickjs_serde::from_value(value).map_err(|e| rquickjs::Error::FromJs {
+			from: "object",
+			to: "Suggestion",
+			message: Some(e.to_string()),
+		})
+	}
+}
+
+impl Suggestion {
+	pub fn new(text: String) -> Self {
+		Self {
+			text,
+			description: None,
+			value: None,
+			disabled: None,
+			description_spans: None,
+			keybinding: None,
+			source: None,
+		}
+	}
+
+	/// Check if this suggestion is disabled
+	pub fn is_disabled(&self) -> bool {
+		self.disabled.unwrap_or(false)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// `is_disabled` mirrors the `disabled` option and treats `None` as enabled.
+	#[test]
+	fn is_disabled_reflects_disabled_field() {
+		let mut s = Suggestion::new("foo".into());
+		assert!(!s.is_disabled(), "None defaults to enabled");
+
+		s.disabled = Some(false);
+		assert!(!s.is_disabled());
+
+		s.disabled = Some(true);
+		assert!(s.is_disabled());
+	}
+
+	/// `Suggestion::from_js` round-trips user-visible fields through
+	/// `rquickjs_serde`. A mutant that returns `Ok(Default::default())`
+	/// would drop `text` (becoming empty) and `description`.
+	#[cfg(feature = "plugins")]
+	#[test]
+	fn suggestion_from_js_decodes_distinguishing_fields() {
+		use rquickjs::{Context, FromJs, Runtime, Value};
+		let rt = Runtime::new().unwrap();
+		let ctx = Context::full(&rt).unwrap();
+		ctx.with(|ctx| {
+			let v: Value =
+				ctx.eval::<Value, _>(b"({text: 'hello', description: 'world'})".as_slice()).unwrap();
+			let got = Suggestion::from_js(&ctx, v).unwrap();
+			assert_eq!(got.text, "hello");
+			assert_eq!(got.description.as_deref(), Some("world"));
+		});
+	}
+}

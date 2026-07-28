@@ -1,0 +1,57 @@
+[package]
+name = "fb-actor"
+description            = "DX TUI file-browser actor model"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default      = []
+vendored-lua = [ "mlua/vendored" ]
+
+[dependencies]
+fb-binding = { path = "../binding" }
+fb-boot = { path = "../boot" }
+fb-config = { path = "../config" }
+fb-core = { path = "../core" }
+fb-dds = { path = "../dds" }
+fb-emulator = { path = "../emulator" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-parser = { path = "../parser" }
+fb-plugin = { path = "../plugin" }
+fb-proxy = { path = "../proxy" }
+fb-scheduler = { path = "../scheduler" }
+fb-shared = { path = "../shared" }
+fb-term = { path = "../term" }
+fb-tty = { path = "../tty" }
+fb-vfs = { path = "../vfs" }
+fb-watcher = { path = "../watcher" }
+fb-widgets = { path = "../widgets" }
+
+# External dependencies
+anyhow       = { workspace = true }
+crossterm    = { workspace = true }
+either       = { workspace = true }
+futures      = { workspace = true }
+hashbrown    = { workspace = true }
+mlua         = { workspace = true }
+paste        = { workspace = true }
+ratatui      = { workspace = true }
+scopeguard   = { workspace = true }
+tokio        = { workspace = true }
+tokio-stream = { workspace = true }
+tracing      = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+libc = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

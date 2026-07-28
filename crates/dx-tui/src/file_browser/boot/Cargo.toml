@@ -1,0 +1,38 @@
+[package]
+name = "fb-boot"
+description            = "DX TUI file-browser bootstrapper"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-adapter = { path = "../adapter" }
+fb-config = { path = "../config" }
+fb-emulator = { path = "../emulator" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-shared = { path = "../shared" }
+fb-vfs = { path = "../vfs" }
+
+# External dependencies
+clap      = { workspace = true }
+futures   = { workspace = true }
+hashbrown = { workspace = true }
+regex     = { workspace = true }
+
+[build-dependencies]
+fb-shared = { path = "../shared" }
+
+# External dependencies
+clap                  = { workspace = true }
+clap_complete         = "4.6.0"
+clap_complete_fig     = "4.5.2"
+clap_complete_nushell = "4.6.0"
+vergen-gitcl          = { version = "9.1.0", features = [ "build", "rustc" ] }
