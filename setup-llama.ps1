@@ -1,6 +1,6 @@
 $server = "$env:TEMP\llama\llama-server.exe"
 $modelDir = "$env:USERPROFILE\.dx\flow\models\llm"
-$model = "$modelDir\MiniCPM5-1B-Agentic-Tooluse-Nemotron-DPO.Q4_K_M.gguf"
+$model = "$modelDir\qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"
 
 # Download llama-server if missing
 if (!(Test-Path $server)) {
@@ -17,15 +17,9 @@ if (!(Test-Path $server)) {
 
 # Copy model if missing
 if (!(Test-Path $model)) {
-    $src = "G:\Dx\flow\models\MiniCPM5-1B-Agentic-Tooluse-Nemotron-DPO.Q4_K_M.gguf"
-    if (Test-Path $src) {
-        New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
-        Copy-Item $src $model -Verbose
-        Write-Host "Model copied."
-    } else {
-        Write-Error "Model not found at $src"
-        exit 1
-    }
+    New-Item -ItemType Directory -Path $modelDir -Force | Out-Null
+    Invoke-WebRequest -Uri "https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf?download=true" -OutFile $model -UseBasicParsing
+    Write-Host "Model downloaded."
 } else {
     Write-Host "Model found."
 }

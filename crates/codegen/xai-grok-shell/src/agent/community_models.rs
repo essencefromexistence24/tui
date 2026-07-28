@@ -20,10 +20,10 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
 
     let models = [
         ModelSpec {
-            key: "minicpm5-1b-tooluse",
-            name: "MiniCPM5 1B Tool Use (Local)",
-            model_id: "minicpm5-1b-tooluse",
-            ctx: 131_072,
+            key: "qwen2.5-coder-1.5b-local",
+            name: "Qwen2.5 Coder 1.5B (Local)",
+            model_id: "qwen2.5-coder-1.5b-local",
+            ctx: 32_768,
             title_header: None,
         },
         ModelSpec {
@@ -72,7 +72,7 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
 
     for m in &models {
         let mut extra_headers = IndexMap::new();
-        let is_local = m.key == "minicpm5-1b-tooluse";
+        let is_local = m.key == "qwen2.5-coder-1.5b-local";
         if !is_local {
             extra_headers.insert(
                 "HTTP-Referer".to_string(),

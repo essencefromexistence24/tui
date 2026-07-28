@@ -53,9 +53,18 @@ async fn wait_for_local_server(url: &reqwest::Url) -> Result<()> {
     }
 
     let port = url.port_or_known_default().unwrap_or(80);
+    let mut health_url = url.clone();
+    health_url.set_path("/health");
+    health_url.set_query(None);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(SamplingError::Http)?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(65);
     while tokio::time::Instant::now() < deadline {
-        if tokio::net::TcpStream::connect((host, port)).await.is_ok() {
+        if let Ok(response) = client.get(health_url.clone()).send().await
+            && response.status().is_success()
+        {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;

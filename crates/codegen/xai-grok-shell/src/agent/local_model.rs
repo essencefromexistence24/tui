@@ -47,6 +47,10 @@ pub(crate) struct LocalServerHandle {
 struct ServerState {
     port: u16,
     started: bool,
+    // ProcessScope stores only a Weak reference. Retain the strong owner for
+    // the whole managed-server lifetime or ProcessGroup::drop kills the child
+    // immediately after startup.
+    process_group: Option<Arc<ProcessGroup>>,
 }
 
 impl LocalServerHandle {
@@ -55,6 +59,7 @@ impl LocalServerHandle {
             state: Arc::new(Mutex::new(ServerState {
                 port: 0,
                 started: false,
+                process_group: None,
             })),
         }
     }
@@ -70,14 +75,37 @@ impl LocalServerHandle {
             }
             // Server died — will restart below
             state.started = false;
+            state.process_group = None;
         }
 
         // Sampling continues to use the configured URL, so starting on some
         // other free port would create a healthy but unreachable server.
         let port = config.port;
+        // A server may already have been started manually or by another app
+        // instance. Adopt it instead of treating its listening port as an
+        // error. This is also the normal path after restarting the TUI.
+        if check_health(port).await {
+            state.port = port;
+            state.started = true;
+            tracing::info!(port, "using existing llama-server");
+            return Ok(port);
+        }
         if port_in_use(port).await {
+            // llama-server opens its socket while the model may still be
+            // loading. Wait for health instead of failing or racing the first
+            // completion request against initialization.
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(65);
+            while tokio::time::Instant::now() < deadline {
+                if check_health(port).await {
+                    state.port = port;
+                    state.started = true;
+                    tracing::info!(port, "existing llama-server became ready");
+                    return Ok(port);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
             return Err(format!(
-                "port {port} is occupied but is not a healthy llama-server"
+                "process on port {port} did not become a healthy llama-server within 65 seconds"
             ));
         }
         let model_path_str = config.model_path.to_string_lossy().to_string();
@@ -106,6 +134,10 @@ impl LocalServerHandle {
             // every successful completion contains a visible answer.
             "--reasoning",
             "off",
+            "--repeat-penalty",
+            "1.1",
+            "--repeat-last-n",
+            "128",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -121,6 +153,7 @@ impl LocalServerHandle {
             group.attach(&child).ok();
             let arc = Arc::new(group);
             global_process_scope().register(&arc);
+            state.process_group = Some(arc);
         }
 
         // Poll health endpoint up to 60s
@@ -235,7 +268,13 @@ pub(crate) fn local_server_config_for_model(
     Some(LocalServerConfig {
         server_path,
         model_path: model_file,
-        context_size: 131072,
+        context_size: if model_key.contains("qwen2.5") {
+            // The compact request profile only needs a modest KV cache. A
+            // 32K allocation makes CPU-only startup look hung on many PCs.
+            8_192
+        } else {
+            131_072
+        },
         threads: 6,
         port,
     })
@@ -264,5 +303,7 @@ fn normalized_model_tokens(value: &str) -> Vec<String> {
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|part| !part.is_empty())
         .map(str::to_ascii_lowercase)
+        // "local" describes the catalog slot, not the downloaded GGUF name.
+        .filter(|part| part != "local")
         .collect()
 }
