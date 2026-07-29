@@ -3819,20 +3819,18 @@ impl AgentView {
         if let Some(ref mut modal_state) = self.extensions_modal {
             use crate::views::extensions_modal::render_extensions_modal;
             use crate::views::shortcuts_bar::HintItem;
-            let is_fullscreen = matches!(
-                modal_state.picker_state.mode,
-                crate::views::picker::PickerMode::FullScreen
+            ratatui::widgets::Clear.render(full_area, buf);
+            buf.set_style(
+                full_area,
+                Style::default()
+                    .fg(theme.text_primary)
+                    .bg(theme.bg_base),
             );
-            let overlay_area = if is_fullscreen {
-                area
-            } else {
-                Rect {
-                    x: area.x,
-                    y: area.y,
-                    width: area.width,
-                    height: layout.shortcuts.y.saturating_sub(area.y).saturating_sub(1),
-                }
-            };
+            // DX chrome changes the chat layout, while Grok's menus are
+            // terminal-level surfaces. Give them the unsplit frame so their
+            // window can never collapse to a zero-height retained-buffer
+            // region or be clipped behind the right sidebar.
+            let overlay_area = full_area;
             let compact = self.scrollback.appearance().prompt.compact;
             let tick = self.scrollback.animation_tick();
             render_extensions_modal(
@@ -4322,10 +4320,10 @@ impl AgentView {
                 .map(|prompt| prompt.text.replace('\n', " "))
                 .collect()
         };
-        let subagents = if self.subagent_sessions.is_empty() {
+        let subagents = if self.subagent_views.is_empty() {
             vec!["—".to_string()]
         } else {
-            self.subagent_sessions
+            self.subagent_views
                 .keys()
                 .take(12)
                 .map(|id| format!("● {id}"))
@@ -4439,6 +4437,56 @@ mod toast_fit_tests {
     fn zero_width_slot_yields_none() {
         assert_eq!(fit_toast_text("Copied!", 4), None);
         assert_eq!(fit_toast_text("Copied!", 0), None);
+    }
+}
+#[cfg(test)]
+mod dx_modal_layering_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::*;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+
+    #[test]
+    fn mcp_modal_occludes_dx_chrome_and_paints_the_full_frame() {
+        let mut agent = make_agent();
+        agent.dx_ui.sidebar_visible = true;
+        agent.dx_ui.minimap_visible = true;
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut ScratchBuffer::new(),
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+        }
+        assert!(text.contains("MCP Servers"), "MCP modal was not painted: {text}");
+        assert!(
+            !text.contains("DX ·"),
+            "DX sidebar painted over the MCP modal: {text}"
+        );
+        assert_ne!(
+            buf[(area.right() - 1, area.y)].bg,
+            ratatui::style::Color::Reset,
+            "the modal must paint an opaque background through the right edge"
+        );
     }
 }
 #[cfg(test)]

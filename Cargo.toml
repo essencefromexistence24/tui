@@ -368,8 +368,15 @@ zbus = { version = "5" }
 zstd = "0.13"
 
 [profile.release]
-incremental = true
+incremental = false
 panic = "abort"
+
+# The pager now directly embeds the DX browser/editor/animation stack and is
+# substantially larger than an ordinary crate. Split its optimized codegen
+# into smaller partitions so rustc stays within the Windows commit limit.
+# This retains opt-level=3 while reducing peak compiler memory.
+[profile.release.package.xai-grok-pager]
+codegen-units = 256
 
 # Hardened release profile for shipping to end users (alpha + stable).
 # Use `cargo build --profile release-dist` for distribution builds.

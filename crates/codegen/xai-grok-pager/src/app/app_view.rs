@@ -2381,6 +2381,24 @@ impl AppView {
             self.pending_action = None;
         }
         if let Event::Mouse(mouse) = ev
+            && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
+            && let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+            && agent
+                .dx_ui
+                .sidebar
+                .panel_area
+                .contains((mouse.column, mouse.row).into())
+        {
+            agent.dx_ui.sidebar.scroll_by(match direction {
+                ScrollDirection::Up => -3,
+                ScrollDirection::Down => 3,
+            });
+            self.last_mouse_pos = Some((mouse.column, mouse.row));
+            self.scroll_state.cancel_stream();
+            return InputOutcome::Changed;
+        }
+        if let Event::Mouse(mouse) = ev
             && ScrollDirection::from_mouse_event(mouse).is_some()
             && let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)

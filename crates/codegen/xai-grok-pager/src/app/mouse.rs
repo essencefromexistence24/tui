@@ -43,6 +43,47 @@ impl AgentView {
                         && mouse.row >= area.y
                         && mouse.row < area.bottom()
                 };
+                if let Some(&(section, row, _)) = self
+                    .dx_ui
+                    .sidebar
+                    .row_areas
+                    .iter()
+                    .find(|(_, _, area)| contains(*area))
+                {
+                    match section {
+                        0 => {
+                            self.todo.overlay.toggle();
+                            self.todo.on_state_change();
+                            if self.todo.overlay.focused {
+                                self.set_active_pane(AgentPane::Todo, false);
+                            } else if self.active_pane == AgentPane::Todo {
+                                self.set_active_pane(AgentPane::Scrollback, false);
+                            }
+                        }
+                        1 => self.toggle_queue_pane(),
+                        3 => {
+                            if let Some(session_id) =
+                                self.subagent_views.keys().nth(row).cloned()
+                            {
+                                self.open_subagent_fullscreen(session_id);
+                            }
+                        }
+                        5 => {
+                            return InputOutcome::Action(Action::OpenExtensionsModal {
+                                tab: crate::views::extensions_modal::ExtensionsTab::Plugins,
+                                trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
+                            });
+                        }
+                        6 => {
+                            return InputOutcome::Action(Action::OpenExtensionsModal {
+                                tab: crate::views::extensions_modal::ExtensionsTab::McpServers,
+                                trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
+                            });
+                        }
+                        _ => {}
+                    }
+                    return InputOutcome::Changed;
+                }
                 if let Some((section, _)) = self
                     .dx_ui
                     .sidebar
@@ -803,6 +844,10 @@ impl AgentView {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.pending_link_click = None;
+                if self.scrollbar_dragging {
+                    self.apply_scrollbar_click(mouse.row);
+                    return InputOutcome::Changed;
+                }
                 tracing::debug!(
                     event = "scrollback_mouse_drag",
                     col = mouse.column,
@@ -1027,6 +1072,10 @@ impl AgentView {
                 if next_minimap_hover != self.dx_ui.minimap.hovered_turn {
                     self.dx_ui.minimap.hovered_turn = next_minimap_hover;
                     self.dx_ui.minimap.hovered_since = next_minimap_hover.map(|_| Instant::now());
+                    if let Some(turn) = next_minimap_hover {
+                        self.dx_ui.minimap.active_turn = Some(turn);
+                        self.scrollback.jump_to_turn(turn);
+                    }
                 }
                 tracing::debug!(
                     event = "scrollback_mouse_moved",

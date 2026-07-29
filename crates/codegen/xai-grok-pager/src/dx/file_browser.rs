@@ -25,6 +25,7 @@ mod tasks;
 mod which;
 
 use fb_binding::elements::render_once;
+use fb_config::LAYOUT;
 use fb_core::Core;
 use fb_macro::act;
 use fb_plugin::LUA;
@@ -363,7 +364,7 @@ impl BrowserEngine {
         if let Err(error) = self.pump_events() {
             self.error = Some(format!("DX file browser event error: {error}"));
         }
-        let Some(core) = self.core.as_ref() else {
+        let Some(core) = self.core.as_mut() else {
             let message = self
                 .error
                 .as_deref()
@@ -377,13 +378,40 @@ impl BrowserEngine {
         // DX's Lua components read the live `cx` global. Standalone DX wraps
         // every frame in `Lives::scope`; the embedded host must preserve that
         // exact render contract as well.
+        let previous_preview_area = LAYOUT.get().preview;
         let lua_result = fb_actor::lives::Lives::scope(core, || {
             let lua_area = fb_binding::elements::Rect::from(area);
             let root = LUA
                 .globals()
                 .raw_get::<Table>("Root")?
                 .call_method::<Table>("new", lua_area)?;
-            render_once(root.call_method("redraw", ())?, buf, |position| {
+            let components: Table = root.call_method("reflow", ())?;
+            let mut layout = LAYOUT.get();
+            for component in components.sequence_values::<mlua::Value>() {
+                let mlua::Value::Table(component) = component? else {
+                    continue;
+                };
+                let Some(id) = component.raw_get::<Option<mlua::String>>("_id")? else {
+                    continue;
+                };
+                let Some(component_area) = component
+                    .raw_get::<Option<fb_binding::elements::Rect>>("_area")?
+                    .map(|area| *area)
+                else {
+                    continue;
+                };
+                match id.as_bytes().as_ref() {
+                    b"current" => layout.current = component_area,
+                    b"preview" => layout.preview = component_area,
+                    b"progress" => layout.progress = component_area,
+                    _ => {}
+                }
+            }
+            if layout != LAYOUT.get() {
+                LAYOUT.set(layout);
+            }
+            let elements = root.call_method("redraw", ())?;
+            render_once(elements, buf, |position| {
                 core.mgr.area(position)
             });
             Ok::<(), mlua::Error>(())
@@ -399,6 +427,12 @@ impl BrowserEngine {
             return;
         }
 
+        if previous_preview_area != LAYOUT.get().preview {
+            let cx = &mut fb_actor::Ctx::active(core, &mut self.term);
+            if let Err(error) = act!(mgr:peek, cx) {
+                self.error = Some(format!("DX file browser preview failed: {error}"));
+            }
+        }
         mgr::Preview::new(core).render(area, buf);
         mgr::Modal::new(core).render(area, buf);
         if core.tasks.visible {
