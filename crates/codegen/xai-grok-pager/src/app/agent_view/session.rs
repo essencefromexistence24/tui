@@ -81,6 +81,7 @@ impl AgentView {
         let prompt = PromptWidget::new_with_cwd(&session.cwd);
         let mut view = Self {
             session,
+            dx_ui: crate::dx::DxUiState::default(),
             session_binding_epoch: 0,
             scrollback,
             prompt,
@@ -195,6 +196,7 @@ impl AgentView {
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
             hit_follow_indicator: Default::default(),
+            hit_branch: Default::default(),
             hit_cwd: Default::default(),
             hit_cancel_button: Default::default(),
             hit_watching_cue: Default::default(),
@@ -297,6 +299,7 @@ impl AgentView {
             is_subagent_view: false,
             hit_subagent_frame_close: Default::default(),
             sharing_enabled: false,
+            scheduler_background_loops: None,
             billing_surface_visible: false,
             input_log: crate::input_log::InputRingBuffer::new(),
             esc_pressed_at: None,

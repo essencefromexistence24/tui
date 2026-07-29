@@ -442,3 +442,14 @@ Built-in commands always win over a skill with the same name. Name a skill "comp
 ## Autocomplete
 
 The menu supports fuzzy search: start typing after `/` to filter. Each entry shows the command name, its description, an argument hint when it takes arguments, and its source (builtin, skill scope, or plugin name). Press `Tab` or `Enter` to accept the highlighted command.
+## Embedded DX views
+
+| Command | Description |
+|---|---|
+| `/editor` | Open the native embedded DX code editor |
+| `/browser` | Open the native embedded DX file browser |
+| `/diff` | Open the native embedded DX diff viewer |
+| `/anim` | Open the native embedded DX train animation |
+
+These views run inside Grok's existing terminal and event loop. Press `Esc` or
+`Ctrl+1` to return to chat.

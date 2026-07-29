@@ -309,6 +309,8 @@ pub struct PromptFlag<'a> {
 pub struct PromptInfo<'a> {
     /// Primary label to display on the info line (left side).
     pub model_name: &'a str,
+    /// Build/Plan composer mode displayed as a distinct right-side item.
+    pub mode_name: Option<&'a str>,
     /// Flags to display on the left side, joined by " · " (e.g., "plan", "always-approve").
     pub flags: &'a [PromptFlag<'a>],
     /// Whether multiline mode is active (shown right-aligned).
@@ -1826,6 +1828,8 @@ impl PromptWidget {
                     terminal.multiplexer = %evt.terminal.multiplexer,
                     terminal.is_ssh = evt.terminal.is_ssh,
                     terminal.term_var = %evt.terminal.term_var,
+                    terminal.term_version = %evt.terminal.term_version,
+                    terminal.term_version_source = %evt.terminal.term_version_source,
                     key.code = %evt.key_code,
                     key.modifiers = %evt.key_modifiers,
                     key.kind = %evt.key_kind,
@@ -3432,9 +3436,15 @@ impl PromptWidget {
         // Trailing pad mirrors the leading pad above.
         left_spans.push(Span::styled(" ", pad_style));
 
-        // Build right-side spans: "multiline" indicator.
+        // Build right-side spans: composer mode + multiline indicator.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
+        if let Some(mode) = info.mode_name {
+            right_spans.push(Span::styled(mode.to_owned(), model_style));
+        }
         if info.multiline {
+            if !right_spans.is_empty() {
+                right_spans.push(Span::styled(" · ", sep_style));
+            }
             right_spans.push(Span::styled("multiline", flag_style));
         }
 

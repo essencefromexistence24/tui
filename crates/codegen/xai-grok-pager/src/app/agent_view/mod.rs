@@ -739,6 +739,8 @@ pub(crate) enum AgentDeferredSend {
 }
 pub struct AgentView {
     pub session: AgentSession,
+    /// Native, presentation-only state for the directly merged DX surfaces.
+    pub dx_ui: crate::dx::DxUiState,
     pub(crate) session_binding_epoch: u32,
     pub scrollback: ScrollbackState,
     pub prompt: PromptWidget,
@@ -1079,7 +1081,9 @@ pub struct AgentView {
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
     pub hit_follow_indicator: HitArea,
-    /// CWD / worktree path in the status bar (click to copy).
+    /// Git branch in the status bar (click to open the code editor).
+    pub hit_branch: HitArea,
+    /// CWD / worktree path in the status bar (click to open the browser).
     pub hit_cwd: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
@@ -1385,6 +1389,15 @@ pub struct AgentView {
     /// Whether the `/share` slash command is available (mirrors
     /// `AppView::sharing_enabled`). Used to gate palette entries.
     pub sharing_enabled: bool,
+    /// Whether THIS session's scheduled fires run as detached background
+    /// subagents, as resolved by the shell when the session's actor spawned and
+    /// delivered on the `session/new` / `session/load` response. `/loop` reads
+    /// it to describe the runtime a fire will get. `None` until that response
+    /// lands (or against a shell that predates the key), where readers fall
+    /// back to `AppView::scheduler_background_loops_seed`. Deliberately NOT
+    /// refreshed by `x.ai/settings/update`: the fire side is pinned for the
+    /// session's lifetime, so a live mirror would drift out of agreement.
+    pub scheduler_background_loops: Option<bool>,
     /// Mirrors `AppView::usage_visible` (credit warning + `/usage manage`).
     pub billing_surface_visible: bool,
     /// Input flight recorder — rolling buffer of recent key events.

@@ -1130,6 +1130,7 @@ impl Editor {
 	/// Creates a temp directory with `dx.d.ts` + `tsconfig.json` so that
 	/// `typescript-language-server` can provide autocomplete and type checking
 	/// for plugin buffers (including unsaved/unnamed ones).
+	#[allow(dead_code)]
 	pub(crate) fn setup_plugin_dev_lsp(&mut self, buffer_id: BufferId, content: &str) {
 		use crate::services::plugins::plugin_dev_workspace::PluginDevWorkspace;
 

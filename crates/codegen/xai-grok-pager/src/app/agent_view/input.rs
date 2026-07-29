@@ -118,7 +118,7 @@ impl AgentView {
     /// That cascade runs before `handle_input`, so without this guard Left/Esc
     /// on an empty prompt would exit the overlay instead of reaching `/gboom`
     /// (turn/close), video (seek/close), or image (close).
-    fn modal_owns_input(&self) -> bool {
+    pub(super) fn modal_owns_input(&self) -> bool {
         self.extensions_modal.is_some()
             || self.active_modal.is_some()
             || self.gboom.is_some()
@@ -433,6 +433,345 @@ impl AgentView {
         registry: &ActionRegistry,
         prompt_paging: bool,
     ) -> InputOutcome {
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            use crate::dx::sound::SoundCue;
+            let cue = match key.code {
+                KeyCode::Char(_) => Some(SoundCue::TextInput),
+                KeyCode::Backspace | KeyCode::Delete => Some(SoundCue::TextDelete),
+                KeyCode::Up
+                | KeyCode::Down
+                | KeyCode::Left
+                | KeyCode::Right
+                | KeyCode::PageUp
+                | KeyCode::PageDown
+                | KeyCode::Tab => Some(SoundCue::Navigate),
+                KeyCode::Enter => Some(SoundCue::Confirm),
+                KeyCode::Esc => Some(SoundCue::MenuClose),
+                _ => Some(SoundCue::SpecialKey),
+            };
+            if let Some(cue) = cue {
+                self.dx_ui.sound.play(cue);
+            }
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('1')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.dx_ui.palette_visible = false;
+            self.dx_ui.diff.close();
+            self.dx_ui.view = crate::dx::DxView::Chat;
+            return InputOutcome::Changed;
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('2')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            if self.dx_ui.view == crate::dx::DxView::Editor {
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            } else {
+                self.dx_ui.editor.schedule_init();
+                self.dx_ui.view = crate::dx::DxView::Editor;
+            }
+            return InputOutcome::Changed;
+        }
+        if self.dx_ui.view == crate::dx::DxView::Editor {
+            if matches!(
+                ev,
+                Event::Key(key)
+                    if key.kind != KeyEventKind::Release
+                        && key.code == KeyCode::Esc
+                        && key.modifiers.is_empty()
+            ) {
+                self.dx_ui.sound.stop_animation_loop();
+                self.dx_ui.view = crate::dx::DxView::Chat;
+                return InputOutcome::Changed;
+            }
+            if let Err(error) = self.dx_ui.editor.handle_event(ev.clone()) {
+                tracing::error!(%error, "DX editor input failed");
+            }
+            return InputOutcome::Changed;
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('3')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            if self.dx_ui.view == crate::dx::DxView::FileBrowser {
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            } else {
+                self.dx_ui.file_browser.ensure_initialized();
+                self.dx_ui.view = crate::dx::DxView::FileBrowser;
+            }
+            return InputOutcome::Changed;
+        }
+        if self.dx_ui.view == crate::dx::DxView::FileBrowser {
+            if matches!(
+                ev,
+                Event::Key(key)
+                    if key.kind != KeyEventKind::Release
+                        && key.code == KeyCode::Esc
+                        && key.modifiers.is_empty()
+            ) {
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            } else if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && let Err(error) = self.dx_ui.file_browser.handle_key(*key)
+            {
+                tracing::error!(%error, "DX file browser input failed");
+            } else if let Event::Mouse(mouse) = ev
+                && let Err(error) = self.dx_ui.file_browser.handle_mouse(*mouse)
+            {
+                tracing::error!(%error, "DX file browser mouse input failed");
+            }
+            return InputOutcome::Changed;
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('5')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            if self.dx_ui.view == crate::dx::DxView::Animation {
+                self.dx_ui.sound.stop_animation_loop();
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            } else {
+                self.dx_ui.animation.restart();
+                let sound = self.dx_ui.animation.current().sound();
+                self.dx_ui.sound.start_animation_loop(sound);
+                self.dx_ui.view = crate::dx::DxView::Animation;
+            }
+            return InputOutcome::Changed;
+        }
+        if self.dx_ui.view == crate::dx::DxView::Animation && !self.dx_ui.palette_visible {
+            let mut handled = false;
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && key.modifiers.is_empty()
+            {
+                match key.code {
+                    KeyCode::Esc => {
+                        self.dx_ui.sound.stop_animation_loop();
+                        self.dx_ui.view = crate::dx::DxView::Chat;
+                        handled = true;
+                    }
+                    KeyCode::Left if self.prompt.text().is_empty() => {
+                        self.dx_ui.animation.previous();
+                        handled = true;
+                    }
+                    KeyCode::Right if self.prompt.text().is_empty() => {
+                        self.dx_ui.animation.next();
+                        handled = true;
+                    }
+                    KeyCode::Up
+                        if self.dx_ui.animation.current()
+                            == crate::dx::animation::AnimationKind::Splash =>
+                    {
+                        self.dx_ui.palette_visible = true;
+                        let theme = crate::theme::Theme::current();
+                        self.dx_ui.menu = Some(crate::dx::menu::Menu::new(
+                            crate::theme::ChatTheme::from(&theme),
+                        ));
+                        handled = true;
+                    }
+                    KeyCode::Down
+                        if self.prompt.text().is_empty()
+                            && self.dx_ui.animation.current()
+                                == crate::dx::animation::AnimationKind::Splash =>
+                    {
+                        self.dx_ui.animation.next();
+                        handled = true;
+                    }
+                    KeyCode::Up => {
+                        self.dx_ui.animation.select_intro();
+                        let message = format!("Intro: {}", self.dx_ui.animation.intro.name());
+                        self.show_toast(&message);
+                        handled = true;
+                    }
+                    KeyCode::Down if self.prompt.text().is_empty() => {
+                        self.dx_ui.animation.select_outro();
+                        let message = format!("Outro: {}", self.dx_ui.animation.outro.name());
+                        self.show_toast(&message);
+                        handled = true;
+                    }
+                    KeyCode::Enter if !self.prompt.text().is_empty() => {
+                        self.dx_ui.sound.stop_animation_loop();
+                        self.dx_ui.view = crate::dx::DxView::Chat;
+                    }
+                    _ => {}
+                }
+                if handled
+                    && self.dx_ui.view == crate::dx::DxView::Animation
+                    && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Down)
+                {
+                    self.dx_ui.sound.stop_animation_loop();
+                    self.dx_ui
+                        .sound
+                        .start_animation_loop(self.dx_ui.animation.current().sound());
+                }
+            }
+            if handled {
+                return InputOutcome::Changed;
+            }
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Down
+            && key.modifiers.is_empty()
+            && self.dx_ui.view == crate::dx::DxView::Chat
+            && self.dx_ui.intro_enabled
+            && self.prompt.text().is_empty()
+            && !self.prompt.any_dropdown_open()
+        {
+            self.dx_ui.intro_seen = true;
+            self.dx_ui.animation.restart();
+            let sound = self.dx_ui.animation.current().sound();
+            self.dx_ui.sound.start_animation_loop(sound);
+            self.dx_ui.view = crate::dx::DxView::Animation;
+            return InputOutcome::Changed;
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('p')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            self.dx_ui.palette_visible = !self.dx_ui.palette_visible;
+            if self.dx_ui.palette_visible {
+                let theme = crate::theme::Theme::current();
+                self.dx_ui.menu = Some(crate::dx::menu::Menu::new(crate::theme::ChatTheme::from(
+                    &theme,
+                )));
+            }
+            return InputOutcome::Changed;
+        }
+        if self.dx_ui.palette_visible {
+            let Some(menu) = self.dx_ui.menu.as_mut() else {
+                self.dx_ui.palette_visible = false;
+                return InputOutcome::Changed;
+            };
+            match ev {
+                Event::Key(key) if key.kind != KeyEventKind::Release => match key.code {
+                    KeyCode::Esc => self.dx_ui.palette_visible = false,
+                    KeyCode::Up | KeyCode::Char('k') => menu.select_prev_menu_item(),
+                    KeyCode::Down | KeyCode::Char('j') => menu.select_next_menu_item(),
+                    KeyCode::PageUp => menu.page_up(10),
+                    KeyCode::PageDown => menu.page_down(10),
+                    KeyCode::Home => menu.jump_to_top(),
+                    KeyCode::End => menu.jump_to_bottom(),
+                    KeyCode::Backspace if menu.current_submenu.is_some() => menu.go_back_to_main(),
+                    KeyCode::Enter => {
+                        menu.select_current_item();
+                    }
+                    _ => {}
+                },
+                Event::Mouse(mouse) => {
+                    let clicked = matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+                    if menu.handle_mouse(mouse.column, mouse.row, clicked) && clicked {
+                        menu.select_current_item();
+                    }
+                }
+                _ => {}
+            }
+            return InputOutcome::Changed;
+        }
+        if let Event::Key(key) = ev
+            && key.kind != KeyEventKind::Release
+            && key.code == KeyCode::Char('4')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+        {
+            if self.dx_ui.view == crate::dx::DxView::Diff {
+                self.dx_ui.diff.close();
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            } else {
+                self.dx_ui.diff.open_and_refresh();
+                self.dx_ui.view = crate::dx::DxView::Diff;
+            }
+            return InputOutcome::Changed;
+        }
+        if self.dx_ui.view == crate::dx::DxView::Diff {
+            if let Event::Mouse(mouse) = ev {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) =>
+                    {
+                        if let Some(row) = self.dx_ui.diff.tree_row_at_y(mouse.row) {
+                            self.dx_ui.diff.tree_cursor = row;
+                            self.dx_ui.diff.activate_tree_cursor();
+                        }
+                    }
+                    MouseEventKind::ScrollUp => {
+                        let page = self.dx_ui.diff.patch_inner.height.max(1) as usize;
+                        if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) {
+                            self.dx_ui.diff.move_tree_cursor(-3);
+                        } else {
+                            self.dx_ui.diff.scroll_diff_by(-3, page);
+                        }
+                    }
+                    MouseEventKind::ScrollDown => {
+                        let page = self.dx_ui.diff.patch_inner.height.max(1) as usize;
+                        if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) {
+                            self.dx_ui.diff.move_tree_cursor(3);
+                        } else {
+                            self.dx_ui.diff.scroll_diff_by(3, page);
+                        }
+                    }
+                    MouseEventKind::Moved => {
+                        self.dx_ui.diff.tree_scrollbar_hovered =
+                            self.dx_ui.diff.point_in_tree(mouse.column, mouse.row);
+                        self.dx_ui.diff.patch_scrollbar_hovered =
+                            self.dx_ui.diff.point_in_patch(mouse.column, mouse.row);
+                    }
+                    _ => {}
+                }
+                return InputOutcome::Changed;
+            }
+            let Event::Key(key) = ev else {
+                return InputOutcome::Changed;
+            };
+            if key.kind == KeyEventKind::Release {
+                return InputOutcome::Changed;
+            }
+            let page = self.dx_ui.diff.patch_inner.height.max(1) as usize;
+            match key.code {
+                KeyCode::Esc => {
+                    self.dx_ui.diff.close();
+                    self.dx_ui.view = crate::dx::DxView::Chat;
+                }
+                KeyCode::Tab => {
+                    self.dx_ui.diff.focus_tree = !self.dx_ui.diff.focus_tree;
+                }
+                KeyCode::Up | KeyCode::Char('k') if self.dx_ui.diff.focus_tree => {
+                    self.dx_ui.diff.move_tree_cursor(-1);
+                }
+                KeyCode::Down | KeyCode::Char('j') if self.dx_ui.diff.focus_tree => {
+                    self.dx_ui.diff.move_tree_cursor(1);
+                }
+                KeyCode::Enter if self.dx_ui.diff.focus_tree => {
+                    self.dx_ui.diff.activate_tree_cursor();
+                }
+                KeyCode::Left | KeyCode::Right if self.dx_ui.diff.focus_tree => {
+                    self.dx_ui.diff.toggle_tree_at_cursor();
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.dx_ui.diff.scroll_diff_by(-1, page);
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.dx_ui.diff.scroll_diff_by(1, page);
+                }
+                KeyCode::PageUp => {
+                    self.dx_ui.diff.scroll_diff_by(-(page as i32), page);
+                }
+                KeyCode::PageDown => {
+                    self.dx_ui.diff.scroll_diff_by(page as i32, page);
+                }
+                KeyCode::Char('r') => self.dx_ui.diff.refresh(),
+                _ => {}
+            }
+            return InputOutcome::Changed;
+        }
         if self.scrollback_drag_latched() {
             let live_drag_event = matches!(
                 ev,

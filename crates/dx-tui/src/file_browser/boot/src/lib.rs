@@ -23,5 +23,7 @@ pub fn init() {
 
 pub fn init_default() {
 	ARGS.with(<_>::default);
-	BOOT.with(<_>::default);
+	// Preserve the normal CLI invariant: even with no explicit entries the
+	// browser always starts with one tab rooted at the current directory.
+	BOOT.init(<_>::from(&*ARGS));
 }

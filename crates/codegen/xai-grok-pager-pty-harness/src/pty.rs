@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
-use xai_grok_test_support::{TestProcessTree, TestSandbox, process_has_exited_without_reap};
+use xai_grok_test_support::{TestProcessTree, TestSandbox};
+#[cfg(unix)]
+use xai_grok_test_support::process_has_exited_without_reap;
 
 const PTY_DROP_REAP_TIMEOUT: Duration = Duration::from_millis(250);
 const PTY_REAP_POLL: Duration = Duration::from_millis(10);
@@ -574,6 +576,7 @@ const HOST_TERMINAL_ENV_VARS: &[&str] = &[
     "CMUX_SOCKET_PATH",
     "CMUX_PANEL_ID",
     "CMUX_BUNDLE_ID",
+    "HERDR_ENV",
     // Embedded editor markers (embedded_editor_from_env).
     "NVIM",
     "NVIM_LISTEN_ADDRESS",

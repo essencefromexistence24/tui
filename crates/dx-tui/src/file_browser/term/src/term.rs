@@ -141,7 +141,7 @@ impl Term {
 			for y in self.last_area.top()..self.last_area.bottom() {
 				for x in self.last_area.left()..self.last_area.right() {
 					let mut cell = self.last_buffer[(x, y)].clone();
-					cell.skip = false;
+					cell.set_diff_option(ratatui::buffer::CellDiffOption::None);
 					buffer[(x, y)] = cell;
 				}
 			}

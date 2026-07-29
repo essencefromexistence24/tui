@@ -108,6 +108,7 @@ impl MacroState {
 	/// used when `init.ts` seeds a register via `editor.defineMacro(...)` or
 	/// when a macro is loaded back from a buffer. Updates `last_register` so a
 	/// subsequent "play last macro" targets the freshly-defined one.
+	#[allow(dead_code)]
 	pub(crate) fn define(&mut self, key: char, actions: Vec<Action>) {
 		self.macros.insert(key, actions);
 		self.last_register = Some(key);

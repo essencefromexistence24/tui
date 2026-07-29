@@ -17,6 +17,7 @@ pub mod dashboard;
 pub mod debug;
 pub mod docs;
 pub mod doctor;
+pub mod dx_view;
 pub mod edit_prompt;
 pub mod effort;
 pub mod effort_levels;
@@ -80,6 +81,10 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
     vec![
         Arc::new(exit::ExitCommand),
         Arc::new(help::HelpCommand),
+        Arc::new(dx_view::DxViewCommand::editor()),
+        Arc::new(dx_view::DxViewCommand::browser()),
+        Arc::new(dx_view::DxViewCommand::diff()),
+        Arc::new(dx_view::DxViewCommand::animation()),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
         Arc::new(new::NewCommand),

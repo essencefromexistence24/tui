@@ -1014,6 +1014,22 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PrivacyBannerAccept => dispatch_privacy_banner_accept(app),
         Action::PrivacyBannerCustomize => dispatch_privacy_banner_customize(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
+        Action::SwitchDxView(view) => {
+            if let Some(agent) = get_active_agent_mut(app) {
+                agent.dx_ui.palette_visible = false;
+                match view {
+                    crate::dx::DxView::Editor => agent.dx_ui.editor.schedule_init(),
+                    crate::dx::DxView::FileBrowser => {
+                        agent.dx_ui.file_browser.ensure_initialized();
+                    }
+                    crate::dx::DxView::Diff => agent.dx_ui.diff.open_and_refresh(),
+                    crate::dx::DxView::Animation => agent.dx_ui.animation.restart(),
+                    crate::dx::DxView::Chat => {}
+                }
+                agent.dx_ui.view = view;
+            }
+            Vec::new()
+        }
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
         Action::ConfirmResetSetting { choice } => dispatch_confirm_reset_setting(app, choice),

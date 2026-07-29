@@ -47,6 +47,7 @@ impl Editor {
 	/// races past cancellation its eventual `RemoteAttachReady`/`Failed` is
 	/// dropped on arrival (see `remote_attach_was_cancelled`) — so no window is
 	/// ever built. This is the host side of the New-Session dialog's Cancel.
+	#[allow(dead_code)]
 	pub(crate) fn cancel_remote_attaches(&mut self) {
 		let inflight: Vec<u64> = self.remote_attach_inflight.drain().collect();
 		let any = !inflight.is_empty();
@@ -1200,6 +1201,8 @@ impl Editor {
 		for cb_id in callback_ids {
 			self.plugin_manager.read().unwrap().resolve_callback(cb_id, "null".to_string());
 		}
+		#[cfg(not(feature = "plugins"))]
+		let _ = callback_ids;
 
 		// Flush any plugin grammars that arrived during the build
 		self.flush_pending_grammars();

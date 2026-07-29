@@ -25,6 +25,56 @@ pub mod tokyonight;
 pub use color_support::quantize;
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
+/// Four-color compatibility view used by directly merged DX widgets.
+///
+/// This is a view over the active Grok theme, not a second theme registry.
+#[derive(Debug, Clone, Copy)]
+pub struct ChatTheme {
+    pub bg: ratatui::style::Color,
+    pub fg: ratatui::style::Color,
+    pub muted_fg: ratatui::style::Color,
+    pub accent: ratatui::style::Color,
+    pub border: ratatui::style::Color,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeVariant {
+    Dark,
+    Light,
+}
+
+impl ChatTheme {
+    pub fn available_themes() -> Vec<(String, String)> {
+        ThemeKind::available()
+            .iter()
+            .map(|kind| {
+                let name = kind.display_name().to_string();
+                let title = match kind {
+                    ThemeKind::GrokNight => "Grok Night",
+                    ThemeKind::GrokDay => "Grok Day",
+                    ThemeKind::TokyoNight => "Tokyo Night",
+                    ThemeKind::RosePineMoon => "Rose Pine Moon",
+                    ThemeKind::OscuraMidnight => "Oscura Midnight",
+                    ThemeKind::Auto => "Auto",
+                };
+                (name, title.to_string())
+            })
+            .collect()
+    }
+}
+
+impl From<&Theme> for ChatTheme {
+    fn from(theme: &Theme) -> Self {
+        Self {
+            bg: theme.bg_base,
+            fg: theme.text_primary,
+            muted_fg: theme.text_secondary,
+            accent: theme.accent_user,
+            border: theme.gray_dim,
+        }
+    }
+}
+
 /// Available theme variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThemeKind {

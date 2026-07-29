@@ -12,7 +12,11 @@ pub mod diagnostics;
 pub mod diff;
 pub mod docs;
 pub mod doctor_cmd;
+pub mod dx;
+pub use dx::effects;
 pub mod export_cmd;
+#[path = "../../../dx-tui/src/font.rs"]
+pub mod font;
 pub mod git_info;
 pub mod headless;
 pub mod hyperlink_route;

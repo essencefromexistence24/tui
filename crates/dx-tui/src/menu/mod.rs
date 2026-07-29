@@ -1,4 +1,6 @@
 // Menu module - Command Palette system
+#![allow(dead_code, unused_imports)]
+
 mod keyboard_mappings;
 mod menu_data;
 mod menu_effects;

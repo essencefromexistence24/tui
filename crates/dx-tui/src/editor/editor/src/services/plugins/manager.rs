@@ -282,6 +282,7 @@ impl PluginManager {
 		// front of the returned batch — matching the order the real
 		// plugin thread would have produced if the inject call were a
 		// genuine plugin response.
+		#[allow(unused_mut)]
 		let mut commands = std::mem::take(&mut self.pending_injected_commands);
 		#[cfg(feature = "plugins")]
 		{

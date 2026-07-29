@@ -398,10 +398,12 @@ pub struct Editor {
 	config: Arc<Config>,
 
 	/// Clone of `config` captured at the last plugin-snapshot refresh.
+	#[allow(dead_code)]
 	config_snapshot_anchor: Arc<Config>,
 
 	/// Serialized JSON of `*self.config` as of the last time
 	/// `ptr_eq(&self.config, &self.config_snapshot_anchor)` was false.
+	#[allow(dead_code)]
 	config_cached_json: Arc<serde_json::Value>,
 
 	/// Cached raw user config (for plugins, avoids re-reading file on every frame).

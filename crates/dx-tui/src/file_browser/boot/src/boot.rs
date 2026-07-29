@@ -81,3 +81,16 @@ impl From<&crate::Args> for Boot {
 	}
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn empty_args_still_create_one_cwd_tab() {
+		fb_shared::init();
+		fb_fs::init();
+		let boot = Boot::from(&crate::Args::default());
+		assert_eq!(boot.cwds.len(), 1);
+		assert_eq!(boot.files.len(), 1);
+	}
+}

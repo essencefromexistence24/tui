@@ -192,8 +192,9 @@ impl AgentViewLayout {
         } else {
             follow_ups_height
         };
-        // One cell is the smallest useful top margin.
-        let top_vpad = 1u16;
+        // The scrollback's first block already owns its leading row. Adding
+        // another outer row here doubled the visible top gap.
+        let top_vpad = 0u16;
         let outer_block = Block::default().padding(Padding::new(
             layout_cfg.eff_hpad_left(compact),
             layout_cfg.eff_hpad_right(compact),

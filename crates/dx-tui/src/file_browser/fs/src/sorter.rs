@@ -72,7 +72,7 @@ impl FilesSorter {
 				self.fallback(a, b, self.cmp(aa.unwrap_or(a.len), bb.unwrap_or(b.len)))
 			}),
 			SortBy::Random => {
-				let mut rng = rand::thread_rng();
+				let mut rng = rand::rng();
 				items.sort_unstable_by(|a, b| {
 					promote!(a, b);
 					self.cmp(rng.next_u64(), rng.next_u64())
@@ -138,4 +138,3 @@ impl FilesSorter {
 		if self.reverse { b.len().cmp(&a.len()) } else { a.len().cmp(&b.len()) }
 	}
 }
-

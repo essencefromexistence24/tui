@@ -628,6 +628,8 @@ pub struct AppView {
     pub cursor: CursorState,
     /// Pending double-press confirmation (quit, etc.).
     pub pending_action: Option<PendingAction>,
+    /// Deadline for the non-blocking DX train outro started by confirmed quit.
+    pub dx_exit_at: Option<Instant>,
     /// Pending exit-session confirmation for slash command path.
     /// Set when `/home` is first typed; confirmed on second invocation within TTL.
     pub exit_session_pending: Option<Instant>,
@@ -755,6 +757,13 @@ pub struct AppView {
     /// non-selectable headers. Gated by `GROK_SESSION_PICKER_GROUPED` env var
     /// or remote settings `session_picker_grouped`; defaults to `false`.
     pub session_picker_grouped: bool,
+    /// Startup-only seed for `AgentView::scheduler_background_loops`, resolved
+    /// once from the config layers plus the remote tier known at connect.
+    /// Read only until a session's own value arrives on its `session/new` /
+    /// `session/load` response, and by the session-less dashboard. Never
+    /// refreshed afterwards — the authoritative value is per session, pinned by
+    /// the shell when that session's actor spawned.
+    pub scheduler_background_loops_seed: bool,
     /// Whether Ctrl+C before first server activity rewinds the prompt
     /// back into the input box. Gated by `GROK_CANCEL_REWIND` env /
     /// `[features] cancel_rewind` config / remote settings flag.
@@ -1391,6 +1400,7 @@ impl AppView {
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            dx_exit_at: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::from_settings(),
@@ -1555,6 +1565,7 @@ impl AppView {
             optimistic_prompt_echoes: std::collections::HashMap::new(),
             pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
+            scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
             tutorial: None,
@@ -2123,8 +2134,12 @@ impl AppView {
     /// Apply a (possibly hot-reloaded) appearance config to all agents.
     pub fn set_appearance(&mut self, config: AppearanceConfig) {
         for agent in self.agents.values_mut() {
+            agent.dx_ui.intro_enabled = config.animation.intro;
+            agent.dx_ui.outro_enabled = config.animation.outro;
             agent.scrollback.set_appearance(config.clone());
             for child in agent.subagent_views.values_mut() {
+                child.dx_ui.intro_enabled = config.animation.intro;
+                child.dx_ui.outro_enabled = config.animation.outro;
                 child.scrollback.set_appearance(config.clone());
                 child.prompt.sync_tab_width_from_appearance();
             }
@@ -2364,6 +2379,19 @@ impl AppView {
                 return InputOutcome::Action(action);
             }
             self.pending_action = None;
+        }
+        if let Event::Mouse(mouse) = ev
+            && ScrollDirection::from_mouse_event(mouse).is_some()
+            && let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+            && agent.dx_ui.view == crate::dx::DxView::FileBrowser
+        {
+            if let Err(error) = agent.dx_ui.file_browser.handle_mouse(*mouse) {
+                tracing::warn!(%error, "DX file browser mouse input failed");
+            }
+            self.last_mouse_pos = Some((mouse.column, mouse.row));
+            self.scroll_state.cancel_stream();
+            return InputOutcome::Changed;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
         if let Event::Mouse(mouse) = ev
@@ -2992,6 +3020,28 @@ impl AppView {
         } else {
             InputOutcome::Action(Action::Quit)
         }
+    }
+
+    pub(crate) fn begin_dx_exit_animation(&mut self) {
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+        {
+            let duration = agent.dx_ui.animation.begin_outro();
+            self.dx_exit_at = Some(Instant::now() + duration);
+            agent.dx_ui.view = crate::dx::DxView::Animation;
+            agent.dx_ui.sound.stop_animation_loop();
+            agent.dx_ui.sound.play(crate::dx::sound::SoundCue::Exit);
+        } else {
+            self.dx_exit_at = Some(Instant::now() + std::time::Duration::from_millis(1400));
+        }
+    }
+
+    pub(crate) fn take_dx_exit_ready(&mut self) -> bool {
+        if self.dx_exit_at.is_some_and(|at| Instant::now() >= at) {
+            self.dx_exit_at = None;
+            return true;
+        }
+        false
     }
     /// Apply exit-session confirmation (double-press). Works like quit confirmation
     /// but transitions to the welcome screen instead of quitting.
@@ -5089,6 +5139,10 @@ impl AppView {
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
+            needs_redraw |= matches!(
+                agent.dx_ui.view,
+                crate::dx::DxView::Animation | crate::dx::DxView::FileBrowser
+            );
             needs_redraw |= agent.scrollback.tick();
             needs_redraw |= agent.todo.list_state.tick();
             needs_redraw |= agent.todo.badge_tick();
@@ -5368,6 +5422,9 @@ impl AppView {
     /// the ~12fps welcome logo shimmer and the macOS Cmd link-hover poll —
     /// so an app that *looks* idle doesn't spin a 30fps loop for them.
     pub fn tick_demand(&self) -> TickDemand {
+        if self.dx_exit_at.is_some() {
+            return TickDemand::Fast;
+        }
         if self.pending_action.is_some() {
             return TickDemand::Fast;
         }
@@ -5405,6 +5462,10 @@ impl AppView {
                     return TickDemand::None;
                 };
                 let fast = agent.scrollback.needs_animation()
+                    || matches!(
+                        agent.dx_ui.view,
+                        crate::dx::DxView::Animation | crate::dx::DxView::FileBrowser
+                    )
                     || agent.todo.list_state.needs_tick()
                     || agent.todo.badge_needs_tick()
                     || agent.tasks.needs_tick()
@@ -5474,6 +5535,9 @@ impl AppView {
                     });
                 if fast {
                     return TickDemand::Fast;
+                }
+                if agent.dx_ui.minimap.hovered_turn.is_some() {
+                    return TickDemand::Slow;
                 }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()
@@ -5658,6 +5722,7 @@ pub(crate) mod tests {
             scratch: crate::scrollback::render::ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            dx_exit_at: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::default(),
@@ -5827,6 +5892,7 @@ pub(crate) mod tests {
             optimistic_prompt_echoes: std::collections::HashMap::new(),
             pending_running_adoptions: std::collections::HashMap::new(),
             session_picker_grouped: false,
+            scheduler_background_loops_seed: true,
             cancel_rewind_enabled: true,
             session_recap_available: false,
             tutorial: None,
@@ -6240,6 +6306,17 @@ pub(crate) mod tests {
         assert!(app.needs_animation(), "slow still counts as animating");
         app.session_picker_content_loading = true;
         assert_eq!(app.tick_demand(), TickDemand::Fast);
+    }
+
+    #[test]
+    fn dx_live_surfaces_request_ticks_and_redraw_each_frame() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        for view in [crate::dx::DxView::Animation, crate::dx::DxView::FileBrowser] {
+            app.agents.get_mut(&id).unwrap().dx_ui.view = view;
+            assert_eq!(app.tick_demand(), TickDemand::Fast);
+            assert!(app.tick(), "{view:?} must repaint on every active tick");
+        }
     }
     /// An open modal session picker that is still fetching keeps fast ticks
     /// alive on an otherwise-idle agent (its loading spinner must animate) —

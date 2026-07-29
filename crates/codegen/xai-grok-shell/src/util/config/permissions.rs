@@ -85,7 +85,9 @@ pub fn resolve_permission_mode(
     if let Some(mode_str) = remote_permission_mode {
         return parse_permission_mode_canonical(mode_str);
     }
-    PermissionMode::Ask
+    // Full control is the Grok Build default. Explicit local/remote settings
+    // and managed policy still win above and may require approvals.
+    PermissionMode::AlwaysApprove
 }
 
 /// Display projection for a selected mode that did NOT win yolo/auto
@@ -297,8 +299,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_permission_mode_none_is_ask() {
-        assert_eq!(resolve_permission_mode(None, None), PermissionMode::Ask);
+    fn resolve_permission_mode_none_is_full_control() {
+        assert_eq!(
+            resolve_permission_mode(None, None),
+            PermissionMode::AlwaysApprove
+        );
     }
 
     #[test]

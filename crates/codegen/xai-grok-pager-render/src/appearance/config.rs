@@ -388,6 +388,10 @@ pub struct AnimationConfig {
     /// Show an FPS counter overlay in the top-right corner (debug/dev builds only).
     /// Also enabled by the `GROK_FPS=1` env var. Default: false.
     pub show_fps: bool,
+    /// Show the DX splash on the first Down press in an empty chat input.
+    pub intro: bool,
+    /// Enable the DX outro splash for hosts that request an exit animation.
+    pub outro: bool,
 }
 
 impl Default for AnimationConfig {
@@ -396,6 +400,8 @@ impl Default for AnimationConfig {
             fps: 30,
             wave_rows: 32,
             show_fps: false,
+            intro: true,
+            outro: true,
         }
     }
 }
@@ -1085,6 +1091,10 @@ pub struct RawAnimationConfig {
     /// Show an FPS counter overlay in the top-right corner.
     /// Requires a debug build. Also enabled by GROK_FPS=1 env var. Default: false.
     pub show_fps: bool,
+    /// Show the DX splash from the chat input on first Down press.
+    pub intro: bool,
+    /// Allow the host to show the DX splash while exiting.
+    pub outro: bool,
 }
 
 impl Default for RawAnimationConfig {
@@ -1093,6 +1103,8 @@ impl Default for RawAnimationConfig {
             fps: 30,
             wave_rows: 32,
             show_fps: false,
+            intro: true,
+            outro: true,
         }
     }
 }
@@ -1445,6 +1457,8 @@ impl From<RawAnimationConfig> for AnimationConfig {
             fps: raw.fps.clamp(1, 60),
             wave_rows: raw.wave_rows.max(1),
             show_fps: raw.show_fps,
+            intro: raw.intro,
+            outro: raw.outro,
         }
     }
 }

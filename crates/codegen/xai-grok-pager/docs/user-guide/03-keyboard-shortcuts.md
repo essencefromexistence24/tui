@@ -123,6 +123,11 @@ Actions that affect the agent session, available from the agent screen.
 | Key | Context | Action |
 |-----|---------|--------|
 | `Ctrl+P` | Agent screen | Open the command palette |
+| `Ctrl+1` | Agent screen | Return to the chat view |
+| `Ctrl+2` | Agent screen | Toggle the embedded DX code editor |
+| `Ctrl+3` | Agent screen | Toggle the embedded DX file browser |
+| `Ctrl+4` | Agent screen | Toggle the embedded DX diff viewer |
+| `Ctrl+5` | Agent screen | Toggle the embedded DX train animation |
 | `?` (Shift+/) | Agent screen | Open the command palette (alt binding) |
 | `Ctrl+M` | Agent screen | Open the model picker / switch model |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |

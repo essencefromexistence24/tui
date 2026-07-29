@@ -257,9 +257,40 @@ impl AgentView {
         prompt_id: Option<String>,
     ) {
         // The marker keeps its turn's pid for the tail-merge attribution check.
+        let model = self
+            .session
+            .models
+            .current_model_name()
+            .unwrap_or_else(|| "Model".to_string());
+        let entries = self.scrollback.iter_entries().collect::<Vec<_>>();
+        let tools = entries
+            .into_iter()
+            .rev()
+            .take_while(|(_, entry)| {
+                !matches!(
+                    entry.block,
+                    crate::scrollback::block::RenderBlock::SessionEvent(ref event)
+                        if event.event.is_turn_terminal()
+                )
+            })
+            .filter(|(_, entry)| {
+                matches!(
+                    entry.block,
+                    crate::scrollback::block::RenderBlock::ToolCall(_)
+                )
+            })
+            .count();
+        let elapsed = match &event {
+            crate::scrollback::blocks::SessionEvent::TurnCompleted {
+                elapsed: Some(elapsed),
+            } => crate::util::format_duration(*elapsed),
+            _ => "—".to_string(),
+        };
+        let footer = format!("{model} · — tok (— t/s) · $— · {tools} tools · {elapsed}");
         let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
             event, stop_hooks, prompt_id,
-        );
+        )
+        .with_response_footer(footer);
         self.scrollback
             .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
     }

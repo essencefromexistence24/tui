@@ -5,8 +5,8 @@ edition = "2021"
 description = "Language support and syntax highlighting for Dx editor"
 
 [dependencies]
-tree-sitter = "0.26.5"
-tree-sitter-highlight = "0.26.3"
+tree-sitter = "0.25.10"
+tree-sitter-highlight = "0.25.10"
 # Only the grammars Fresh must use tree-sitter for are kept: languages syntect
 # ships no highlighting for — JavaScript, TypeScript, JSON (also serves JSONC),
 # Templ — plus Go, which the Templ grammar extends. The other grammars were

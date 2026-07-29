@@ -30,6 +30,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 use std::collections::HashSet;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 /// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
 /// view cannot see itself (the voice pipeline and app-level Esc ownership).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
@@ -127,7 +128,7 @@ impl AgentView {
                     ]
                 }
             }
-            PlanApprovalFocus::Preview => vec![],
+            PlanApprovalFocus::Preview => vec![HintItem::new(key!('y'), "copy plan")],
         }
     }
     /// Returns the *exact* hints the bottom shortcuts bar would render right now.
@@ -207,6 +208,7 @@ impl AgentView {
             } else {
                 let mut h = vec![
                     HintItem::new(key!('c'), "comment"),
+                    HintItem::new(key!('y'), "copy plan"),
                     HintItem::new(key!('f', CONTROL), "fullscreen"),
                 ];
                 if !self.plan_comments.is_empty() {
@@ -696,6 +698,13 @@ impl AgentView {
             voice_interim,
             esc_owned_before_agent,
         } = app_params;
+        let full_area = area;
+        let dx_chrome_visible =
+            !in_dashboard_overlay && !self.modal_owns_input() && !self.dx_ui.palette_visible;
+        let (area, dx_sidebar_area) =
+            crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_chrome_visible);
+        let (area, dx_minimap_area) =
+            crate::dx::minimap::split(area, self.dx_ui.minimap_visible && dx_chrome_visible);
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -718,6 +727,28 @@ impl AgentView {
         self.clear_scrollback_selection_state();
         self.refresh_prompt_suggestion_gate();
         let theme = Theme::current();
+        if self.dx_ui.view == crate::dx::DxView::Editor {
+            if let Err(error) = self.dx_ui.editor.tick() {
+                tracing::error!(%error, "DX editor tick failed");
+            }
+            self.dx_ui.editor.render(full_area, buf);
+            let cursor = self
+                .dx_ui
+                .editor
+                .cursor()
+                .map(|(position, _)| (position.x, position.y));
+            return (cursor, None);
+        }
+        if self.dx_ui.view == crate::dx::DxView::FileBrowser {
+            self.dx_ui.file_browser.render(full_area, buf);
+            return (None, None);
+        }
+        let dx_animation_mode = self.dx_ui.view == crate::dx::DxView::Animation;
+        if self.dx_ui.view == crate::dx::DxView::Diff {
+            let dx_theme = crate::theme::ChatTheme::from(&theme);
+            crate::dx::diff_view::render_diff_view(&mut self.dx_ui.diff, &dx_theme, full_area, buf);
+            return (None, None);
+        }
         let link_active_style = Style::default()
             .fg(theme.link_fg)
             .add_modifier(ratatui::style::Modifier::UNDERLINED | ratatui::style::Modifier::BOLD);
@@ -1360,6 +1391,24 @@ impl AgentView {
         ) {
             status.push("badge", Line::from(badge_spans));
         }
+        self.dx_ui.diff.poll_refresh();
+        if self.dx_ui.diff.last_refresh.is_none() && !self.dx_ui.diff.is_loading() {
+            self.dx_ui.diff.refresh();
+        }
+        status.push(
+            "dx_diff_stats",
+            Line::from(vec![
+                Span::styled(
+                    format!("+{}", self.dx_ui.diff.total_additions),
+                    Style::default().fg(theme.diff_insert_fg),
+                ),
+                Span::raw(", "),
+                Span::styled(
+                    format!("-{}", self.dx_ui.diff.total_deletions),
+                    Style::default().fg(theme.diff_delete_fg),
+                ),
+            ]),
+        );
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
         self.hit_goal_status.rect = areas.get("goal").copied();
@@ -1383,13 +1432,16 @@ impl AgentView {
             .clone()
             .or_else(|| cwd_lazy_git.as_ref().and_then(|i| i.branch.clone()));
         let mut cwd_spans: Vec<Span> = Vec::new();
+        let mut branch_width = 0u16;
         if let Some(b) = cwd_branch {
             let icon = crate::git_info::branch_icon();
             let git_style = Style::default()
                 .fg(theme.text_primary)
                 .bg(theme.bg_base)
                 .add_modifier(ratatui::style::Modifier::DIM);
-            cwd_spans.push(Span::styled(format!("{icon} {b}"), git_style));
+            let branch_label = format!("{icon} {b}");
+            branch_width = branch_label.width() as u16;
+            cwd_spans.push(Span::styled(branch_label, git_style));
             cwd_spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
         }
         let cwd_show_worktree = self.is_worktree
@@ -1863,6 +1915,21 @@ impl AgentView {
             let left_w = left_line.width() as u16;
             let x = layout.status_bar.x;
             buf.set_line_safe(x, layout.status_bar.y, &left_line, left_w);
+            let location_x = x.saturating_add(status_text.width() as u16 + 3);
+            self.hit_branch.rect = (branch_width > 0).then_some(Rect {
+                x: location_x,
+                y: layout.status_bar.y,
+                width: branch_width,
+                height: 1,
+            });
+            let path_x = location_x.saturating_add(branch_width);
+            let path_x = path_x.saturating_add(u16::from(branch_width > 0));
+            self.hit_cwd.rect = Some(Rect {
+                x: path_x,
+                y: layout.status_bar.y,
+                width: left_w.saturating_sub(path_x.saturating_sub(x)),
+                height: 1,
+            });
             let fill = Rect {
                 x,
                 y: layout.status_bar.y,
@@ -2097,13 +2164,16 @@ impl AgentView {
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
-        let model_label = match self.session.models.reasoning_effort {
+        let model_label_base = match self.session.models.reasoning_effort {
             Some(eff) => format!("{model_id} ({eff})"),
             None => model_id,
         };
+        let model_label = model_label_base;
+        let composer_mode = if effective_plan { "Plan" } else { "Build" };
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
                 model_name: &model_label,
+                mode_name: Some(composer_mode),
                 flags: mode_flags,
                 multiline,
                 usage_warning,
@@ -2114,6 +2184,7 @@ impl AgentView {
                 editing_label = format!("editing queued #{pos}");
                 PromptInfo {
                     model_name: &editing_label,
+                    mode_name: Some(composer_mode),
                     flags: mode_flags,
                     multiline,
                     usage_warning,
@@ -2124,6 +2195,7 @@ impl AgentView {
         let info = if let Some(label) = self.prompt_input_mode.prompt_info_override() {
             PromptInfo {
                 model_name: label,
+                mode_name: None,
                 flags: &[],
                 multiline: false,
                 usage_warning,
@@ -3020,6 +3092,7 @@ impl AgentView {
                 } else {
                     let mut h = vec![
                         HintItem::new(key!('c'), "comment"),
+                        HintItem::new(key!('y'), "copy plan"),
                         HintItem::new(key!('f', CONTROL), "fullscreen"),
                     ];
                     if !self.plan_comments.is_empty() {
@@ -3112,6 +3185,7 @@ impl AgentView {
                 .with_pending(pending_hint)
                 .render(layout.shortcuts, buf);
         }
+        let line_viewer_toast = self.active_toast_message().map(|s| s.to_string());
         let is_plan_viewer = self.is_plan_viewer();
         let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
@@ -3158,6 +3232,26 @@ impl AgentView {
                 &theme,
                 effective_comment_count,
             );
+            let toast_area = viewer
+                .last_popup_area
+                .or(viewer.last_modal_area)
+                .unwrap_or(overlay_area);
+            if let Some(ref msg) = line_viewer_toast
+                && toast_area.height > 0
+                && let Some(toast_text) = fit_toast_text(msg, toast_area.width.saturating_sub(1))
+            {
+                let w = toast_text.chars().count() as u16;
+                let tx = toast_area.right().saturating_sub(w + 1);
+                let ty = toast_area.bottom().saturating_sub(1);
+                for (i, ch) in toast_text.chars().enumerate() {
+                    if let Some(cell) = buf.cell_mut((tx + i as u16, ty)) {
+                        cell.set_char(ch);
+                        cell.fg = theme.accent_user;
+                        cell.bg = theme.bg_base;
+                        cell.modifier = ratatui::prelude::Modifier::BOLD;
+                    }
+                }
+            }
             let in_plan_approval = self.plan_approval_view.is_some();
             let on_comment = in_plan_approval
                 && viewer
@@ -3183,11 +3277,15 @@ impl AgentView {
                 } else {
                     h.push(HintItem::new(key!('a'), "approve"));
                 }
+                h.push(HintItem::new(key!('y'), "copy plan"));
                 h.push(HintItem::new(key!('q'), "quit plan"));
                 h.push(HintItem::new(key!(Tab), "prompt"));
                 h
             } else if in_plan_approval {
-                let mut h = vec![HintItem::new(key!('c'), "comment")];
+                let mut h = vec![
+                    HintItem::new(key!('c'), "comment"),
+                    HintItem::new(key!('y'), "copy plan"),
+                ];
                 if approval_has_comments {
                     h.push(HintItem::new(key!('s'), "send"));
                 } else {
@@ -3213,9 +3311,13 @@ impl AgentView {
                     vec![
                         HintItem::new(key!(Enter), "edit"),
                         HintItem::new(key!('x'), "delete"),
+                        HintItem::new(key!('y'), "copy plan"),
                     ]
                 } else {
-                    vec![HintItem::new(key!('c'), "comment")]
+                    vec![
+                        HintItem::new(key!('c'), "comment"),
+                        HintItem::new(key!('y'), "copy plan"),
+                    ]
                 };
                 if has_plan_comments {
                     h.push(HintItem::new(key!('s'), "send"));
@@ -4126,7 +4228,180 @@ impl AgentView {
         } else {
             prompt_cursor_pos
         };
+        if dx_animation_mode {
+            let animation_area = Rect {
+                x: full_area.x,
+                y: full_area.y,
+                width: full_area.width,
+                height: layout.prompt.y.saturating_sub(full_area.y),
+            };
+            self.dx_ui.animation.render(animation_area, buf, &theme);
+        }
+        if let Some(sidebar_area) = dx_sidebar_area {
+            let sidebar_model = self.dx_sidebar_view_model();
+            crate::dx::sidebar::render(
+                &mut self.dx_ui.sidebar,
+                &sidebar_model,
+                sidebar_area,
+                buf,
+                &theme,
+            );
+        }
+        if let Some(minimap_area) = dx_minimap_area {
+            let hover_content = self.dx_minimap_hover_content();
+            self.dx_ui.minimap.active_turn = self.scrollback.active_turn_for_viewport();
+            crate::dx::minimap::render(
+                &mut self.dx_ui.minimap,
+                self.scrollback.turn_count(),
+                minimap_area,
+                buf,
+                &theme,
+            );
+            if let Some((title, response)) = hover_content {
+                crate::dx::minimap::render_hover_card(
+                    &self.dx_ui.minimap,
+                    &title,
+                    &response,
+                    full_area,
+                    buf,
+                    &theme,
+                );
+            }
+        }
+        if self.dx_ui.palette_visible {
+            if self.dx_ui.menu.is_none() {
+                self.dx_ui.menu = Some(crate::dx::menu::Menu::new(crate::theme::ChatTheme::from(
+                    &theme,
+                )));
+            }
+            if let Some(menu) = self.dx_ui.menu.as_mut() {
+                menu.render_in_area(full_area, buf, &crate::theme::ThemeVariant::Dark);
+            }
+        }
+        if let Some((x, y)) = cursor
+            && let Some(cell) = buf.cell_mut((x, y))
+        {
+            let color = self.dx_ui.cursor_rainbow.current_color();
+            if cell.symbol().trim().is_empty() {
+                cell.set_char('▎');
+                cell.set_style(Style::default().fg(color));
+            } else {
+                cell.set_style(Style::default().fg(theme.bg_base).bg(color));
+            }
+        }
         (cursor, prompt_post_flush)
+    }
+
+    fn dx_sidebar_view_model(&self) -> crate::dx::sidebar::SidebarViewModel {
+        use crate::dx::sidebar::{SECTION_NAMES, SidebarSection, SidebarViewModel};
+        use xai_grok_shell::tools::TodoStatus;
+
+        let tasks = if self.todo.todos().is_empty() {
+            vec!["No Tasks Yet".to_string()]
+        } else {
+            self.todo
+                .todos()
+                .iter()
+                .map(|todo| {
+                    let (glyph, status) = match todo.status {
+                        TodoStatus::Pending => ("☐", "pending"),
+                        TodoStatus::InProgress => ("◐", "active"),
+                        TodoStatus::Completed => ("☑", "done"),
+                        TodoStatus::Cancelled => ("☒", "cancelled"),
+                    };
+                    format!("{glyph} [{status}] {}", todo.content)
+                })
+                .collect()
+        };
+        let prompts = if self.session.pending_prompts.is_empty() {
+            vec!["No Prompts Yet".to_string()]
+        } else {
+            self.session
+                .pending_prompts
+                .iter()
+                .map(|prompt| prompt.text.replace('\n', " "))
+                .collect()
+        };
+        let subagents = if self.subagent_sessions.is_empty() {
+            vec!["—".to_string()]
+        } else {
+            self.subagent_sessions
+                .keys()
+                .take(12)
+                .map(|id| format!("● {id}"))
+                .collect()
+        };
+        let plugins = self
+            .session
+            .available_tools
+            .as_ref()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .take(12)
+                    .map(|tool| format!("● {tool}"))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|lines| !lines.is_empty())
+            .unwrap_or_else(|| vec!["—".to_string()]);
+        let mcp = self
+            .mcp_init_progress
+            .as_ref()
+            .map(|progress| {
+                vec![format!(
+                    "● {}/{} connected",
+                    progress.connected, progress.total
+                )]
+            })
+            .unwrap_or_else(|| vec!["—".to_string()]);
+        let bodies = [
+            tasks,
+            prompts,
+            vec!["No Notes Yet".to_string()],
+            subagents,
+            vec!["—".to_string()],
+            plugins,
+            mcp,
+        ];
+        let sections = std::array::from_fn(|i| SidebarSection {
+            name: SECTION_NAMES[i],
+            lines: bodies[i].clone(),
+        });
+        let session_id = self
+            .session
+            .session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.session.id.0.to_string());
+        SidebarViewModel {
+            title: if self.session.state.is_busy() {
+                "Generating".to_string()
+            } else {
+                self.display_name
+                    .clone()
+                    .or_else(|| self.generated_session_title.clone())
+                    .unwrap_or_else(|| "Grok Build".to_string())
+            },
+            session_id: session_id.chars().take(12).collect(),
+            cwd: self.session.cwd.display().to_string(),
+            version: format!("DX · {}", env!("CARGO_PKG_VERSION")),
+            sections,
+        }
+    }
+
+    fn dx_minimap_hover_content(&self) -> Option<(String, String)> {
+        let turn_idx = self.dx_ui.minimap.hovered_turn?;
+        let title = self.scrollback.turn_preview(turn_idx)?;
+        let turn = self.scrollback.turn(turn_idx)?;
+        let response = self
+            .scrollback
+            .entries_in_range(turn.range())
+            .into_iter()
+            .find(|entry| entry.block.is_agent_message())
+            .and_then(|entry| entry.block.searchable_text())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "Waiting for an assistant response…".to_string());
+        Some((title, response))
     }
 }
 /// Pad `msg` for the toast slot, truncating with a trailing ellipsis when it

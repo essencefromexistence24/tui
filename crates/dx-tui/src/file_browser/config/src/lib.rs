@@ -26,6 +26,14 @@ pub fn init() -> anyhow::Result<()> {
 	Ok(())
 }
 
+/// Initialize for an embedded host that already owns the terminal.
+///
+/// Unlike [`init`], this never writes to or reads from the global TTY when a
+/// user configuration is invalid; it silently falls back to DX presets.
+pub fn init_embedded() -> anyhow::Result<()> {
+	try_init(true).or_else(|_| try_init(false))
+}
+
 fn try_init(merge: bool) -> anyhow::Result<()> {
 	let mut yazi = Preset::yazi()?;
 	let mut keymap = Preset::keymap()?;
@@ -46,6 +54,10 @@ pub fn init_flavor(light: bool) -> anyhow::Result<()> {
 		try_init_flavor(light, false)?;
 	}
 	Ok(())
+}
+
+pub fn init_flavor_embedded(light: bool) -> anyhow::Result<()> {
+	try_init_flavor(light, true).or_else(|_| try_init_flavor(light, false))
 }
 
 fn try_init_flavor(light: bool, merge: bool) -> anyhow::Result<()> {

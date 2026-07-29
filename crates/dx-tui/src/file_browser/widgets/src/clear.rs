@@ -23,7 +23,7 @@ impl Widget for Clear {
 		COLLISION.store(true, Ordering::Relaxed);
 		for y in r.top()..r.bottom() {
 			for x in r.left()..r.right() {
-				buf[(x, y)].set_skip(true);
+				buf[(x, y)].set_diff_option(ratatui::buffer::CellDiffOption::Skip);
 			}
 		}
 	}
@@ -44,4 +44,3 @@ fn overlap(a: Rect, b: Rect) -> Option<Rect> {
 	let height = (a.y + a.height).min(b.y + b.height) - y;
 	Some(Rect { x, y, width, height })
 }
-
