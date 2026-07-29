@@ -1737,6 +1737,11 @@ fn translate_local_submit(
                 InputOutcome::Action(Action::DoctorFixCancelled(target))
             }
         }
+        LocalQuestionKind::DeleteCurrentSession => {
+            InputOutcome::Action(Action::DeleteCurrentSessionAnswered {
+                confirmed: *idx == 0,
+            })
+        }
         LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
     }
 }

@@ -15,6 +15,7 @@ pub mod context;
 pub mod copy;
 pub mod dashboard;
 pub mod debug;
+pub mod delete;
 pub mod docs;
 pub mod doctor;
 pub mod dx_view;
@@ -87,6 +88,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(dx_view::DxViewCommand::animation()),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
+        Arc::new(delete::DeleteCommand),
         Arc::new(new::NewCommand),
         Arc::new(fork::ForkCommand),
         Arc::new(compact::CompactCommand),
@@ -270,6 +272,7 @@ mod tests {
             "cost",
             "dashboard",
             "debug",
+            "delete",
             "docs",
             "doctor",
             "edit-prompt",
@@ -402,6 +405,19 @@ mod tests {
         let cmd = home::HomeCommand;
         let result = cmd.run(&mut ctx, "");
         assert!(matches!(result, CommandResult::Action(Action::ExitSession)));
+    }
+    #[test]
+    fn delete_requires_session_and_dispatches() {
+        let models = ModelState::default();
+        let cmd = delete::DeleteCommand;
+        let mut ctx = make_ctx(&models);
+        assert!(matches!(cmd.run(&mut ctx, ""), CommandResult::Error(_)));
+        let session_id = acp::SessionId::new("sess-delete");
+        ctx.session_id = Some(&session_id);
+        assert!(matches!(
+            cmd.run(&mut ctx, ""),
+            CommandResult::Action(Action::DeleteCurrentSession)
+        ));
     }
     #[test]
     fn view_plan_returns_show_plan_action() {
