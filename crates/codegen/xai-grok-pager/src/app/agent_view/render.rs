@@ -750,6 +750,11 @@ impl AgentView {
             return (None, None);
         }
         let dx_animation_mode = self.dx_ui.view == crate::dx::DxView::Animation;
+        if dx_animation_mode {
+            // Carousel screens keep the real prompt and completion menus, but
+            // intentionally omit the passive bottom-left ghost suggestion.
+            self.prompt.prompt_suggestion.dismiss();
+        }
         if self.dx_ui.view == crate::dx::DxView::Diff {
             let dx_theme = crate::theme::ChatTheme::from(&theme);
             crate::dx::diff_view::render_diff_view(&mut self.dx_ui.diff, &dx_theme, full_area, buf);
@@ -4250,11 +4255,25 @@ impl AgentView {
             prompt_cursor_pos
         };
         if dx_animation_mode {
+            // Grok input dropdowns are painted before the DX carousel. Stop
+            // the animation above their top edge so `/`, `@`, completion, and
+            // history menus remain visible and interactive over every screen.
+            let dropdown_top = [
+                self.slash_dropdown_items_area,
+                self.dropdown_items_area,
+                self.completion_dropdown_items_area,
+                self.history_dropdown_area,
+            ]
+            .into_iter()
+            .flatten()
+            .map(|rect| rect.y)
+            .min()
+            .unwrap_or(layout.prompt.y);
             let animation_area = Rect {
                 x: full_area.x,
                 y: full_area.y,
                 width: full_area.width,
-                height: layout.prompt.y.saturating_sub(full_area.y),
+                height: dropdown_top.saturating_sub(full_area.y),
             };
             self.dx_ui.animation.render(animation_area, buf, &theme);
         }
@@ -4317,20 +4336,58 @@ impl AgentView {
         use crate::dx::sidebar::{SECTION_NAMES, SidebarSection, SidebarViewModel};
         use xai_grok_shell::tools::TodoStatus;
 
-        let tasks = if self.todo.todos().is_empty() {
-            vec!["No Tasks Yet".to_string()]
+        let mut tasks: Vec<String> = self
+            .todo
+            .todos()
+            .iter()
+            .map(|todo| {
+                let (glyph, status) = match todo.status {
+                    TodoStatus::Pending => ("☐", "pending"),
+                    TodoStatus::InProgress => ("◐", "active"),
+                    TodoStatus::Completed => ("☑", "done"),
+                    TodoStatus::Cancelled => ("☒", "cancelled"),
+                };
+                format!("{glyph} [{status}] {}", todo.content)
+            })
+            .collect();
+        tasks.extend(self.session.bg_tasks.values().map(|task| {
+            let status = match task.status {
+                crate::app::agent::BgTaskStatus::Running => "active",
+                crate::app::agent::BgTaskStatus::Done => "done",
+                crate::app::agent::BgTaskStatus::Failed => "failed",
+            };
+            let label = task
+                .description
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or(task.command.as_str());
+            format!("● [{status}] {}", label.replace('\n', " "))
+        }));
+        tasks.extend(self.session.scheduled_tasks.values().map(|task| {
+            format!(
+                "◷ [active] {} · {}",
+                task.prompt.replace('\n', " "),
+                task.human_schedule
+            )
+        }));
+        if tasks.is_empty() {
+            tasks.push("No Tasks Yet".to_string());
+        }
+        let workflows = if self.workflow_runs.is_empty() {
+            vec!["No Workflows Yet".to_string()]
         } else {
-            self.todo
-                .todos()
+            self.workflow_runs
                 .iter()
-                .map(|todo| {
-                    let (glyph, status) = match todo.status {
-                        TodoStatus::Pending => ("☐", "pending"),
-                        TodoStatus::InProgress => ("◐", "active"),
-                        TodoStatus::Completed => ("☑", "done"),
-                        TodoStatus::Cancelled => ("☒", "cancelled"),
-                    };
-                    format!("{glyph} [{status}] {}", todo.content)
+                .rev()
+                .take(12)
+                .map(|run| {
+                    let phase = run
+                        .current_phase
+                        .as_deref()
+                        .filter(|phase| !phase.is_empty())
+                        .map(|phase| format!(" · {phase}"))
+                        .unwrap_or_default();
+                    format!("◆ [{}] {}{phase}", run.status, run.name)
                 })
                 .collect()
         };
@@ -4377,6 +4434,7 @@ impl AgentView {
             .unwrap_or_else(|| vec!["—".to_string()]);
         let bodies = [
             tasks,
+            workflows,
             prompts,
             vec!["No Notes Yet".to_string()],
             subagents,

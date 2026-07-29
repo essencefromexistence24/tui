@@ -51,7 +51,7 @@ impl AgentView {
                     .find(|(_, _, area)| contains(*area))
                 {
                     match section {
-                        0 => {
+                        crate::dx::sidebar::TASKS_SECTION => {
                             self.todo.overlay.toggle();
                             self.todo.on_state_change();
                             if self.todo.overlay.focused {
@@ -60,21 +60,22 @@ impl AgentView {
                                 self.set_active_pane(AgentPane::Scrollback, false);
                             }
                         }
-                        1 => self.toggle_queue_pane(),
-                        3 => {
-                            if let Some(session_id) =
-                                self.subagent_views.keys().nth(row).cloned()
-                            {
+                        crate::dx::sidebar::WORKFLOWS_SECTION => {
+                            self.show_workflows = true;
+                        }
+                        crate::dx::sidebar::PROMPTS_SECTION => self.toggle_queue_pane(),
+                        crate::dx::sidebar::SUBAGENTS_SECTION => {
+                            if let Some(session_id) = self.subagent_views.keys().nth(row).cloned() {
                                 self.open_subagent_fullscreen(session_id);
                             }
                         }
-                        5 => {
+                        crate::dx::sidebar::PLUGINS_SECTION => {
                             return InputOutcome::Action(Action::OpenExtensionsModal {
                                 tab: crate::views::extensions_modal::ExtensionsTab::Plugins,
                                 trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
                             });
                         }
-                        6 => {
+                        crate::dx::sidebar::MCP_SECTION => {
                             return InputOutcome::Action(Action::OpenExtensionsModal {
                                 tab: crate::views::extensions_modal::ExtensionsTab::McpServers,
                                 trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
@@ -1097,7 +1098,8 @@ impl AgentView {
                     "scrollback mouse moved"
                 );
                 if self.left_mouse_down
-                    && (self.pending_text_drag.is_some()
+                    && (self.scrollbar_dragging
+                        || self.pending_text_drag.is_some()
                         || self.drag_selection.is_some()
                         || self.pending_block_drag.is_some()
                         || self.block_drag_selection.is_some()

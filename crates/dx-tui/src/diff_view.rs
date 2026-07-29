@@ -147,6 +147,11 @@ pub struct DiffState {
     pub tree_scrollbar_hovered: bool,
     /// Hover highlight for patch scrollbar (editor-style).
     pub patch_scrollbar_hovered: bool,
+    /// Exact scrollbar tracks published by the last render.
+    pub tree_scrollbar_area: Rect,
+    pub patch_scrollbar_area: Rect,
+    pub tree_scrollbar_dragging: bool,
+    pub patch_scrollbar_dragging: bool,
 }
 
 impl DiffState {
@@ -453,6 +458,67 @@ impl DiffState {
             self.tree_scroll = self.tree_cursor.saturating_sub(viewport) + 1;
         }
     }
+
+    pub fn begin_scrollbar_drag(&mut self, x: u16, y: u16) -> bool {
+        if rect_contains(self.tree_scrollbar_area, x, y) {
+            self.tree_scrollbar_dragging = true;
+            self.patch_scrollbar_dragging = false;
+            self.apply_tree_scrollbar(y);
+            true
+        } else if rect_contains(self.patch_scrollbar_area, x, y) {
+            self.patch_scrollbar_dragging = true;
+            self.tree_scrollbar_dragging = false;
+            self.apply_patch_scrollbar(y);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn drag_scrollbar(&mut self, y: u16) -> bool {
+        if self.tree_scrollbar_dragging {
+            self.apply_tree_scrollbar(y);
+            true
+        } else if self.patch_scrollbar_dragging {
+            self.apply_patch_scrollbar(y);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn end_scrollbar_drag(&mut self, y: u16) -> bool {
+        let dragging = self.drag_scrollbar(y);
+        self.tree_scrollbar_dragging = false;
+        self.patch_scrollbar_dragging = false;
+        dragging
+    }
+
+    fn apply_tree_scrollbar(&mut self, y: u16) {
+        let rows = self.visible_tree_rows().len();
+        self.tree_scroll = scrollbar_offset_for_row(
+            self.tree_scrollbar_area,
+            y,
+            rows,
+            self.tree_inner.height as usize,
+        );
+        let max_cursor = rows.saturating_sub(1);
+        self.tree_cursor = self.tree_cursor.max(self.tree_scroll).min(
+            self.tree_scroll
+                .saturating_add(self.tree_inner.height.saturating_sub(1) as usize)
+                .min(max_cursor),
+        );
+    }
+
+    fn apply_patch_scrollbar(&mut self, y: u16) {
+        let rows = self.selected_display_rows().len();
+        self.diff_scroll = scrollbar_offset_for_row(
+            self.patch_scrollbar_area,
+            y,
+            rows,
+            self.patch_inner.height as usize,
+        );
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -665,10 +731,29 @@ fn rect_contains(r: Rect, x: u16, y: u16) -> bool {
         && y < r.y.saturating_add(r.height)
 }
 
+fn scrollbar_offset_for_row(area: Rect, y: u16, total: usize, viewport: usize) -> usize {
+    if area.height == 0 || total <= viewport {
+        return 0;
+    }
+    let max_scroll = total.saturating_sub(viewport);
+    let cell = y
+        .saturating_sub(area.y)
+        .min(area.height.saturating_sub(1)) as usize;
+    if cell == 0 {
+        0
+    } else if cell + 1 >= area.height as usize {
+        max_scroll
+    } else {
+        cell.saturating_mul(max_scroll) / area.height.saturating_sub(1).max(1) as usize
+    }
+}
+
 /// Render the full-screen differ into `area`.
 /// Updates hit-test rects on `state` so mouse handlers match paint exactly.
 pub fn render_diff_view(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &mut Buffer) {
     state.poll_refresh();
+    state.tree_scrollbar_area = Rect::default();
+    state.patch_scrollbar_area = Rect::default();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             buf[(x, y)].reset();
@@ -818,6 +903,8 @@ fn render_tree_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
     }
 
     if max_scroll > 0 {
+        state.tree_scrollbar_area =
+            Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         render_scrollbar_track_hover(
             inner,
             buf,
@@ -946,6 +1033,8 @@ fn render_diff_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
     }
 
     if max_scroll > 0 {
+        state.patch_scrollbar_area =
+            Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
         render_scrollbar_track_hover(
             inner,
             buf,
@@ -1165,5 +1254,13 @@ mod tests {
     fn count_stats_ignores_headers() {
         let patch = "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n";
         assert_eq!(count_diff_stats(patch), (1, 1));
+    }
+
+    #[test]
+    fn scrollbar_pointer_reaches_both_scroll_boundaries() {
+        let area = Rect::new(40, 5, 1, 10);
+        assert_eq!(scrollbar_offset_for_row(area, 5, 100, 10), 0);
+        assert_eq!(scrollbar_offset_for_row(area, 14, 100, 10), 90);
+        assert_eq!(scrollbar_offset_for_row(area, 99, 100, 10), 90);
     }
 }

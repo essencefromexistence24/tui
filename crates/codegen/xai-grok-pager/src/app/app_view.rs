@@ -2420,9 +2420,22 @@ impl AppView {
             return InputOutcome::Changed;
         }
         let modal_open = self.is_scroll_blocking_modal_open();
+        // Full-screen DX surfaces own wheel input. Let the agent-level diff
+        // handler consume it instead of translating it into chat scrollback.
+        let dx_surface_owns_scroll = matches!(
+            self.active_view,
+            ActiveView::Agent(id)
+                if self.agents.get(&id).is_some_and(|agent| {
+                    matches!(
+                        agent.dx_ui.view,
+                        crate::dx::DxView::Diff | crate::dx::DxView::FileBrowser
+                    )
+                })
+        );
         if let Event::Mouse(mouse) = ev
             && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
             && !modal_open
+            && !dx_surface_owns_scroll
         {
             let config = self
                 .scroll_config

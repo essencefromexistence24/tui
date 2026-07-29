@@ -1577,6 +1577,12 @@ pub struct PickerState {
     pub tabs_focused: bool,
     /// Suppress the list selection highlight while keyboard focus is on the search bar (via edge navigation); cleared once the selection is meaningful again (typing, navigating back into the list, mouse click/hover). Session-picker rows gate their `selected` flag on `!selection_hidden`.
     pub selection_hidden: bool,
+    /// Scrollbar track and content metrics published by the last content render.
+    pub scrollbar_area: Option<Rect>,
+    pub scrollbar_total_rows: usize,
+    pub scrollbar_viewport_rows: u16,
+    /// A left-button drag currently owns the scrollbar.
+    pub scrollbar_dragging: bool,
 }
 
 impl Default for PickerState {
@@ -1597,6 +1603,10 @@ impl Default for PickerState {
             filter_hovered: false,
             tabs_focused: false,
             selection_hidden: false,
+            scrollbar_area: None,
+            scrollbar_total_rows: 0,
+            scrollbar_viewport_rows: 0,
+            scrollbar_dragging: false,
         }
     }
 }
@@ -1636,6 +1646,10 @@ impl PickerState {
         self.filter_hovered = false;
         self.tabs_focused = false;
         self.selection_hidden = false;
+        self.scrollbar_area = None;
+        self.scrollbar_total_rows = 0;
+        self.scrollbar_viewport_rows = 0;
+        self.scrollbar_dragging = false;
     }
 
     /// Clear the search query and the selection/scroll state that tracks it,
@@ -1680,6 +1694,38 @@ impl PickerState {
                 self.expanded.insert(i);
             }
         }
+    }
+
+    fn apply_scrollbar_pointer(&mut self, screen_y: u16) {
+        use crate::render::scrollbar::{ScrollbarClickResult, scrollbar_click_to_offset};
+        let Some(area) = self.scrollbar_area else {
+            return;
+        };
+        let scale = if self.scrollbar_total_rows > u16::MAX as usize {
+            self.scrollbar_total_rows.div_ceil(u16::MAX as usize)
+        } else {
+            1
+        };
+        let total = self
+            .scrollbar_total_rows
+            .div_ceil(scale)
+            .min(u16::MAX as usize) as u16;
+        let result = scrollbar_click_to_offset(
+            screen_y.saturating_sub(area.y),
+            area.height,
+            total,
+            self.scrollbar_viewport_rows,
+        );
+        let max = self
+            .scrollbar_total_rows
+            .saturating_sub(self.scrollbar_viewport_rows as usize);
+        self.scroll_offset = Some(match result {
+            ScrollbarClickResult::Top => 0,
+            ScrollbarClickResult::Bottom => max,
+            ScrollbarClickResult::Offset(offset) => offset.saturating_mul(scale).min(max),
+        });
+        self.hovered = None;
+        self.selection_hidden = false;
     }
 }
 
@@ -2014,6 +2060,9 @@ fn render_picker_content_inner(
 ) -> PickerContentHitAreas {
     // Cleared each paint; set below if a row underlines its last description line.
     state.link_band = None;
+    state.scrollbar_area = None;
+    state.scrollbar_total_rows = 0;
+    state.scrollbar_viewport_rows = 0;
     let is_clickable_non_sel = |i: usize| non_selectable_clickable.get(i).copied().unwrap_or(false);
     let empty_hit = PickerContentHitAreas {
         item_rects: vec![],
@@ -2187,6 +2236,9 @@ fn render_picker_content_inner(
     if needs_scroll {
         let sb_x = scrollbar_x_override.unwrap_or(content_area.x + content_area.width - 1);
         let sb_area = Rect::new(sb_x, content_area.y, 1, max_visible as u16);
+        state.scrollbar_area = Some(sb_area);
+        state.scrollbar_total_rows = total_visual_rows;
+        state.scrollbar_viewport_rows = max_visible as u16;
         crate::render::scrollbar::render_scrollbar_styled(
             buf,
             Some(sb_area),
@@ -2620,9 +2672,32 @@ pub fn handle_picker_input(
     };
 
     // ── Mouse handling (hit area based) ──
-    if let Event::Mouse(mouse) = ev
-        && let Some(ref hit) = state.hit_areas
-    {
+    if let Event::Mouse(mouse) = ev {
+        let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(crossterm::event::MouseButton::Left)
+                if state.scrollbar_area.is_some_and(|area| area.contains(pos)) =>
+            {
+                state.scrollbar_dragging = true;
+                state.apply_scrollbar_pointer(mouse.row);
+                return PickerOutcome::Changed;
+            }
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) | MouseEventKind::Moved
+                if state.scrollbar_dragging =>
+            {
+                state.apply_scrollbar_pointer(mouse.row);
+                return PickerOutcome::Changed;
+            }
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) if state.scrollbar_dragging => {
+                state.apply_scrollbar_pointer(mouse.row);
+                state.scrollbar_dragging = false;
+                return PickerOutcome::Changed;
+            }
+            _ => {}
+        }
+        let Some(ref hit) = state.hit_areas else {
+            return PickerOutcome::Unchanged;
+        };
         let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Down(crossterm::event::MouseButton::Left) => {
@@ -3278,6 +3353,20 @@ mod tests {
 
     fn press_up() -> Event {
         Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn scrollbar_pointer_reaches_both_scroll_boundaries() {
+        let mut state = PickerState {
+            scrollbar_area: Some(Rect::new(40, 5, 1, 10)),
+            scrollbar_total_rows: 100,
+            scrollbar_viewport_rows: 10,
+            ..PickerState::default()
+        };
+        state.apply_scrollbar_pointer(5);
+        assert_eq!(state.scroll_offset, Some(0));
+        state.apply_scrollbar_pointer(14);
+        assert_eq!(state.scroll_offset, Some(90));
     }
 
     #[test]

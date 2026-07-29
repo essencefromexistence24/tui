@@ -13,9 +13,17 @@ use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, Paragraph, Widget};
 use unicode_width::UnicodeWidthStr;
 
-pub const SECTION_COUNT: usize = 7;
+pub const SECTION_COUNT: usize = 8;
+pub const TASKS_SECTION: usize = 0;
+pub const WORKFLOWS_SECTION: usize = 1;
+pub const PROMPTS_SECTION: usize = 2;
+pub const NOTES_SECTION: usize = 3;
+pub const SUBAGENTS_SECTION: usize = 4;
+pub const PLUGINS_SECTION: usize = 6;
+pub const MCP_SECTION: usize = 7;
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "Tasks",
+    "Workflows",
     "Prompts",
     "Notes",
     "Subagents",
@@ -53,7 +61,7 @@ pub struct SidebarUiState {
 impl Default for SidebarUiState {
     fn default() -> Self {
         Self {
-            accordion_open: [false, false, true, false, false, false, false],
+            accordion_open: [false, false, false, true, false, false, false, false],
             scroll: 0,
             panel_area: Rect::default(),
             section_areas: [Rect::default(); SECTION_COUNT],
@@ -168,7 +176,7 @@ pub fn render(
         .enumerate()
         .map(|(i, section)| {
             if state.accordion_open[i] {
-                1 + if i == 2 {
+                1 + if i == NOTES_SECTION {
                     section.lines.len().max(8) as u16
                 } else {
                     section.lines.len().max(1) as u16
@@ -190,7 +198,7 @@ pub fn render(
         let open = state.accordion_open[section_index];
         let section_top = content_y;
         content_y = content_y.saturating_add(*section_height);
-        if section_index == 2 && open && section_top >= state.scroll {
+        if section_index == NOTES_SECTION && open && section_top >= state.scroll {
             let notes_y = sections_area.y + section_top - state.scroll;
             let notes_height =
                 (*section_height).min(sections_area.bottom().saturating_sub(notes_y));
@@ -224,7 +232,7 @@ pub fn render(
             if screen_row >= sections_area.height {
                 break;
             }
-            let notes_body = section_index == 2 && open;
+            let notes_body = section_index == NOTES_SECTION && open;
             let row_area = Rect {
                 x: sections_area.x + if notes_body { 2 } else { 1 },
                 y: sections_area.y + screen_row,
@@ -234,7 +242,7 @@ pub fn render(
                 height: 1,
             };
             if row == 0 {
-                if section_index == 2 && open {
+                if section_index == NOTES_SECTION && open {
                     continue;
                 }
                 state.section_areas[section_index] = row_area;
@@ -268,15 +276,17 @@ pub fn render(
                     Style::default()
                         .fg(theme.gray)
                         .add_modifier(Modifier::ITALIC)
-                } else if section_index == 0 && line.contains("[done]") {
+                } else if section_index == TASKS_SECTION && line.contains("[done]") {
                     Style::default()
                         .fg(theme.accent_success)
                         .add_modifier(Modifier::DIM)
-                } else if section_index == 0 && line.contains("[active]") {
+                } else if (section_index == TASKS_SECTION || section_index == WORKFLOWS_SECTION)
+                    && line.contains("[active]")
+                {
                     Style::default()
                         .fg(theme.warning)
                         .add_modifier(Modifier::BOLD)
-                } else if section_index == 0 && line.contains("[cancelled]") {
+                } else if section_index == TASKS_SECTION && line.contains("[cancelled]") {
                     Style::default()
                         .fg(theme.gray)
                         .add_modifier(Modifier::CROSSED_OUT)

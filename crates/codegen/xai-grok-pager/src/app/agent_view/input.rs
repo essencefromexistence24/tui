@@ -540,6 +540,7 @@ impl AgentView {
                 self.dx_ui.view = crate::dx::DxView::Chat;
             } else {
                 self.dx_ui.animation.restart();
+                self.prompt.prompt_suggestion.dismiss();
                 let sound = self.dx_ui.animation.current().sound();
                 self.dx_ui.sound.start_animation_loop(sound);
                 self.dx_ui.view = crate::dx::DxView::Animation;
@@ -563,25 +564,6 @@ impl AgentView {
                         handled = true;
                     }
                     KeyCode::Right if self.prompt.text().is_empty() => {
-                        self.dx_ui.animation.next();
-                        handled = true;
-                    }
-                    KeyCode::Up
-                        if self.dx_ui.animation.current()
-                            == crate::dx::animation::AnimationKind::Splash =>
-                    {
-                        self.dx_ui.palette_visible = true;
-                        let theme = crate::theme::Theme::current();
-                        self.dx_ui.menu = Some(crate::dx::menu::Menu::new(
-                            crate::theme::ChatTheme::from(&theme),
-                        ));
-                        handled = true;
-                    }
-                    KeyCode::Down
-                        if self.prompt.text().is_empty()
-                            && self.dx_ui.animation.current()
-                                == crate::dx::animation::AnimationKind::Splash =>
-                    {
                         self.dx_ui.animation.next();
                         handled = true;
                     }
@@ -628,6 +610,7 @@ impl AgentView {
         {
             self.dx_ui.intro_seen = true;
             self.dx_ui.animation.restart();
+            self.prompt.prompt_suggestion.dismiss();
             let sound = self.dx_ui.animation.current().sound();
             self.dx_ui.sound.start_animation_loop(sound);
             self.dx_ui.view = crate::dx::DxView::Animation;
@@ -694,6 +677,15 @@ impl AgentView {
         if self.dx_ui.view == crate::dx::DxView::Diff {
             if let Event::Mouse(mouse) = ev {
                 match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self
+                            .dx_ui
+                            .diff
+                            .begin_scrollbar_drag(mouse.column, mouse.row) => {}
+                    MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
+                        if self.dx_ui.diff.drag_scrollbar(mouse.row) => {}
+                    MouseEventKind::Up(MouseButton::Left)
+                        if self.dx_ui.diff.end_scrollbar_drag(mouse.row) => {}
                     MouseEventKind::Down(MouseButton::Left)
                         if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) =>
                     {
