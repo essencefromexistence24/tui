@@ -6,7 +6,7 @@ use tracing::warn;
 use fb_emulator::{Emulator, TMUX};
 use fb_shared::env_exists;
 
-use crate::{Adapters, SHOWN, drivers};
+use crate::{Adapters, SHOWN, clear_embedded_image, drivers, embedded};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Adapter {
@@ -56,6 +56,11 @@ impl Adapter {
 	}
 
 	pub fn image_hide(self) -> Result<()> {
+		if embedded() {
+			clear_embedded_image();
+			SHOWN.replace(None);
+			return Ok(());
+		}
 		if let Some(area) = SHOWN.replace(None) { self.image_erase(area) } else { Ok(()) }
 	}
 
@@ -115,4 +120,3 @@ impl Adapter {
 		Self::Chafa
 	}
 }
-

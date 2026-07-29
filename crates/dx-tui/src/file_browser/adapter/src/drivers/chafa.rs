@@ -7,7 +7,7 @@ use ratatui::layout::Rect;
 use tokio::process::Command;
 use fb_emulator::Emulator;
 
-use crate::Adapter;
+use crate::{Adapter, embedded, store_embedded_image};
 
 pub(crate) struct Chafa;
 
@@ -59,6 +59,10 @@ impl Chafa {
 
 		Adapter::Chafa.image_hide()?;
 		Adapter::shown_store(area);
+		if embedded() {
+			store_embedded_image(area, output.stdout);
+			return Ok(area);
+		}
 		Emulator::move_lock((max.x, max.y), |w| {
 			for (i, line) in lines.into_iter().enumerate() {
 				w.write_all(line)?;
@@ -79,4 +83,3 @@ impl Chafa {
 		})
 	}
 }
-

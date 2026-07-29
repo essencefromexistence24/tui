@@ -3828,13 +3828,6 @@ impl AgentView {
         if let Some(ref mut modal_state) = self.extensions_modal {
             use crate::views::extensions_modal::render_extensions_modal;
             use crate::views::shortcuts_bar::HintItem;
-            ratatui::widgets::Clear.render(full_area, buf);
-            buf.set_style(
-                full_area,
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base),
-            );
             // DX chrome changes the chat layout, while Grok's menus are
             // terminal-level surfaces. Give them the unsplit frame so their
             // window can never collapse to a zero-height retained-buffer

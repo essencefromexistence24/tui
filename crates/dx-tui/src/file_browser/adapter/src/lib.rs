@@ -8,13 +8,22 @@ fb_macro::mod_pub!(drivers);
 
 fb_macro::mod_flat!(adapter adapters icc image info);
 
+use std::sync::{
+	Mutex,
+	atomic::{AtomicBool, Ordering},
+};
+
+use ansi_to_tui::IntoText;
 use fb_emulator::{Brand, CLOSE, EMULATOR, ESCAPE, Emulator, Mux, START, TMUX};
 use fb_shared::{SyncCell, in_wsl};
+use ratatui::{buffer::Buffer, layout::Rect, widgets::{Paragraph, Widget}};
 
 pub static ADAPTOR: SyncCell<Adapter> = SyncCell::new(Adapter::Chafa);
 
 // Image state
 static SHOWN: SyncCell<Option<ratatui::layout::Rect>> = SyncCell::new(None);
+static EMBEDDED: AtomicBool = AtomicBool::new(false);
+static EMBEDDED_IMAGE: Mutex<Option<(Rect, Vec<u8>)>> = Mutex::new(None);
 
 // WSL support
 pub static WSL: SyncCell<bool> = SyncCell::new(false);
@@ -30,6 +39,7 @@ pub fn init_embedded() -> anyhow::Result<()> {
 }
 
 fn init_with_flavor(embedded: bool) -> anyhow::Result<()> {
+	EMBEDDED.store(embedded, Ordering::Relaxed);
 	// WSL support
 	WSL.set(in_wsl());
 
@@ -61,6 +71,32 @@ fn init_with_flavor(embedded: bool) -> anyhow::Result<()> {
 		ADAPTOR.get().start();
 	}
 	Ok(())
+}
+
+#[inline]
+pub(crate) fn embedded() -> bool { EMBEDDED.load(Ordering::Relaxed) }
+
+pub(crate) fn store_embedded_image(area: Rect, ansi: Vec<u8>) {
+	*EMBEDDED_IMAGE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((area, ansi));
+}
+
+pub(crate) fn clear_embedded_image() {
+	*EMBEDDED_IMAGE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+}
+
+/// Paint Chafa's ANSI/symbol output into Grok's Ratatui frame. Standalone DX
+/// writes this through its terminal adapter; embedded mode must retain it in
+/// the host buffer so the next Grok redraw does not erase the preview.
+pub fn render_embedded_image(win: Rect, buf: &mut Buffer) {
+	let image = EMBEDDED_IMAGE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+	let Some((area, ansi)) = image.as_ref() else { return };
+	let target = area.intersection(win);
+	if target.is_empty() {
+		return;
+	}
+	if let Ok(text) = ansi.as_slice().to_text() {
+		Paragraph::new(text).render(target, buf);
+	}
 }
 
 fn detect_emulator(embedded: bool) -> Emulator {

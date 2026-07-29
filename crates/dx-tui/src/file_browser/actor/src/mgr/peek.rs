@@ -17,7 +17,11 @@ impl Actor for Peek {
 			succ!(cx.tab_mut().preview.reset());
 		};
 		if cx.term.is_none() {
-			succ!(cx.tab_mut().preview.reset_image());
+			// In embedded mode Grok owns the terminal, but DX still owns the
+			// preview pipeline. Clear any stale protocol image without
+			// returning early so text, directory, Chafa, and error previewers
+			// can populate the right pane normally.
+			cx.tab_mut().preview.reset_image();
 		}
 
 		let mime = cx.mgr.mimetype.owned(&hovered.url).unwrap_or_default();
@@ -54,4 +58,3 @@ impl Actor for Peek {
 		succ!();
 	}
 }
-

@@ -434,6 +434,7 @@ impl BrowserEngine {
             }
         }
         mgr::Preview::new(core).render(area, buf);
+        fb_adapter::render_embedded_image(area, buf);
         mgr::Modal::new(core).render(area, buf);
         if core.tasks.visible {
             tasks::Tasks::new(core).render(area, buf);
