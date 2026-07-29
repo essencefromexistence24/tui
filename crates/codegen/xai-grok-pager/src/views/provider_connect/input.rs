@@ -109,7 +109,7 @@ fn provider_count_before(idx: usize, data: &super::PickerEntryData) -> usize {
 }
 
 /// Map a picker entry index to a provider and open KeyInput mode.
-fn handle_selection(
+pub(crate) fn handle_selection(
     state: &mut ProviderConnectState,
     idx: usize,
     data: &super::PickerEntryData,

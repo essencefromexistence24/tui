@@ -498,6 +498,7 @@ pub enum ExtensionsTab {
     Marketplace,
     Skills,
     McpServers,
+    Providers,
 }
 
 impl ExtensionsTab {
@@ -508,6 +509,7 @@ impl ExtensionsTab {
         Self::Marketplace,
         Self::Skills,
         Self::McpServers,
+        Self::Providers,
     ];
 
     /// Display label for the tab bar.
@@ -518,6 +520,7 @@ impl ExtensionsTab {
             Self::Marketplace => "Marketplace",
             Self::Skills => "Skills",
             Self::McpServers => "MCP Servers",
+            Self::Providers => "Providers",
         }
     }
 
@@ -528,17 +531,19 @@ impl ExtensionsTab {
             Self::Plugins => Self::Marketplace,
             Self::Marketplace => Self::Skills,
             Self::Skills => Self::McpServers,
-            Self::McpServers => Self::Hooks,
+            Self::McpServers => Self::Providers,
+            Self::Providers => Self::Hooks,
         }
     }
     /// Previous tab (wraps around).
     pub fn prev(self) -> Self {
         match self {
-            Self::Hooks => Self::McpServers,
+            Self::Hooks => Self::Providers,
             Self::Plugins => Self::Hooks,
             Self::Marketplace => Self::Plugins,
             Self::Skills => Self::Marketplace,
             Self::McpServers => Self::Skills,
+            Self::Providers => Self::McpServers,
         }
     }
 
@@ -550,6 +555,7 @@ impl ExtensionsTab {
             Self::Marketplace => ExtensionsModalTab::Marketplace,
             Self::Skills => ExtensionsModalTab::Skills,
             Self::McpServers => ExtensionsModalTab::McpServers,
+            Self::Providers => ExtensionsModalTab::Providers,
         }
     }
 }
@@ -1134,6 +1140,7 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
         ],
         ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
+        ExtensionsTab::Providers => vec![('f', "category")],
     }
 }
 
@@ -1267,6 +1274,7 @@ fn selected_item_enabled_at(
             _ => None,
         },
         ExtensionsTab::Marketplace => None,
+        ExtensionsTab::Providers => None,
     }
 }
 
@@ -1383,6 +1391,7 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Hooks, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::Plugins, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::McpServers, 'f') => Some(ButtonAction::CycleFilter),
+        (ExtensionsTab::Providers, 'f') => Some(ButtonAction::CycleFilter),
         _ => None,
     }
 }
@@ -1756,6 +1765,8 @@ pub struct ExtensionsModalState {
     pub mcps_collapsed_sections: std::collections::HashSet<String>,
     /// Whether plugin section collapse defaults have been applied after first load.
     pub mcps_section_collapse_initialized: bool,
+    /// Provider catalog and credential form reused from `/connect`.
+    pub provider_connect: crate::views::provider_connect::ProviderConnectState,
     /// Maps visible row offset to skill index (for mouse click).
     pub skills_visible_map: Vec<Option<usize>>,
     pub hooks_collapsed_groups: std::collections::HashSet<String>,
@@ -1843,6 +1854,7 @@ impl ExtensionsModalState {
             // and Enter / l / Right re-expands a collapsed section.
             mcps_collapsed_sections: std::collections::HashSet::new(),
             mcps_section_collapse_initialized: false,
+            provider_connect: crate::views::provider_connect::ProviderConnectState::new(),
             skills_visible_map: Vec::new(),
             skills_expanded: std::collections::HashSet::new(),
             hooks_collapsed_groups: std::collections::HashSet::new(),
@@ -1886,6 +1898,10 @@ impl ExtensionsModalState {
     /// The user's search query (`picker_state.query()`) is intentionally
     /// preserved across tabs — current behavior elsewhere in the modal.
     pub fn switch_tab(&mut self, tab: ExtensionsTab) {
+        if self.active_tab == ExtensionsTab::Providers {
+            self.provider_connect.mode = crate::views::provider_connect::ConnectMode::Browse;
+            self.provider_connect.error_message = None;
+        }
         self.active_tab = tab;
         // Clear modal flow state from the previous tab.
         self.input = None;
@@ -1979,6 +1995,14 @@ impl ExtensionsModalState {
     pub fn apply_paste(&mut self, text: &str) -> bool {
         if let Some(ref mut input) = self.input {
             input.insert_paste(text)
+        } else if self.active_tab == ExtensionsTab::Providers
+            && let crate::views::provider_connect::ConnectMode::KeyInput {
+                ref mut input_buffer,
+                ..
+            } = self.provider_connect.mode
+        {
+            input_buffer.push_str(&text.replace(['\n', '\r'], ""));
+            true
         } else if self.picker_state.search_active {
             matches!(
                 self.picker_state.paste_query(text),
@@ -2521,6 +2545,7 @@ pub fn render_extensions_modal(
             | ExtensionsTab::Plugins
             | ExtensionsTab::McpServers
             | ExtensionsTab::Skills
+            | ExtensionsTab::Providers
     );
     let filter = match state.active_tab {
         ExtensionsTab::Hooks => state.hooks_filter,
@@ -2537,10 +2562,16 @@ pub fn render_extensions_modal(
         ExtensionsTab::Marketplace => matches!(state.marketplace_data, TabDataState::Loading),
         ExtensionsTab::Skills => matches!(state.skills_data, TabDataState::Loading),
         ExtensionsTab::McpServers => matches!(state.mcps_data, TabDataState::Loading),
+        ExtensionsTab::Providers => false,
     };
 
     // Input mode hides the entry list (form overlay owns the content area).
-    let in_input_mode = state.input.is_some() || state.mcp_setup.is_some();
+    let provider_input_mode = state.active_tab == ExtensionsTab::Providers
+        && matches!(
+            state.provider_connect.mode,
+            crate::views::provider_connect::ConnectMode::KeyInput { .. }
+        );
+    let in_input_mode = state.input.is_some() || state.mcp_setup.is_some() || provider_input_mode;
 
     // Rebuild the entry list *before* footer action labels so Space
     // enable/disable can use this frame's mapping (passed as locals to
@@ -2564,6 +2595,29 @@ pub fn render_extensions_modal(
     // Skip building entries when in input mode (render_input_form handles that).
     if !in_input_mode && !loading {
         match state.active_tab {
+            ExtensionsTab::Providers => {
+                let data = crate::views::provider_connect::ProviderConnectState::picker_entry_data(
+                    &state.provider_connect.free_providers,
+                    &state.provider_connect.providers,
+                    &state.provider_connect.configured_ids,
+                    state.provider_connect.active_tab,
+                    state.picker_state.query(),
+                );
+                for i in 0..data.labels.len() {
+                    entry_labels.push(data.labels[i].clone());
+                    entry_right_labels.push(String::new());
+                    entry_desc_lines.push(Vec::new());
+                    entry_summary_lines.push(Vec::new());
+                    entry_fields.push(Vec::new());
+                    entry_is_header.push(data.non_sel[i]);
+                    entry_dimmed.push(data.dimmed[i]);
+                    entry_indent.push(data.indents[i]);
+                    entry_data_indices.push((!data.non_sel[i]).then_some(i));
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(data.badges[i].to_string());
+                    entry_badge_color.push(data.badge_colors[i]);
+                }
+            }
             ExtensionsTab::Skills => {
                 if let TabDataState::Loaded(ref skills) = state.skills_data {
                     let filtered =
@@ -3437,15 +3491,25 @@ pub fn render_extensions_modal(
 
     // Filter indicator (optional, right-aligned on search row).
     if has_filter && !in_input_mode {
+        let filter_label = if state.active_tab == ExtensionsTab::Providers {
+            state.provider_connect.active_tab.label()
+        } else {
+            filter.label()
+        };
+        let filter_active = if state.active_tab == ExtensionsTab::Providers {
+            state.provider_connect.active_tab != crate::views::provider_connect::ProviderTab::All
+        } else {
+            filter != StatusFilter::All
+        };
         let rect = picker::render_filter_indicator(
             buf,
             content_area.x,
             content_area.y,
             search_width,
             &theme,
-            filter.label(),
+            filter_label,
             "f",
-            filter != StatusFilter::All,
+            filter_active,
             state.picker_state.filter_hovered,
         );
         state.picker_state.filter_area = Some(rect);
@@ -3605,6 +3669,16 @@ pub fn render_extensions_modal(
         if form_height > 0 {
             let form_area = Rect::new(content_area.x, form_y, content_area.width, form_height);
             render_input_form(buf, form_area, input, &theme);
+        }
+    } else if provider_input_mode {
+        let form_y = entries_start_y;
+        let form_height = entries_area.height;
+        if form_height > 0 {
+            crate::views::provider_connect::render::render_embedded_key_input(
+                buf,
+                Rect::new(content_area.x, form_y, content_area.width, form_height),
+                &state.provider_connect,
+            );
         }
     }
 
@@ -4123,6 +4197,7 @@ mod tests {
                     ('x', "remove"),
                 ],
             ),
+            (ExtensionsTab::Providers, &[('f', "category")]),
         ];
         assert_eq!(expected.len(), ExtensionsTab::ALL.len());
         for &(tab, pairs) in expected {
@@ -5064,12 +5139,14 @@ mod tests {
         assert_eq!(ExtensionsTab::Plugins.next(), ExtensionsTab::Marketplace);
         assert_eq!(ExtensionsTab::Marketplace.next(), ExtensionsTab::Skills);
         assert_eq!(ExtensionsTab::Skills.next(), ExtensionsTab::McpServers);
-        assert_eq!(ExtensionsTab::McpServers.next(), ExtensionsTab::Hooks);
+        assert_eq!(ExtensionsTab::McpServers.next(), ExtensionsTab::Providers);
+        assert_eq!(ExtensionsTab::Providers.next(), ExtensionsTab::Hooks);
     }
 
     #[test]
     fn tab_prev_wraps_around() {
-        assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::McpServers);
+        assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::Providers);
+        assert_eq!(ExtensionsTab::Providers.prev(), ExtensionsTab::McpServers);
         assert_eq!(ExtensionsTab::McpServers.prev(), ExtensionsTab::Skills);
         assert_eq!(ExtensionsTab::Skills.prev(), ExtensionsTab::Marketplace);
         assert_eq!(ExtensionsTab::Marketplace.prev(), ExtensionsTab::Plugins);
@@ -5077,8 +5154,8 @@ mod tests {
     }
 
     #[test]
-    fn tab_all_contains_five_tabs() {
-        assert_eq!(ExtensionsTab::ALL.len(), 5);
+    fn tab_all_contains_six_tabs() {
+        assert_eq!(ExtensionsTab::ALL.len(), 6);
     }
 
     // ── Modal state init ────────────────────────────────────────────

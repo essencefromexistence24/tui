@@ -671,6 +671,7 @@ pub enum ExtensionsModalTab {
     Marketplace,
     Skills,
     McpServers,
+    Providers,
 }
 
 #[derive(Serialize)]

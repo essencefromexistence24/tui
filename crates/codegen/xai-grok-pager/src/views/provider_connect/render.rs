@@ -266,3 +266,30 @@ fn render_key_input(
             .render(ch[3], buf);
     }
 }
+
+/// Render the provider credential form inside another modal's content area.
+///
+/// The extensions modal uses this to keep provider setup in the unified
+/// management surface without duplicating credential-field behavior.
+pub(crate) fn render_embedded_key_input(
+    buf: &mut Buffer,
+    area: Rect,
+    state: &ProviderConnectState,
+) {
+    if let ConnectMode::KeyInput {
+        provider_id,
+        input_buffer,
+        set_default,
+    } = &state.mode
+    {
+        render_key_input(
+            buf,
+            area,
+            provider_id,
+            input_buffer,
+            *set_default,
+            state,
+            &Theme::current(),
+        );
+    }
+}

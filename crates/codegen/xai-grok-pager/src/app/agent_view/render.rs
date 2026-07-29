@@ -701,8 +701,14 @@ impl AgentView {
         let full_area = area;
         let dx_chrome_visible =
             !in_dashboard_overlay && !self.modal_owns_input() && !self.dx_ui.palette_visible;
+        // The unified extensions menu is an overlay over the working chat,
+        // not a replacement screen. Keep the right sidebar in the underlying
+        // layout so session context remains visible around the modal.
+        let dx_sidebar_visible = !in_dashboard_overlay
+            && !self.dx_ui.palette_visible
+            && (!self.modal_owns_input() || self.extensions_modal.is_some());
         let (area, dx_sidebar_area) =
-            crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_chrome_visible);
+            crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_sidebar_visible);
         let (area, dx_minimap_area) =
             crate::dx::minimap::split(area, self.dx_ui.minimap_visible && dx_chrome_visible);
         self.in_dashboard_overlay = in_dashboard_overlay;
@@ -3825,6 +3831,18 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
+        if self.extensions_modal.is_some()
+            && let Some(sidebar_area) = dx_sidebar_area
+        {
+            let sidebar_model = self.dx_sidebar_view_model();
+            crate::dx::sidebar::render(
+                &mut self.dx_ui.sidebar,
+                &sidebar_model,
+                sidebar_area,
+                buf,
+                &theme,
+            );
+        }
         if let Some(ref mut modal_state) = self.extensions_modal {
             use crate::views::extensions_modal::render_extensions_modal;
             use crate::views::shortcuts_bar::HintItem;
@@ -3835,6 +3853,9 @@ impl AgentView {
             let overlay_area = full_area;
             let compact = self.scrollback.appearance().prompt.compact;
             let tick = self.scrollback.animation_tick();
+            // Paint the chat sidebar first, then place the modal above it.
+            // This preserves context without allowing sidebar pixels or input
+            // to bleed through the modal surface.
             render_extensions_modal(
                 buf,
                 overlay_area,
@@ -4451,7 +4472,7 @@ mod dx_modal_layering_tests {
     use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
 
     #[test]
-    fn mcp_modal_occludes_dx_chrome_and_paints_the_full_frame() {
+    fn extensions_modal_keeps_sidebar_context_beneath_overlay() {
         let mut agent = make_agent();
         agent.dx_ui.sidebar_visible = true;
         agent.dx_ui.minimap_visible = true;
@@ -4479,10 +4500,13 @@ mod dx_modal_layering_tests {
                 }
             }
         }
-        assert!(text.contains("MCP Servers"), "MCP modal was not painted: {text}");
         assert!(
-            !text.contains("DX ·"),
-            "DX sidebar painted over the MCP modal: {text}"
+            text.contains("MCP Servers"),
+            "MCP modal was not painted: {text}"
+        );
+        assert!(
+            text.contains("DX ·"),
+            "DX sidebar should remain visible behind the extensions modal: {text}"
         );
         assert_ne!(
             buf[(area.right() - 1, area.y)].bg,

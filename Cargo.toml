@@ -378,6 +378,13 @@ panic = "abort"
 [profile.release.package.xai-grok-pager]
 codegen-units = 256
 
+# `xai-grok-shell` is the other large monolithic crate in the pager build.
+# With `-j 12` on Windows, its default optimized codegen can overlap with the
+# pager and exhaust the system commit limit. Smaller LLVM partitions preserve
+# opt-level=3 while keeping each codegen allocation bounded.
+[profile.release.package.xai-grok-shell]
+codegen-units = 256
+
 # Hardened release profile for shipping to end users (alpha + stable).
 # Use `cargo build --profile release-dist` for distribution builds.
 # Not used by default `--release` to avoid slowing down local dev builds (~2.2x).

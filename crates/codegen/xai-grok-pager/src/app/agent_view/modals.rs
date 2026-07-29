@@ -336,6 +336,55 @@ impl AgentView {
         &mut self,
         key: &crossterm::event::KeyEvent,
     ) -> InputOutcome {
+        // Provider credential entry is a form nested in the Providers tab.
+        // It owns text keys until saved or cancelled; the outer extensions
+        // tabs remain present and are restored immediately on Esc.
+        if self.extensions_modal.as_ref().is_some_and(|state| {
+            state.active_tab == crate::views::extensions_modal::ExtensionsTab::Providers
+                && matches!(
+                    state.provider_connect.mode,
+                    crate::views::provider_connect::ConnectMode::KeyInput { .. }
+                )
+        }) {
+            let outcome = {
+                let state = self.extensions_modal.as_mut().unwrap();
+                crate::views::provider_connect::input::handle_provider_connect_key(
+                    &mut state.provider_connect,
+                    *key,
+                )
+            };
+            if let crate::views::provider_connect::input::ConnectOutcome::Configure {
+                provider_id,
+                api_key,
+                set_default,
+            } = outcome
+            {
+                let result = crate::views::provider_connect::save_provider_config(
+                    &provider_id,
+                    api_key.as_deref(),
+                    set_default,
+                );
+                let state = self.extensions_modal.as_mut().unwrap();
+                match result {
+                    Ok(()) => {
+                        state.provider_connect.configured_ids =
+                            crate::views::provider_connect::load_configured_providers();
+                        state.provider_connect.mode =
+                            crate::views::provider_connect::ConnectMode::Browse;
+                        state.provider_connect.error_message = None;
+                        state.provider_connect.status_message =
+                            Some("Provider configured. Use /model to select it.".to_string());
+                    }
+                    Err(error) => {
+                        tracing::warn!("Failed to save provider config: {error}");
+                        state.provider_connect.error_message =
+                            Some(format!("Failed to save: {error}"));
+                    }
+                }
+            }
+            return InputOutcome::Changed;
+        }
+
         // Handle modal messages (errors and confirmations) FIRST, before
         // the pending_action guard. Some error paths (e.g. structured
         // OutcomeStatus::ValidationError) leave pending_action set when
@@ -612,12 +661,26 @@ impl AgentView {
             crate::views::extensions_modal::ExtensionsTab::Hooks
                 | crate::views::extensions_modal::ExtensionsTab::Plugins
                 | crate::views::extensions_modal::ExtensionsTab::McpServers
+                | crate::views::extensions_modal::ExtensionsTab::Providers
         );
         let filter = match state.active_tab {
             crate::views::extensions_modal::ExtensionsTab::Hooks => state.hooks_filter,
             crate::views::extensions_modal::ExtensionsTab::Plugins => state.plugins_filter,
             crate::views::extensions_modal::ExtensionsTab::McpServers => state.mcps_filter,
             _ => crate::views::extensions_modal::StatusFilter::All,
+        };
+        let filter_label =
+            if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Providers {
+                state.provider_connect.active_tab.label()
+            } else {
+                filter.label()
+            };
+        let filter_active = if state.active_tab
+            == crate::views::extensions_modal::ExtensionsTab::Providers
+        {
+            state.provider_connect.active_tab != crate::views::provider_connect::ProviderTab::All
+        } else {
+            filter != crate::views::extensions_modal::StatusFilter::All
         };
         let action_keys = crate::views::extensions_modal::extensions_action_keys(state.active_tab);
         let entry_count = state.entry_data_indices.len();
@@ -639,13 +702,9 @@ impl AgentView {
             non_selectable_clickable,
             tabs: Some(&labels),
             active_tab: active_idx,
-            filter_label: if has_filter {
-                Some(filter.label())
-            } else {
-                None
-            },
+            filter_label: if has_filter { Some(filter_label) } else { None },
             filter_key_hint: if has_filter { Some("f") } else { None },
-            filter_active: filter != crate::views::extensions_modal::StatusFilter::All,
+            filter_active,
             header_note: None,
             action_keys: &action_keys,
             disable_search: false,
@@ -702,6 +761,15 @@ impl AgentView {
                             state.mcps_filter = state.mcps_filter.next();
                             true
                         }
+                        crate::views::extensions_modal::ExtensionsTab::Providers => {
+                            let current = state.provider_connect.active_tab.index();
+                            let next = (current + 1)
+                                % crate::views::provider_connect::ProviderTab::ALL.len();
+                            state
+                                .provider_connect
+                                .switch_tab(crate::views::provider_connect::ProviderTab::ALL[next]);
+                            true
+                        }
                         _ => false,
                     };
                     // Reset selection after filter change.
@@ -733,11 +801,30 @@ impl AgentView {
                     InputOutcome::Changed
                 }
             }
-            crate::views::picker::PickerOutcome::Selected(_)
-            | crate::views::picker::PickerOutcome::Expand(_) => self
-                .extensions_modal_expand_or_auth(
-                    xai_grok_telemetry::events::ExtensionsInputMethod::Keyboard,
-                ),
+            crate::views::picker::PickerOutcome::Selected(idx)
+            | crate::views::picker::PickerOutcome::Expand(idx) => {
+                if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Providers {
+                    let query = state.picker_state.query().to_string();
+                    let data =
+                        crate::views::provider_connect::ProviderConnectState::picker_entry_data(
+                            &state.provider_connect.free_providers,
+                            &state.provider_connect.providers,
+                            &state.provider_connect.configured_ids,
+                            state.provider_connect.active_tab,
+                            &query,
+                        );
+                    crate::views::provider_connect::input::handle_selection(
+                        &mut state.provider_connect,
+                        idx,
+                        &data,
+                    );
+                    InputOutcome::Changed
+                } else {
+                    self.extensions_modal_expand_or_auth(
+                        xai_grok_telemetry::events::ExtensionsInputMethod::Keyboard,
+                    )
+                }
+            }
             crate::views::picker::PickerOutcome::Collapse(_) => {
                 self.extensions_modal_toggle_fold(
                     xai_grok_telemetry::events::ExtensionsInputMethod::Keyboard,
@@ -995,12 +1082,26 @@ impl AgentView {
             crate::views::extensions_modal::ExtensionsTab::Hooks
                 | crate::views::extensions_modal::ExtensionsTab::Plugins
                 | crate::views::extensions_modal::ExtensionsTab::McpServers
+                | crate::views::extensions_modal::ExtensionsTab::Providers
         );
         let filter = match state.active_tab {
             crate::views::extensions_modal::ExtensionsTab::Hooks => state.hooks_filter,
             crate::views::extensions_modal::ExtensionsTab::Plugins => state.plugins_filter,
             crate::views::extensions_modal::ExtensionsTab::McpServers => state.mcps_filter,
             _ => crate::views::extensions_modal::StatusFilter::All,
+        };
+        let filter_label =
+            if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Providers {
+                state.provider_connect.active_tab.label()
+            } else {
+                filter.label()
+            };
+        let filter_active = if state.active_tab
+            == crate::views::extensions_modal::ExtensionsTab::Providers
+        {
+            state.provider_connect.active_tab != crate::views::provider_connect::ProviderTab::All
+        } else {
+            filter != crate::views::extensions_modal::StatusFilter::All
         };
         let action_keys: Vec<(char, &str)> = vec![]; // No action keys for mouse
         let entry_count = state.entry_data_indices.len();
@@ -1022,13 +1123,9 @@ impl AgentView {
             non_selectable_clickable,
             tabs: Some(&labels),
             active_tab: active_idx,
-            filter_label: if has_filter {
-                Some(filter.label())
-            } else {
-                None
-            },
+            filter_label: if has_filter { Some(filter_label) } else { None },
             filter_key_hint: if has_filter { Some("f") } else { None },
-            filter_active: filter != crate::views::extensions_modal::StatusFilter::All,
+            filter_active,
             header_note: None,
             action_keys: &action_keys,
             disable_search: false,
@@ -1057,6 +1154,24 @@ impl AgentView {
             | crate::views::picker::PickerOutcome::NonSelectableClick(i) => Some(*i),
             _ => None,
         };
+        if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Providers
+            && let Some(idx) = clicked_entry
+        {
+            let query = state.picker_state.query().to_string();
+            let data = crate::views::provider_connect::ProviderConnectState::picker_entry_data(
+                &state.provider_connect.free_providers,
+                &state.provider_connect.providers,
+                &state.provider_connect.configured_ids,
+                state.provider_connect.active_tab,
+                &query,
+            );
+            crate::views::provider_connect::input::handle_selection(
+                &mut state.provider_connect,
+                idx,
+                &data,
+            );
+            return InputOutcome::Changed;
+        }
         if let Some(idx) = clicked_entry
             && self.extensions_modal_click_opens_connectors(idx, mouse.row)
         {
@@ -1103,6 +1218,15 @@ impl AgentView {
                         }
                         crate::views::extensions_modal::ExtensionsTab::McpServers => {
                             state.mcps_filter = state.mcps_filter.next();
+                            true
+                        }
+                        crate::views::extensions_modal::ExtensionsTab::Providers => {
+                            let current = state.provider_connect.active_tab.index();
+                            let next = (current + 1)
+                                % crate::views::provider_connect::ProviderTab::ALL.len();
+                            state
+                                .provider_connect
+                                .switch_tab(crate::views::provider_connect::ProviderTab::ALL[next]);
                             true
                         }
                         _ => false,
@@ -1850,6 +1974,7 @@ impl AgentView {
                             }
                         }
                         ExtensionsTab::Skills => {}
+                        ExtensionsTab::Providers => {}
                     }
                 }
                 InputOutcome::Changed
@@ -1885,6 +2010,16 @@ impl AgentView {
                         ExtensionsTab::Skills => {
                             state.skills_filter = state.skills_filter.next();
                             state.picker_state.selected = 0;
+                        }
+                        ExtensionsTab::Providers => {
+                            let current = state.provider_connect.active_tab.index();
+                            let next = (current + 1)
+                                % crate::views::provider_connect::ProviderTab::ALL.len();
+                            state
+                                .provider_connect
+                                .switch_tab(crate::views::provider_connect::ProviderTab::ALL[next]);
+                            state.picker_state.selected = 0;
+                            state.picker_state.scroll_offset = None;
                         }
                         _ => {}
                     }
@@ -2690,7 +2825,7 @@ mod extensions_modal_search_key_tests {
     #[test]
     fn tab_during_search_wraps_around_tabs() {
         let mut agent = super::test_fixtures::make_agent();
-        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::Providers));
 
         agent.handle_extensions_modal_key(&key(KeyCode::Char('/')));
         agent.handle_extensions_modal_key(&key(KeyCode::Tab));
