@@ -1,9 +1,14 @@
 {
-  "default": "qwen2.5-coder-1.5b-local",
+  "default": "minicpm5-1b-tooluse",
   "web_search": "grok-4.5",
   "image_description": "grok-4.5",
   "session_summary": "grok-4.5",
   "models": [
+    {
+      "id": "minicpm5-1b-tooluse",
+      "model": "minicpm5-1b-tooluse",
+      "name": "MiniCPM5 1B Tool Use (Local)"
+    },
     {
       "id": "qwen2.5-coder-1.5b-local",
       "model": "qwen2.5-coder-1.5b-local",

@@ -742,9 +742,27 @@ impl SessionActor {
     /// newly issued session token. The previous client cache inside
     /// the sampler actor is invalidated automatically by
     /// `update_config`.
-    pub(crate) async fn prepare_sampler_for_turn(&self) {
+    pub(crate) async fn prepare_sampler_for_turn(&self) -> Result<(), acp::Error> {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
+        if sampler_config.base_url.contains("localhost")
+            || sampler_config.base_url.contains("127.0.0.1")
+        {
+            if let Err(error) = crate::agent::local_model::ensure_local_server(
+                &sampler_config.model,
+                &sampler_config.base_url,
+            )
+            .await
+            {
+                tracing::error!(
+                    model = %sampler_config.model,
+                    %error,
+                    "local model is unavailable before sampling"
+                );
+                return Err(acp::Error::internal_error()
+                    .data(format!("Local model could not start: {error}")));
+            }
+        }
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output
         {
@@ -752,6 +770,7 @@ impl SessionActor {
         }
         sampler_config.idle_timeout_secs = Some(self.inference_idle_timeout.as_secs());
         self.sampler_handle.update_config(sampler_config);
+        Ok(())
     }
     fn log_terminal_failure(&self, error_type: &str, status_code: Option<u16>, message: &str) {
         let auth = self
@@ -938,7 +957,7 @@ impl SessionActor {
                         user_id = %auth.user_id,
                         "auth recovery: sampler 401, devbox re-mint, retrying"
                     );
-                    self.prepare_sampler_for_turn().await;
+                    self.prepare_sampler_for_turn().await?;
                     return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
                 }
                 Err(e) => {
@@ -966,7 +985,7 @@ impl SessionActor {
                     Some(self.session_info.id.0.as_ref()),
                     None,
                 );
-                self.prepare_sampler_for_turn().await;
+                self.prepare_sampler_for_turn().await?;
                 return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
             }
             tracing::warn!(session_id = %self.session_info.id.0, "auth recovery: sampler 401, refresh failed");
@@ -979,7 +998,7 @@ impl SessionActor {
         if let Some(ref provider) = auth_provider
             && self.try_provider_401_recovery(provider).await
         {
-            self.prepare_sampler_for_turn().await;
+            self.prepare_sampler_for_turn().await?;
             return Ok(SamplerFailureRecovery::RefreshAuthAndResubmit);
         }
         if matches!(error.kind, SamplingErrorKind::IdleTimeout) {
@@ -1119,7 +1138,7 @@ impl SessionActor {
         self: &Arc<Self>,
         request: ConversationRequest,
     ) -> Result<SamplerTurnOutcome, acp::Error> {
-        self.prepare_sampler_for_turn().await;
+        self.prepare_sampler_for_turn().await?;
         let stream_drained_rx = {
             let (tx, rx) = tokio::sync::oneshot::channel();
             *self.turn_stream_drained.lock() = Some(tx);

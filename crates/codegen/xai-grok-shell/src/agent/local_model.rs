@@ -117,6 +117,22 @@ impl LocalServerHandle {
             "starting managed llama-server"
         );
 
+        let log_path = std::env::temp_dir().join(format!("grok-llama-server-{port}.log"));
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&log_path)
+            .map_err(|e| {
+                format!(
+                    "failed to create llama-server log {}: {e}",
+                    log_path.display()
+                )
+            })?;
+        let stderr_log = log_file
+            .try_clone()
+            .map_err(|e| format!("failed to clone llama-server log handle: {e}"))?;
+
         let mut cmd = Command::new(&server_path_str);
         cmd.args([
             "-m",
@@ -128,7 +144,7 @@ impl LocalServerHandle {
             "--port",
             &port.to_string(),
             "--load-mode",
-            "mlock",
+            "mmap",
             // This model can spend its entire completion in reasoning_content,
             // which the normal TUI hides. Disable thinking at the server so
             // every successful completion contains a visible answer.
@@ -139,12 +155,12 @@ impl LocalServerHandle {
             "--repeat-last-n",
             "128",
         ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(stderr_log));
 
         detach_command(&mut cmd);
 
-        let child = cmd
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to spawn llama-server: {e}"))?;
 
@@ -156,9 +172,10 @@ impl LocalServerHandle {
             state.process_group = Some(arc);
         }
 
-        // Poll health endpoint up to 60s
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        let mut last_err = String::new();
+        // Loading can take longer on CPU-only Windows hosts, especially while
+        // antivirus scans the GGUF mapping. Fail immediately if the process
+        // exits, otherwise allow a bounded two-minute readiness window.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(120);
 
         while tokio::time::Instant::now() < deadline {
             if check_health(port).await {
@@ -167,10 +184,25 @@ impl LocalServerHandle {
                 tracing::info!(port = port, "llama-server ready");
                 return Ok(port);
             }
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|e| format!("failed to inspect llama-server process: {e}"))?
+            {
+                state.process_group = None;
+                return Err(format!(
+                    "llama-server exited with {status}: {}",
+                    read_log_tail(&log_path)
+                ));
+            }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
 
-        let err = format!("llama-server failed to start within 60s: {last_err}");
+        let _ = child.kill().await;
+        state.process_group = None;
+        let err = format!(
+            "llama-server failed to start within 120s: {}",
+            read_log_tail(&log_path)
+        );
         tracing::error!("{err}");
         Err(err)
     }
@@ -194,18 +226,17 @@ async fn check_health(port: u16) -> bool {
 
 /// Ensure the local server is running for the given model. Call this
 /// before creating a `SamplingClient` for a local model.
-/// Returns the port the server is listening on, or `None` if the model
-/// is not a local model or the server can't be started.
-pub(crate) async fn ensure_local_server(model_key: &str, base_url: &str) -> Option<u16> {
-    let config = local_server_config_for_model(model_key, base_url)?;
+/// Returns the port the server is listening on, or an actionable error when the
+/// model is not local or its managed server cannot be started.
+pub(crate) async fn ensure_local_server(model_key: &str, base_url: &str) -> Result<u16, String> {
+    let config = local_server_config_for_model(model_key, base_url).ok_or_else(|| {
+        format!(
+            "no local GGUF matching '{model_key}' or usable llama-server was found; \
+             set GROK_LOCAL_MODELS_DIR or place the model under a DX flow models directory"
+        )
+    })?;
     let handle = global_handle();
-    match handle.ensure_running(&config).await {
-        Ok(port) => Some(port),
-        Err(e) => {
-            tracing::error!("failed to start local server: {e}");
-            None
-        }
-    }
+    handle.ensure_running(&config).await
 }
 
 async fn port_in_use(port: u16) -> bool {
@@ -256,28 +287,42 @@ pub(crate) fn local_server_config_for_model(
         .and_then(|url| url.port_or_known_default())
         .unwrap_or(8080);
 
-    // Resolve model path: check ~/.dx/flow/models/llm/ by convention
-    let home = std::env::var("USERPROFILE")
-        .or_else(|_| std::env::var("HOME"))
-        .ok()?;
-    let model_dir = PathBuf::from(format!("{home}\\.dx\\flow\\models\\llm"));
-
-    // Try to find a matching GGUF file in the model directory
-    let model_file = find_model_file(&model_dir, model_key)?;
+    let model_file = candidate_model_dirs()
+        .into_iter()
+        .find_map(|dir| find_model_file(&dir, model_key))?;
 
     Some(LocalServerConfig {
         server_path,
         model_path: model_file,
-        context_size: if model_key.contains("qwen2.5") {
-            // The compact request profile only needs a modest KV cache. A
-            // 32K allocation makes CPU-only startup look hung on many PCs.
-            8_192
-        } else {
-            131_072
-        },
+        // A 131K KV cache is unnecessary for the compact local profile and
+        // can prevent a 1B model from starting on ordinary Windows machines.
+        context_size: 8_192,
         threads: 6,
         port,
     })
+}
+
+fn candidate_model_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    for name in ["GROK_LOCAL_MODELS_DIR", "DX_FLOW_MODELS_DIR"] {
+        if let Some(path) = std::env::var_os(name) {
+            dirs.push(PathBuf::from(path));
+        }
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let root = PathBuf::from(home).join(".dx").join("flow").join("models");
+        dirs.push(root.join("llm"));
+        dirs.push(root);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors().take(4) {
+            let root = ancestor.join("flow").join("models");
+            dirs.push(root.join("llm"));
+            dirs.push(root);
+        }
+    }
+    dirs.dedup();
+    dirs
 }
 
 fn find_model_file(dir: &PathBuf, key: &str) -> Option<PathBuf> {
@@ -298,6 +343,15 @@ fn find_model_file(dir: &PathBuf, key: &str) -> Option<PathBuf> {
     None
 }
 
+fn read_log_tail(path: &PathBuf) -> String {
+    const MAX_BYTES: usize = 8 * 1024;
+    let Ok(bytes) = std::fs::read(path) else {
+        return format!("see {}", path.display());
+    };
+    let start = bytes.len().saturating_sub(MAX_BYTES);
+    String::from_utf8_lossy(&bytes[start..]).trim().to_string()
+}
+
 fn normalized_model_tokens(value: &str) -> Vec<String> {
     value
         .split(|c: char| !c.is_ascii_alphanumeric())
@@ -306,4 +360,31 @@ fn normalized_model_tokens(value: &str) -> Vec<String> {
         // "local" describes the catalog slot, not the downloaded GGUF name.
         .filter(|part| part != "local")
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_lookup_matches_catalog_slug_to_gguf_name() {
+        let dir = tempfile::tempdir().expect("temp model dir");
+        let expected = dir
+            .path()
+            .join("MiniCPM5-1B-Agentic-Tooluse-Nemotron-DPO.Q4_K_M.gguf");
+        std::fs::File::create(&expected).expect("create fake GGUF");
+
+        assert_eq!(
+            find_model_file(&dir.path().to_path_buf(), "minicpm5-1b-tooluse"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn local_catalog_suffix_is_not_required_in_filename() {
+        assert_eq!(
+            normalized_model_tokens("qwen2.5-coder-1.5b-local"),
+            vec!["qwen2", "5", "coder", "1", "5b"]
+        );
+    }
 }

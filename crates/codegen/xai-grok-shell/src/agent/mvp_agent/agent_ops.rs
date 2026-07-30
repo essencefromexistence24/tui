@@ -1490,7 +1490,12 @@ impl MvpAgent {
             let base_url_clone = base_url.clone();
             let model_key_clone = model_key.clone();
             tokio::spawn(async move {
-                crate::agent::local_model::ensure_local_server(&model_key_clone, &base_url_clone).await;
+                if let Err(error) =
+                    crate::agent::local_model::ensure_local_server(&model_key_clone, &base_url_clone)
+                        .await
+                {
+                    tracing::error!(model = %model_key_clone, %error, "failed to prewarm local model");
+                }
             });
         }
 

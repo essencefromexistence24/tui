@@ -3589,7 +3589,10 @@ pub fn resolve_model_list(
         // These point to opencode.ai/zen/v1 with a public API key and must be
         // visible alongside the xAI API models in the model picker.
         for (key, entry) in super::community_models::builtin_community_models() {
-            if key == "qwen2.5-coder-1.5b-local" {
+            if matches!(
+                key.as_str(),
+                "minicpm5-1b-tooluse" | "qwen2.5-coder-1.5b-local"
+            ) {
                 // The local model must never inherit a same-named prefetched
                 // proxy entry; its localhost URL and Chat Completions backend
                 // are required for inference to reach llama-server.
