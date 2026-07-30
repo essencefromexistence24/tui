@@ -23,7 +23,7 @@ check:
     $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo check -p xai-grok-pager-bin
 
 run: _release-prime
-    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12; if ($LASTEXITCODE -eq 0) { & ".\target\release\xai-grok-pager.exe" }
+    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "0"; cargo build -p xai-grok-pager-bin --release -j 12; if ($LASTEXITCODE -eq 0) { & ".\target\release\xai-grok-pager.exe" }
 
 fmt:
     $env:CARGO_INCREMENTAL = "1"; cargo fmt --all
