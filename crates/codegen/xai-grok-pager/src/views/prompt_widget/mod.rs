@@ -3437,9 +3437,11 @@ impl PromptWidget {
         // Trailing pad mirrors the leading pad above.
         left_spans.push(Span::styled(" ", pad_style));
 
-        // Build right-side spans: composer mode + multiline indicator.
+        // Build right-side spans: center-dot separator + composer mode, then
+        // the multiline indicator.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
         if let Some(mode) = info.mode_name {
+            right_spans.push(Span::styled(" · ", sep_style));
             right_spans.push(Span::styled(mode.to_owned(), model_style));
         }
         if info.multiline {

@@ -818,12 +818,10 @@ impl AgentView {
             });
         }
         let appearance = self.scrollback.appearance().clone();
-        // Flush left: no outer/block left pad (right pad kept). Minimap overlays
-        // inside the message area and does not create a left gutter.
-        let mut layout_cfg_owned = appearance.scrollback.layout;
-        layout_cfg_owned.outer_hpad_left = 0;
-        layout_cfg_owned.block_pad_left = 0;
-        let layout_cfg = &layout_cfg_owned;
+        // Symmetric left/right outer+block padding (defaults 2/2). The minimap
+        // overlays inside the left chrome (accent + block pad) and never adds
+        // an extra gutter beyond the message gap.
+        let layout_cfg = &appearance.scrollback.layout;
         let scrollbar_cfg = &appearance.scrollback.scrollbar;
         let model_id = self
             .session

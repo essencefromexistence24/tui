@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Widget, Wrap};
 use std::time::Instant;
 
-pub const WIDTH: u16 = 4;
+pub const WIDTH: u16 = 3;
 pub const MIN_CHAT_WIDTH: u16 = 76;
 /// Cap the rail so it stays a short left strip — not full chat height.
 pub const MAX_HEIGHT: u16 = 12;
