@@ -3571,6 +3571,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
         {
+            *ctx.post_new_view = Some(crate::dx::DxView::Animation);
             return InputOutcome::Action(Action::NewSession);
         }
         if matches!(ctx.auth_state, AuthState::Done) {
@@ -3599,6 +3600,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
         }
         if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
+            *ctx.post_new_view = Some(crate::dx::DxView::Animation);
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
         if *ctx.prompt_focused
@@ -3607,6 +3609,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && (crate::input::key::is_text_input_key(key)
                 || (ch == 'v' && crate::input::key::is_paste_key(key)))
         {
+            *ctx.post_new_view = Some(crate::dx::DxView::Animation);
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
         if *ctx.prompt_focused {
@@ -5916,6 +5919,7 @@ pub(crate) mod tests {
             welcome_on_auth_url: false,
             welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
+            welcome_post_new_view: None,
             welcome_auth_fallback_rect: None,
             welcome_refresh_rect: None,
             welcome_gate_url_rect: None,

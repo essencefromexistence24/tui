@@ -198,6 +198,7 @@ fn test_app() -> AppView {
         welcome_on_auth_url: false,
         welcome_on_changelog_cta: false,
         welcome_announcement: WelcomeAnnouncementState::default(),
+        welcome_post_new_view: None,
         welcome_auth_fallback_rect: None,
         welcome_refresh_rect: None,
         welcome_gate_url_rect: None,

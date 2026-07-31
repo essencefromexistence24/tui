@@ -36,7 +36,7 @@ pub fn render_hover_card(
 ) {
     if state
         .hovered_since
-        .is_none_or(|at| at.elapsed().as_millis() < 280)
+        .is_none_or(|at| at.elapsed().as_millis() < 100)
         || title.trim().is_empty()
     {
         return;

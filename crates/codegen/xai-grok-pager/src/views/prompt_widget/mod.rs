@@ -226,7 +226,7 @@ impl Default for PromptStyle {
         Self {
             focused: true,
             show_prefix: true,
-            vpad_top: 0,
+            vpad_top: 1,
             chrome: true,
             chrome_pad_left: 2,
             chrome_pad_right: 1,
@@ -1494,9 +1494,14 @@ impl PromptWidget {
             self.textarea.desired_height(text_width).max(1)
         };
         let vpad_top = style.vpad_top;
+        let top_h = if style.chrome && style.show_borders {
+            1u16.max(vpad_top)
+        } else {
+            vpad_top
+        };
         let info_block = style.info_block(has_info);
-        let total = vpad_top + text_height + info_block;
-        let min = vpad_top + 1 + info_block;
+        let total = top_h + text_height + info_block;
+        let min = top_h + 1 + info_block;
         total.clamp(min.min(max_height), max_height)
     }
 
@@ -2937,8 +2942,11 @@ impl PromptWidget {
         // Split content: vpad_top + text + info_block
         let vpad_top = style.vpad_top;
         let info_block = style.info_block(info.is_some());
+        // Always reserve 1 row for the top divider (╭─╮) when borders are on,
+        // even if vpad_top would collapse it to 0.
+        let top_h = if style.chrome && style.show_borders { 1u16.max(vpad_top) } else { vpad_top };
         let chunks = Layout::vertical([
-            Constraint::Length(vpad_top),
+            Constraint::Length(top_h),
             Constraint::Min(1),
             Constraint::Length(info_block),
         ])
@@ -2947,7 +2955,7 @@ impl PromptWidget {
         let text_area_rect = chunks[1];
 
         // Top divider: ╭──────────╮
-        if vpad_top > 0 && style.chrome && style.show_borders {
+        if style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks[0].y;
             let left_x = area.x;
@@ -3442,15 +3450,14 @@ impl PromptWidget {
                 style,
             ));
         }
-        // Single trailing pad so the model name has one space before the
-        // composer-mode separator (· Build) — like the right padding before ╯.
-        left_spans.push(Span::styled(" ", pad_style));
+        // No trailing pad — the dot separator touches the model name directly
+        // so both sides of '·' have the same (zero) gap.
 
         // Trailing pad removed — right side starts flush so no visible gap
         // separates the model name from the composer mode.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
         if let Some(mode) = info.mode_name {
-            right_spans.push(Span::styled("· ", sep_style));
+            right_spans.push(Span::styled(" · ", sep_style));
             right_spans.push(Span::styled(mode.replace('-', " ").to_owned(), model_style));
         }
         if info.multiline {

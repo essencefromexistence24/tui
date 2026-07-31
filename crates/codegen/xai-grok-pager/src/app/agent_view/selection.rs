@@ -961,6 +961,9 @@ impl AgentView {
             1 if is_plan_tool => {
                 self.show_plan_preview();
             }
+            1 if foldable => {
+                self.scrollback.toggle_fold_selected();
+            }
             2 if is_bg_task => {
                 // Double-click bg task: open block viewer (same as Enter).
                 if let Some(entry) = self.scrollback.entry(idx)

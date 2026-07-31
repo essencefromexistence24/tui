@@ -706,12 +706,16 @@ impl AgentView {
         // layout so session context remains visible around the modal.
         let dx_sidebar_visible = !in_dashboard_overlay
             && !self.dx_ui.palette_visible
+            && self.dx_ui.view == crate::dx::DxView::Chat
             && (!self.modal_owns_input() || self.extensions_modal.is_some());
         let (area, dx_sidebar_area) =
             crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_sidebar_visible);
         // Minimap is a short rail beside scrollback only — not a full-height
         // column — so the prompt keeps the full width of the left column.
-        let dx_minimap_visible = self.dx_ui.minimap_visible && dx_chrome_visible;
+        // Hidden on non-chat screens (carousel, editor, file browser).
+        let dx_minimap_visible = self.dx_ui.minimap_visible
+            && dx_chrome_visible
+            && self.dx_ui.view == crate::dx::DxView::Chat;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -842,7 +846,7 @@ impl AgentView {
         let prompt_style = PromptStyle {
             focused: prompt_focused,
             show_prefix: appearance.prompt.show_prefix,
-            vpad_top: 0,
+            vpad_top: 1,
             compact: appearance.prompt.compact,
             chrome: true,
             chrome_pad_left: layout_cfg.block_pad_left,
@@ -1025,7 +1029,7 @@ impl AgentView {
             let style = PromptStyle {
                 focused: true,
                 show_prefix: false,
-                vpad_top: 0,
+            vpad_top: 1,
                 chrome: false,
                 chrome_pad_left: 0,
                 chrome_pad_right: 0,
@@ -2135,14 +2139,16 @@ impl AgentView {
             }
         };
         let editing_label;
-        let commenting_label;
+        let mut commenting_label = String::new();
         let theme = Theme::current();
         let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
         let approval_is_commenting = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        if effective_plan || casual_commenting {
+        // The composer mode is already shown via `mode_name` ("Plan" / "Build");
+        // don't push a duplicate "plan" / "plan approval" flag.
+        if approval_is_commenting || casual_commenting {
             let commenting_range: Option<&std::ops::Range<usize>> = if approval_is_commenting {
                 self.plan_approval_view
                     .as_ref()
@@ -2152,20 +2158,13 @@ impl AgentView {
             } else {
                 None
             };
-            let plan_label: &str = if approval_is_commenting || casual_commenting {
-                commenting_label = match commenting_range {
-                    Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
-                    Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
-                    None => "commenting".to_string(),
-                };
-                commenting_label.as_str()
-            } else if self.plan_approval_view.is_some() {
-                "plan approval"
-            } else {
-                "plan"
+            commenting_label = match commenting_range {
+                Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
+                Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
+                None => "commenting".to_string(),
             };
             mode_flags_vec.push(PromptFlag {
-                text: plan_label,
+                text: commenting_label.as_str(),
                 color: Some(theme.accent_plan),
                 bold: false,
             });
@@ -2261,7 +2260,7 @@ impl AgentView {
                     let perm_followup_style = PromptStyle {
                         focused: true,
                         show_prefix: false,
-                        vpad_top: 0,
+            vpad_top: 1,
                         chrome: false,
                         chrome_pad_left: 0,
                         chrome_pad_right: 0,
@@ -4314,6 +4313,23 @@ impl AgentView {
             );
         }
         if let Some(minimap_area) = dx_minimap_area {
+            // Update hovered turn from the current mouse position each frame
+            // so the hover card appears reliably without depending on the
+            // Moved-event handler's timing.
+            let (mx, my) = self.last_mouse_pos;
+            if minimap_area.contains(ratatui::layout::Position::new(mx, my)) {
+                let row = my.saturating_sub(minimap_area.y) as usize;
+                let turn = self.dx_ui.minimap.scroll as usize + row;
+                if turn < self.scrollback.turn_count() {
+                    if self.dx_ui.minimap.hovered_turn != Some(turn) {
+                        self.dx_ui.minimap.hovered_turn = Some(turn);
+                        self.dx_ui.minimap.hovered_since = Some(std::time::Instant::now());
+                    }
+                }
+            } else {
+                self.dx_ui.minimap.hovered_turn = None;
+                self.dx_ui.minimap.hovered_since = None;
+            }
             let hover_content = self.dx_minimap_hover_content();
             self.dx_ui.minimap.active_turn = self.scrollback.active_turn_for_viewport();
             crate::dx::minimap::render(
