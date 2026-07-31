@@ -17,4 +17,4 @@ Write-Host "Model: $model"
 Write-Host "Port: 8080 | Threads: 6 | Context: 32768"
 Write-Host ""
 
-& $server -m "$model" -c 8192 -t 6 --load-mode mlock --reasoning off --repeat-penalty 1.1 --repeat-last-n 128 --port 8080
+& $server -m "$model" -c 32768 -t 6 --load-mode mmap --reasoning off --repeat-penalty 1.1 --repeat-last-n 128 --port 8080

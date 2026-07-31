@@ -23,7 +23,7 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
             key: "minicpm5-1b-tooluse",
             name: "MiniCPM5 1B Tool Use (Local)",
             model_id: "minicpm5-1b-tooluse",
-            ctx: 131_072,
+            ctx: 32_768,
             title_header: None,
         },
         ModelSpec {
@@ -119,9 +119,11 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
                 context_window: NonZeroU64::new(m.ctx).unwrap(),
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
-                use_concise: false,
+                use_concise: is_local,
                 agent_type: "grok-build".to_string(),
-                inference_idle_timeout_secs: None,
+                // CPU-hosted models can spend tens of seconds ingesting the
+                // prompt before their first streamed token.
+                inference_idle_timeout_secs: is_local.then_some(600),
                 max_retries: None,
                 hidden: false,
                 supported_in_api: true,

@@ -1083,7 +1083,16 @@ pub(crate) async fn spawn_session_actor(
     ) {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
-    let system_prompt = agent.system_prompt().to_string();
+    // A full Grok system prompt can consume thousands of tokens before tool
+    // schemas or conversation history are added. Small local CPU models then
+    // appear frozen while llama-server performs prompt ingestion. Keep the
+    // complete harness for hosted models and use the established compact
+    // prompt for loopback inference.
+    let system_prompt = if crate::agent::local_model::is_local_base_url(&sampling_config.base_url) {
+        agent.compact_system_prompt().to_string()
+    } else {
+        agent.system_prompt().to_string()
+    };
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);

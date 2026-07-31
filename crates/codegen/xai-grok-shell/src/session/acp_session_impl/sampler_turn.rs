@@ -2,6 +2,7 @@
 //! facts/gates and retry, sampler config reconstruction, sampling-failure
 //! recovery, and per-response usage recording.
 use super::*;
+
 /// Auth-failure detector for tool errors. Matches strictly on HTTP 401
 /// when the error carries a structured status code, mirroring
 /// `SamplingError::is_auth_error` in xai-grok-sampling-types: 403 is
@@ -209,7 +210,25 @@ impl SessionActor {
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let bridge = self.agent.borrow().tool_bridge().clone();
-        let defs = bridge.tool_definitions_builtins_only().await;
+        let mut defs = bridge.tool_definitions_builtins_only().await;
+        let local_model = self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .is_some_and(|config| crate::agent::local_model::is_local_base_url(&config.base_url));
+        if local_model {
+            let original_count = defs.len();
+            // MiniCPM 1B frequently turns ordinary questions into unrelated
+            // tool calls when presented with the production schema catalog.
+            // That call/result loop produces no visible assistant text and
+            // looks like a hung model. Local models therefore use a reliable
+            // chat profile; hosted models keep the full agentic tool surface.
+            defs.clear();
+            tracing::debug!(
+                original_count,
+                "disabling tool schemas for reliable local-model chat"
+            );
+        }
         let plan_active = self.plan_mode.lock().is_active();
         filter_cursor_tools_by_plan_mode(defs, plan_active)
     }
@@ -745,9 +764,7 @@ impl SessionActor {
     pub(crate) async fn prepare_sampler_for_turn(&self) -> Result<(), acp::Error> {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
-        if sampler_config.base_url.contains("localhost")
-            || sampler_config.base_url.contains("127.0.0.1")
-        {
+        if crate::agent::local_model::is_local_base_url(&sampler_config.base_url) {
             if let Err(error) = crate::agent::local_model::ensure_local_server(
                 &sampler_config.model,
                 &sampler_config.base_url,

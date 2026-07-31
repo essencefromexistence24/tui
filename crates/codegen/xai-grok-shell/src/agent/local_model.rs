@@ -2,7 +2,7 @@
 //! as a child process when a local model is selected.
 //!
 //! The user never sees or touches `llama-server` directly. The app:
-//! 1. Detects a local model by `base_url` containing `localhost`
+//! 1. Detects a local model by its loopback `base_url`
 //! 2. Finds a free port
 //! 3. Spawns `llama-server` as a managed subprocess
 //! 4. Polls `/health` until the model is loaded
@@ -239,6 +239,22 @@ pub(crate) async fn ensure_local_server(model_key: &str, base_url: &str) -> Resu
     handle.ensure_running(&config).await
 }
 
+/// Whether an inference endpoint is hosted on this machine.
+///
+/// Parse the URL instead of using substring matching so a remote hostname such
+/// as `localhost.example.com` can never be mistaken for a trusted local server.
+pub(crate) fn is_local_base_url(base_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(base_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 async fn port_in_use(port: u16) -> bool {
     use tokio::net::TcpStream;
     TcpStream::connect(("127.0.0.1", port)).await.is_ok()
@@ -277,7 +293,7 @@ pub(crate) fn local_server_config_for_model(
     model_key: &str,
     base_url: &str,
 ) -> Option<LocalServerConfig> {
-    if !base_url.contains("localhost") && !base_url.contains("127.0.0.1") {
+    if !is_local_base_url(base_url) {
         return None;
     }
 
@@ -296,7 +312,11 @@ pub(crate) fn local_server_config_for_model(
         model_path: model_file,
         // A 131K KV cache is unnecessary for the compact local profile and
         // can prevent a 1B model from starting on ordinary Windows machines.
-        context_size: 8_192,
+        // 32K comfortably fits agent turns (a request can exceed 8K) while
+        // keeping the KV cache bounded. Keep in sync with the catalog's
+        // context_window for the local models so the client compacts before
+        // the server rejects the request.
+        context_size: 32_768,
         threads: 6,
         port,
     })
@@ -386,5 +406,14 @@ mod tests {
             normalized_model_tokens("qwen2.5-coder-1.5b-local"),
             vec!["qwen2", "5", "coder", "1", "5b"]
         );
+    }
+
+    #[test]
+    fn local_endpoint_detection_requires_an_actual_loopback_host() {
+        assert!(is_local_base_url("http://localhost:8080/v1"));
+        assert!(is_local_base_url("http://127.0.0.1:8080/v1"));
+        assert!(is_local_base_url("http://[::1]:8080/v1"));
+        assert!(!is_local_base_url("https://localhost.example.com/v1"));
+        assert!(!is_local_base_url("https://example.com/localhost"));
     }
 }
