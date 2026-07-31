@@ -192,9 +192,8 @@ impl AgentViewLayout {
         } else {
             follow_ups_height
         };
-        // The scrollback's first block already owns its leading row. Adding
-        // another outer row here doubled the visible top gap.
-        let top_vpad = 0u16;
+        // Smallest one-row gap at the top of the chat screen.
+        let top_vpad = 1u16;
         let outer_block = Block::default().padding(Padding::new(
             layout_cfg.eff_hpad_left(compact),
             layout_cfg.eff_hpad_right(compact),
@@ -206,7 +205,8 @@ impl AgentViewLayout {
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
-        let pane_gap = if top_vpad == 0 { 0u16 } else { 1 };
+        // Top pad already provides the outer gap; keep pane/scrollback flush.
+        let pane_gap = 0u16;
         if tasks_height > 0 {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(tasks_height));
@@ -219,7 +219,7 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(todo_height));
         }
-        let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
+        let status_gap = 0u16;
         constraints.push(Constraint::Length(status_gap));
         constraints.push(Constraint::Min(5));
         if btw_height > 0 {

@@ -32,7 +32,7 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "MCP",
 ];
 pub const MIN_WIDTH: u16 = 100;
-pub const PANEL_WIDTH: u16 = 30;
+pub const PANEL_WIDTH: u16 = 40;
 
 #[derive(Debug, Clone)]
 pub struct SidebarSection {
@@ -114,19 +114,8 @@ pub fn render(
             buf[(x, y)].set_bg(theme.bg_dark);
         }
     }
-    for y in area.top()..area.bottom() {
-        let cell = &mut buf[(area.x, y)];
-        cell.set_char('│');
-        cell.set_fg(theme.gray_dim);
-        cell.set_bg(theme.bg_dark);
-    }
 
-    let inner = Rect {
-        x: area.x.saturating_add(1),
-        y: area.y,
-        width: area.width.saturating_sub(1),
-        height: area.height,
-    };
+    let inner = area;
     let title_rows = wrapped_rows(&model.title, inner.width.saturating_sub(1)).clamp(2, 5);
     let chunks = Layout::default()
         .direction(Direction::Vertical)

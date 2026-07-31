@@ -709,8 +709,9 @@ impl AgentView {
             && (!self.modal_owns_input() || self.extensions_modal.is_some());
         let (area, dx_sidebar_area) =
             crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_sidebar_visible);
-        let (area, dx_minimap_area) =
-            crate::dx::minimap::split(area, self.dx_ui.minimap_visible && dx_chrome_visible);
+        // Minimap is a short rail beside scrollback only — not a full-height
+        // column — so the prompt keeps the full width of the left column.
+        let dx_minimap_visible = self.dx_ui.minimap_visible && dx_chrome_visible;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -817,7 +818,12 @@ impl AgentView {
             });
         }
         let appearance = self.scrollback.appearance().clone();
-        let layout_cfg = &appearance.scrollback.layout;
+        // Flush left: no outer/block left pad (right pad kept). Minimap overlays
+        // inside the message area and does not create a left gutter.
+        let mut layout_cfg_owned = appearance.scrollback.layout;
+        layout_cfg_owned.outer_hpad_left = 0;
+        layout_cfg_owned.block_pad_left = 0;
+        let layout_cfg = &layout_cfg_owned;
         let scrollbar_cfg = &appearance.scrollback.scrollbar;
         let model_id = self
             .session
@@ -1211,6 +1217,13 @@ impl AgentView {
                 .height
                 .saturating_sub(search_reserved_rows);
         }
+        // Short left minimap rail beside messages only; prompt stays full width.
+        let (scrollback_for_messages, mut dx_minimap_area) = crate::dx::minimap::split_scrollback(
+            layout.scrollback_content,
+            dx_minimap_visible,
+            self.scrollback.turn_count(),
+        );
+        layout.scrollback_content = scrollback_for_messages;
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
             || self.question_view.is_some()
@@ -1283,6 +1296,13 @@ impl AgentView {
                             .height
                             .saturating_sub(search_reserved_rows);
                     }
+                    let (scrollback_for_messages, rail) = crate::dx::minimap::split_scrollback(
+                        layout.scrollback_content,
+                        dx_minimap_visible,
+                        self.scrollback.turn_count(),
+                    );
+                    layout.scrollback_content = scrollback_for_messages;
+                    dx_minimap_area = rail;
                     self.scrollback.prepare_layout(
                         layout.scrollback_content.width,
                         layout.scrollback_content.height,
@@ -4307,6 +4327,10 @@ impl AgentView {
                     &theme,
                 );
             }
+        } else {
+            self.dx_ui.minimap.area = Rect::default();
+            self.dx_ui.minimap.top_indicator = Rect::default();
+            self.dx_ui.minimap.bottom_indicator = Rect::default();
         }
         if self.dx_ui.palette_visible {
             if self.dx_ui.menu.is_none() {

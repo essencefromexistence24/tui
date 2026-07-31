@@ -11,6 +11,8 @@ use std::time::Instant;
 
 pub const WIDTH: u16 = 4;
 pub const MIN_CHAT_WIDTH: u16 = 76;
+/// Cap the rail so it stays a short left strip — not full chat height.
+pub const MAX_HEIGHT: u16 = 12;
 
 #[derive(Debug, Clone, Default)]
 pub struct MinimapUiState {
@@ -76,24 +78,30 @@ pub fn render_hover_card(
         .render(card, buf);
 }
 
-pub fn split(area: Rect, visible: bool) -> (Rect, Option<Rect>) {
-    if !visible || area.width < MIN_CHAT_WIDTH + WIDTH {
-        return (area, None);
+/// Place a short left rail **inside** `host` (scrollback), vertically centered.
+/// Does not inset message content — the rail paints over the left edge after
+/// messages so chat keeps no extra left gutter (input stays full width).
+pub fn split_scrollback(host: Rect, visible: bool, turn_count: usize) -> (Rect, Option<Rect>) {
+    if !visible || host.width < MIN_CHAT_WIDTH + WIDTH || host.height == 0 {
+        return (host, None);
     }
-    (
-        Rect {
-            x: area.x + WIDTH,
-            y: area.y,
-            width: area.width - WIDTH,
-            height: area.height,
-        },
-        Some(Rect {
-            x: area.x,
-            y: area.y,
-            width: WIDTH,
-            height: area.height,
-        }),
-    )
+    let rail_h = (turn_count as u16)
+        .max(1)
+        .min(MAX_HEIGHT)
+        .min(host.height);
+    let y = host.y + host.height.saturating_sub(rail_h) / 2;
+    let rail = Rect {
+        x: host.x,
+        y,
+        width: WIDTH,
+        height: rail_h,
+    };
+    (host, Some(rail))
+}
+
+/// Legacy API kept for tests; prefer [`split_scrollback`].
+pub fn split(area: Rect, visible: bool) -> (Rect, Option<Rect>) {
+    split_scrollback(area, visible, usize::MAX)
 }
 
 pub fn render(
@@ -265,9 +273,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn minimap_reserves_exact_dx_width() {
-        let (chat, rail) = split(Rect::new(0, 0, 100, 30), true);
-        assert_eq!(chat.x, WIDTH);
+    fn minimap_does_not_inset_messages() {
+        let host = Rect::new(2, 5, 100, 30);
+        let (chat, rail) = split(host, true);
+        assert_eq!(chat, host);
         assert_eq!(rail.expect("rail").width, WIDTH);
+    }
+
+    #[test]
+    fn minimap_is_short_and_vertically_centered() {
+        let host = Rect::new(0, 10, 100, 40);
+        let (chat, rail) = split_scrollback(host, true, 3);
+        let rail = rail.expect("rail");
+        assert_eq!(chat, host);
+        assert_eq!(rail.height, 3);
+        assert_eq!(rail.y, host.y + (host.height - 3) / 2);
+        let (_, tall) = split_scrollback(host, true, 100);
+        let tall = tall.expect("rail");
+        assert_eq!(tall.height, MAX_HEIGHT);
+        assert_eq!(tall.y, host.y + (host.height - MAX_HEIGHT) / 2);
     }
 }
