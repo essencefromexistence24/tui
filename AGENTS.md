@@ -22,7 +22,7 @@ $env:PROTOC = "$env:TEMP\protoc\bin\protoc.exe"
 Full workspace builds are very slow. Target only the pager-bin package:
 
 ```powershell
-cargo build -p xai-grok-pager-bin --release -j 8
+cargo build -p xai-grok-pager-bin --release -j 12
 ```
 
 ## `/dev/stdout` / `/dev/null` on Windows

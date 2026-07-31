@@ -368,7 +368,7 @@ zbus = { version = "5" }
 zstd = "0.13"
 
 [profile.release]
-incremental = false
+incremental = true
 panic = "abort"
 
 # The pager now directly embeds the DX browser/editor/animation stack and is
