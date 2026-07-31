@@ -65,13 +65,8 @@ pub fn render(
         desc_trimmed,
         Style::default().fg(theme.muted_fg),
     )));
-    splash_lines.push(Line::from(""));
-    let hints = "↑ Menu  ↓ Animations  ←/→ Carousel  /browser files  /code editor  type to chat";
-    let hints_trimmed: String = hints.chars().take(area.width as usize).collect();
-    splash_lines.push(Line::from(Span::styled(
-        hints_trimmed,
-        Style::default().fg(theme.muted_fg),
-    )));
+    // Bottom hints removed — the FIGlet logo and description are enough;
+    // keyboard shortcuts are discoverable via the command palette / help.
 
     let content_height = splash_lines.len() as u16;
     let available_height = area.height;

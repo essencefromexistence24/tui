@@ -3405,7 +3405,10 @@ impl PromptWidget {
                 sep_fg
             };
             let warning_style = Style::default().fg(fg).bg(bg);
-            left_spans.push(Span::styled(warning.to_owned(), warning_style));
+            left_spans.push(Span::styled(
+                warning.replace('-', " ").to_owned(),
+                warning_style,
+            ));
             left_spans.push(Span::styled(" · ", sep_style));
         }
         left_spans.push(Span::styled(
@@ -3416,7 +3419,6 @@ impl PromptWidget {
             left_spans.push(Span::styled(" · ", sep_style));
             let mut style = if let Some(color) = flag.color {
                 if flag.bold {
-                    // Bold flags use full color for visibility.
                     Style::default().fg(color).bg(bg)
                 } else {
                     let dimmed = crate::render::color::blend_color(bg, color, flag_opacity)
@@ -3435,16 +3437,20 @@ impl PromptWidget {
             if flag.bold {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            left_spans.push(Span::styled(flag.text, style));
+            left_spans.push(Span::styled(
+                flag.text.replace('-', " "),
+                style,
+            ));
         }
-        // Trailing pad mirrors the leading pad above.
+        // Single trailing pad so the model name has one space before the
+        // composer-mode separator (· Build) — like the right padding before ╯.
         left_spans.push(Span::styled(" ", pad_style));
 
-        // Build right-side spans: center-dot separator + composer mode, then
-        // the multiline indicator.
+        // Trailing pad removed — right side starts flush so no visible gap
+        // separates the model name from the composer mode.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
         if let Some(mode) = info.mode_name {
-            right_spans.push(Span::styled(" · ", sep_style));
+            right_spans.push(Span::styled("· ", sep_style));
             right_spans.push(Span::styled(mode.replace('-', " ").to_owned(), model_style));
         }
         if info.multiline {
@@ -3460,9 +3466,10 @@ impl PromptWidget {
             let right_line = Line::from(right_spans);
             let right_w = right_line.width() as u16;
             let left_line = Line::from(left_spans);
-            let left_w = (left_line.width() as u16).min(area.width.saturating_sub(right_w + 1));
-            // Right-align both parts: [left][gap][right]
-            let total_w = left_w + 1 + right_w; // 1 for gap
+            let left_w = (left_line.width() as u16).min(area.width.saturating_sub(right_w));
+            // Left and right parts flush — no gap so the border ╰─╯ divider
+            // stays continuous where text does not cover it.
+            let total_w = left_w + right_w;
             let x = area.x + area.width.saturating_sub(total_w);
             buf.set_line_safe(x, area.y, &left_line, left_w);
             let rx = area.x + area.width.saturating_sub(right_w);

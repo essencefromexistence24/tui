@@ -228,47 +228,40 @@ impl AnimationSurface {
                     self.splash_font_index,
                     &self.rainbow,
                 );
-                self.render_controls(area, buf, background);
+                // render_controls commented out: the carousel uses full
+                // screen real-estate; navigation still works via ←/→ keys.
                 return;
             }
             AnimationKind::Matrix => {
                 self.render_matrix(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::GameOfLife => {
                 self.render_game_of_life(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Starfield => {
                 self.render_starfield(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Rain => {
                 self.render_rain(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Fire => {
                 self.render_fire(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Plasma => {
                 self.render_plasma(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Waves => {
                 self.render_waves(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Fireworks => {
                 self.render_fireworks(area, buf, background, elapsed_ms);
-                self.render_controls(area, buf, background);
                 return;
             }
             AnimationKind::Train => {}
@@ -279,9 +272,13 @@ impl AnimationSurface {
             train_loop_progress(area.width, elapsed_ms)
         };
         let train_x = area.width as i32 + 6 - progress;
-        let content_height = (SMOKE[0].len() + TRAIN.len() + 2) as i32;
+        // Skip the last undercarriage row so the track sits right under the
+        // wheel row — no gap between tyres and railway.
+        let visible_rows = TRAIN.len().saturating_sub(1);
+        let content_height = (SMOKE[0].len() + visible_rows + 1) as i32;
         let top = ((area.height as i32 - content_height) / 2).max(0);
         let smoke = SMOKE[(elapsed_ms / 240) % SMOKE.len()];
+        let train_top = top + smoke.len() as i32;
 
         for (line_idx, line) in smoke.iter().enumerate() {
             self.render_train_line(
@@ -295,8 +292,7 @@ impl AnimationSurface {
             );
         }
 
-        let train_top = top + smoke.len() as i32 + 1;
-        for (line_idx, line) in TRAIN.iter().enumerate() {
+        for (line_idx, line) in TRAIN.iter().take(visible_rows).enumerate() {
             self.render_train_line(
                 area,
                 buf,
@@ -308,7 +304,9 @@ impl AnimationSurface {
             );
         }
 
-        let track_y = train_top + TRAIN.len() as i32;
+        // Track drawn right after the last rendered train row (the wheel
+        // row), so the wheels sit directly on the railway.
+        let track_y = train_top + visible_rows as i32;
         if track_y >= 0 && track_y < area.height as i32 {
             for x in 0..area.width {
                 let ch = if (x as usize + elapsed_ms / 300).is_multiple_of(4) {
@@ -322,9 +320,11 @@ impl AnimationSurface {
                 cell.set_style(Style::default().fg(color).bg(background));
             }
         }
-        self.render_controls(area, buf, background);
+        // Controls removed: the carousel fills the full left panel and
+        // navigation is handled via the keyboard shortcut layer (←/→).
     }
 
+    #[allow(dead_code)]
     fn render_controls(&self, area: Rect, buf: &mut Buffer, background: Color) {
         if area.height < 2 {
             return;

@@ -792,6 +792,9 @@ pub struct AppView {
     /// Whether the welcome screen prompt is currently capturing focus (user typed in it).
     /// When true, menu shortcuts like n/w/q are disabled and Escape unfocuses the prompt.
     pub welcome_prompt_focused: bool,
+    /// If set, the next new session opens directly into this DX view instead of
+    /// the normal Chat screen (←/→/↓ arrow shortcuts on the welcome screen).
+    pub welcome_post_new_view: Option<crate::dx::DxView>,
     /// Sticky flag: set once the user types in the welcome prompt, hides the
     /// tip for the rest of the session (even if the input is cleared).
     pub welcome_tip_typing_dismissed: bool,
@@ -1419,6 +1422,7 @@ impl AppView {
             slash_mru,
             command_tags,
             welcome_prompt_focused: true,
+            welcome_post_new_view: None,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -2544,6 +2548,7 @@ impl AppView {
                     session_picker_grouped: self.session_picker_grouped,
                     sp_source_filter: &mut self.session_picker_source_filter,
                     chat_mode: self.chat_mode,
+                    post_new_view: &mut self.welcome_post_new_view,
                 },
             ),
             ActiveView::Agent(id) => {
@@ -3185,6 +3190,9 @@ struct WelcomeInputCtx<'a> {
     /// Process-wide `--chat`: the session picker hides its source filter
     /// (conversations-only list), so `f` must not cycle it.
     chat_mode: bool,
+    /// When set, the next new session created by this welcome screen will
+    /// open directly into the given DX view (←/→/↓ shortcuts).
+    post_new_view: &'a mut Option<crate::dx::DxView>,
 }
 /// Welcome view input -- auth-state-aware routing.
 fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutcome {
@@ -3542,6 +3550,22 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 &['g', 'l', 'q'],
                 dispatch_access_gate_menu_action,
             );
+        }
+        if matches!(ctx.auth_state, AuthState::Done)
+            && ctx.prompt.text().trim().is_empty()
+        {
+            if key.code == KeyCode::Left && key.modifiers.is_empty() {
+                *ctx.post_new_view = Some(crate::dx::DxView::FileBrowser);
+                return InputOutcome::Action(Action::NewSession);
+            }
+            if key.code == KeyCode::Right && key.modifiers.is_empty() {
+                *ctx.post_new_view = Some(crate::dx::DxView::Editor);
+                return InputOutcome::Action(Action::NewSession);
+            }
+            if key.code == KeyCode::Down && key.modifiers.is_empty() {
+                *ctx.post_new_view = Some(crate::dx::DxView::Animation);
+                return InputOutcome::Action(Action::NewSession);
+            }
         }
         if matches!(ctx.auth_state, AuthState::Done)
             && key!(Enter).matches(key)

@@ -353,6 +353,23 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
             .registry_mut()
             .set_plugins_visible(!app.appearance.disable_plugins);
         agent.active_pane = ActivePane::Prompt;
+        // If the welcome screen requested a specific initial DX view (←/→/↓
+        // arrow shortcuts), switch to it now while we still hold &mut.
+        if let Some(view) = app.welcome_post_new_view.take() {
+            match view {
+                crate::dx::DxView::Editor => agent.dx_ui.editor.schedule_init(),
+                crate::dx::DxView::FileBrowser => agent.dx_ui.file_browser.ensure_initialized(),
+                crate::dx::DxView::Diff => agent.dx_ui.diff.open_and_refresh(),
+                crate::dx::DxView::Animation => {}
+                crate::dx::DxView::Chat => {}
+            }
+            agent.dx_ui.view = view;
+            // Arrow-shortcut Animation auto-dismisses to Chat after 3 s.
+            if view == crate::dx::DxView::Animation {
+                agent.dx_ui.intro_deadline =
+                    Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
+            }
+        }
     }
     switch_to_agent(app, agent_id, SwitchCause::New);
     if app.screen_mode.is_minimal() {

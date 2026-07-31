@@ -85,29 +85,6 @@ impl AgentView {
                     }
                     return InputOutcome::Changed;
                 }
-                // Notes context menu: clicking an item dispatches the action;
-                // clicking anywhere else closes it (then falls through so the
-                // underlying click still lands).
-                if self.dx_ui.sidebar.notes_menu.open {
-                    if let Some((item, _)) = self
-                        .dx_ui
-                        .sidebar
-                        .notes_menu
-                        .item_areas
-                        .iter()
-                        .enumerate()
-                        .find(|(_, area)| contains(**area))
-                    {
-                        self.dx_ui.sidebar.notes_menu.open = false;
-                        let action = match item {
-                            0 => Action::EnterRememberMode,
-                            1 => Action::EditNote,
-                            _ => Action::DeleteNote,
-                        };
-                        return InputOutcome::Action(action);
-                    }
-                    self.dx_ui.sidebar.notes_menu.open = false;
-                }
                 if let Some((section, _)) = self
                     .dx_ui
                     .sidebar
@@ -119,12 +96,9 @@ impl AgentView {
                     if section == crate::dx::sidebar::NOTES_SECTION
                         && self.dx_ui.sidebar.accordion_open[crate::dx::sidebar::NOTES_SECTION]
                     {
-                        // Clicked the notes box → open the Add/Edit/Delete menu.
-                        self.dx_ui.sidebar.notes_menu.open = true;
-                        self.dx_ui.sidebar.notes_menu.selected = 0;
-                    } else {
-                        self.dx_ui.sidebar.toggle_section(section);
+                        return InputOutcome::Action(Action::EditNote);
                     }
+                    self.dx_ui.sidebar.toggle_section(section);
                     return InputOutcome::Changed;
                 }
                 if contains(self.dx_ui.minimap.top_indicator) {
@@ -1285,22 +1259,6 @@ impl AgentView {
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_branch.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
-                // Notes menu hover → move the selection highlight.
-                if self.dx_ui.sidebar.notes_menu.open {
-                    let hovered = self
-                        .dx_ui
-                        .sidebar
-                        .notes_menu
-                        .item_areas
-                        .iter()
-                        .position(|area| area.contains((mouse.column, mouse.row).into()));
-                    if let Some(idx) = hovered {
-                        if self.dx_ui.sidebar.notes_menu.selected != idx {
-                            self.dx_ui.sidebar.notes_menu.selected = idx;
-                            changed = true;
-                        }
-                    }
-                }
                 changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {
                     let new_kill = self

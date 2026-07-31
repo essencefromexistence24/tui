@@ -842,7 +842,7 @@ impl AgentView {
         let prompt_style = PromptStyle {
             focused: prompt_focused,
             show_prefix: appearance.prompt.show_prefix,
-            vpad_top: 1,
+            vpad_top: 0,
             compact: appearance.prompt.compact,
             chrome: true,
             chrome_pad_left: layout_cfg.block_pad_left,
@@ -4285,11 +4285,21 @@ impl AgentView {
             .map(|rect| rect.y)
             .min()
             .unwrap_or(layout.prompt.y);
+            // Welcome→chat intro animation: auto-dismiss after the deadline.
+            if self.dx_ui.view == crate::dx::DxView::Animation
+                && let Some(dl) = self.dx_ui.intro_deadline
+                && std::time::Instant::now() >= dl
+            {
+                self.dx_ui.intro_deadline = None;
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            }
+            // Carousel uses only the left column so the sidebar stays
+            // alongside; content is centered within that panel.
             let animation_area = Rect {
-                x: full_area.x,
-                y: full_area.y,
-                width: full_area.width,
-                height: dropdown_top.saturating_sub(full_area.y),
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: dropdown_top.saturating_sub(area.y),
             };
             self.dx_ui.animation.render(animation_area, buf, &theme);
         }

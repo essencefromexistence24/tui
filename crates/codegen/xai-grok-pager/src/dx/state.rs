@@ -30,6 +30,9 @@ pub struct DxUiState {
     pub intro_enabled: bool,
     pub outro_enabled: bool,
     pub intro_seen: bool,
+    /// When `Some`, the Animation view was opened as a welcome→chat intro;
+    /// if this instant has passed the view snaps back to Chat automatically.
+    pub intro_deadline: Option<std::time::Instant>,
     pub file_browser: super::file_browser::FileBrowserSurface,
     pub menu: Option<super::menu::Menu>,
     pub editor: super::editor::EditorAdapter,
@@ -54,6 +57,7 @@ impl Default for DxUiState {
             intro_enabled: true,
             outro_enabled: true,
             intro_seen: false,
+            intro_deadline: None,
             file_browser: super::file_browser::FileBrowserSurface::default(),
             menu: None,
             editor: super::editor::EditorAdapter::new(),

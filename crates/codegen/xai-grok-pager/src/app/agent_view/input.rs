@@ -466,42 +466,6 @@ impl AgentView {
             self.dx_ui.view = crate::dx::DxView::Chat;
             return InputOutcome::Changed;
         }
-        // Esc closes the Notes context menu (and lets navigation keys move the
-        // selection while it is open).
-        if self.dx_ui.sidebar.notes_menu.open {
-            if let Event::Key(key) = ev
-                && key.kind != KeyEventKind::Release
-                && key.modifiers.is_empty()
-            {
-                match key.code {
-                    KeyCode::Esc => {
-                        self.dx_ui.sidebar.notes_menu.open = false;
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Up => {
-                        self.dx_ui.sidebar.notes_menu.selected =
-                            self.dx_ui.sidebar.notes_menu.selected.saturating_sub(1);
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Down => {
-                        let max = crate::dx::sidebar::NotesMenuState::ITEMS.len().saturating_sub(1);
-                        self.dx_ui.sidebar.notes_menu.selected =
-                            self.dx_ui.sidebar.notes_menu.selected.min(max).saturating_add(1).min(max);
-                        return InputOutcome::Changed;
-                    }
-                    KeyCode::Enter => {
-                        let action = match self.dx_ui.sidebar.notes_menu.selected {
-                            0 => Action::EnterRememberMode,
-                            1 => Action::EditNote,
-                            _ => Action::DeleteNote,
-                        };
-                        self.dx_ui.sidebar.notes_menu.open = false;
-                        return InputOutcome::Action(action);
-                    }
-                    _ => {}
-                }
-            }
-        }
         if let Event::Key(key) = ev
             && key.kind != KeyEventKind::Release
             && key.code == KeyCode::Char('2')

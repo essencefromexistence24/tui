@@ -111,10 +111,11 @@ pub fn render(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
+    // Transparent — no background fill. Only the lane markers and arrows
+    // are painted with their themed foreground colors.
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             buf[(x, y)].set_char(' ');
-            buf[(x, y)].set_bg(theme.bg_base);
         }
     }
     state.top_indicator = Rect::default();
@@ -188,7 +189,7 @@ pub fn render(
             } else {
                 "▴".to_string()
             },
-            Style::default().bg(theme.bg_base).fg(if above > 0 {
+            Style::default().fg(if above > 0 {
                 theme.accent_user
             } else {
                 theme.gray_dim
@@ -205,7 +206,7 @@ pub fn render(
             } else {
                 "▾".to_string()
             },
-            Style::default().bg(theme.bg_base).fg(if below > 0 {
+            Style::default().fg(if below > 0 {
                 theme.accent_user
             } else {
                 theme.gray_dim
@@ -236,7 +237,7 @@ pub fn render(
         } else {
             "━━━"
         };
-        let mut style = Style::default().fg(color).bg(theme.bg_base);
+        let mut style = Style::default().fg(color);
         if active {
             style = style.add_modifier(Modifier::BOLD);
         }
