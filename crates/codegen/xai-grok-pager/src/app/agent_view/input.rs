@@ -1568,7 +1568,7 @@ impl AgentView {
             self.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
                 entries: crate::views::modal::default_palette_entries(
                     self.sharing_enabled,
-                    self.prompt.slash_controller.screen_mode(),
+                    &self.prompt.slash_controller,
                 ),
                 state: crate::views::picker::PickerState::input_active(),
                 window: crate::views::modal_window::ModalWindowState::new(),
@@ -1690,7 +1690,7 @@ impl AgentView {
                 self.active_modal = Some(crate::views::modal::ActiveModal::CommandPalette {
                     entries: crate::views::modal::default_palette_entries(
                         self.sharing_enabled,
-                        self.prompt.slash_controller.screen_mode(),
+                        &self.prompt.slash_controller,
                     ),
                     state: crate::views::picker::PickerState::input_active(),
                     window: crate::views::modal_window::ModalWindowState::new(),
@@ -2478,7 +2478,7 @@ mod focus_gained_restore_tests {
         agent.active_modal = Some(ActiveModal::CommandPalette {
             entries: crate::views::modal::default_palette_entries(
                 false,
-                agent.prompt.slash_controller.screen_mode(),
+                &agent.prompt.slash_controller,
             ),
             state: crate::views::picker::PickerState::input_active(),
             window: crate::views::modal_window::ModalWindowState::new(),
