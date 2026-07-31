@@ -340,6 +340,11 @@ impl AgentView {
                     self.dx_ui.view = crate::dx::DxView::FileBrowser;
                     return InputOutcome::Changed;
                 }
+                if self.hit_diff_stats.contains(mouse.column, mouse.row) {
+                    self.dx_ui.diff.open_and_refresh();
+                    self.dx_ui.view = crate::dx::DxView::Diff;
+                    return InputOutcome::Changed;
+                }
                 if self.hit_badge.contains(mouse.column, mouse.row) {
                     self.todo.overlay.toggle();
                     self.todo.on_state_change();
@@ -1083,9 +1088,13 @@ impl AgentView {
                 if next_minimap_hover != self.dx_ui.minimap.hovered_turn {
                     self.dx_ui.minimap.hovered_turn = next_minimap_hover;
                     self.dx_ui.minimap.hovered_since = next_minimap_hover.map(|_| Instant::now());
+                    // Highlight the hovered turn without scrolling the
+                    // scrollback: jumping on hover shifts the minimap's
+                    // scroll, which would re-derive a different hovered turn
+                    // index every frame and keep resetting the hover timer so
+                    // the hover card never appears. Clicking still jumps.
                     if let Some(turn) = next_minimap_hover {
                         self.dx_ui.minimap.active_turn = Some(turn);
-                        self.scrollback.jump_to_turn(turn);
                     }
                 }
                 tracing::debug!(

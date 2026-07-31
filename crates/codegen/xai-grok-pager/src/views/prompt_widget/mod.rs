@@ -3408,7 +3408,10 @@ impl PromptWidget {
             left_spans.push(Span::styled(warning.to_owned(), warning_style));
             left_spans.push(Span::styled(" · ", sep_style));
         }
-        left_spans.push(Span::styled(info.model_name, model_style));
+        left_spans.push(Span::styled(
+            info.model_name.replace('-', " "),
+            model_style,
+        ));
         for flag in info.flags {
             left_spans.push(Span::styled(" · ", sep_style));
             let mut style = if let Some(color) = flag.color {
@@ -3442,7 +3445,7 @@ impl PromptWidget {
         let mut right_spans: Vec<Span<'static>> = Vec::new();
         if let Some(mode) = info.mode_name {
             right_spans.push(Span::styled(" · ", sep_style));
-            right_spans.push(Span::styled(mode.to_owned(), model_style));
+            right_spans.push(Span::styled(mode.replace('-', " ").to_owned(), model_style));
         }
         if info.multiline {
             if !right_spans.is_empty() {

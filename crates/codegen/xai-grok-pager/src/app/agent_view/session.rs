@@ -116,6 +116,7 @@ impl AgentView {
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             context_state: None,
+            turn_start_total_tokens: None,
             chat_kind: false,
             app_chat_mode: false,
             credit_balance: None,
@@ -195,6 +196,7 @@ impl AgentView {
             hit_queue_badge: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
+            hit_diff_stats: Default::default(),
             hit_follow_indicator: Default::default(),
             hit_branch: Default::default(),
             hit_cwd: Default::default(),
@@ -465,6 +467,9 @@ impl AgentView {
         {
             self.expect_send_now_cancel = None;
         }
+        // Baseline the context total so the turn footer shows this turn's
+        // token delta instead of the accumulated context.
+        self.turn_start_total_tokens = self.context_state.as_ref().map(|c| c.used);
         self.session.start_turn(&mut self.scrollback);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the

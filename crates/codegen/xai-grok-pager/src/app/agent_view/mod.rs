@@ -873,6 +873,10 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
+    /// `context_state.used` snapshot taken at turn start, so the turn footer
+    /// can report the tokens consumed by *this* message (delta), not the whole
+    /// accumulated context.
+    pub turn_start_total_tokens: Option<u64>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
     /// resume). Suppresses Build credits / local sampler context telemetry so the
     /// status bar and prompt never imply remote usage from wrong metrics.
@@ -1083,6 +1087,8 @@ pub struct AgentView {
     pub hit_queue_badge: HitArea,
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
+    /// Diff stats (+N, -M) in the status bar (click to open the diff screen).
+    pub hit_diff_stats: HitArea,
     pub hit_follow_indicator: HitArea,
     /// Git branch in the status bar (click to open the code editor).
     pub hit_branch: HitArea,

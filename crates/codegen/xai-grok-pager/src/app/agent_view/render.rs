@@ -1451,6 +1451,7 @@ impl AgentView {
         self.hit_plan_button.rect = areas.get("plan").copied();
         self.hit_queue_badge.rect = areas.get("queue").copied();
         self.hit_badge.rect = areas.get("badge").copied();
+        self.hit_diff_stats.rect = areas.get("dx_diff_stats").copied();
         // Render CWD/path/branch on the left side of the bottom bar
         let cwd_home = std::env::var("HOME").ok();
         let cwd_display = self.session.cwd.display().to_string();
@@ -1468,12 +1469,14 @@ impl AgentView {
         let mut cwd_spans: Vec<Span> = Vec::new();
         let mut branch_width = 0u16;
         if let Some(b) = cwd_branch {
-            let icon = crate::git_info::branch_icon();
+            // The branch glyph (⎇ / ≡) read as a stray "hamburger" symbol, so
+            // it is commented out for now — only the branch name is shown.
+            // let icon = crate::git_info::branch_icon();
             let git_style = Style::default()
                 .fg(theme.text_primary)
                 .bg(theme.bg_base)
                 .add_modifier(ratatui::style::Modifier::DIM);
-            let branch_label = format!("{icon} {b}");
+            let branch_label = b;
             branch_width = branch_label.width() as u16;
             cwd_spans.push(Span::styled(branch_label, git_style));
             cwd_spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
@@ -2196,8 +2199,8 @@ impl AgentView {
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
         let model_label_base = match self.session.models.reasoning_effort {
-            Some(eff) => format!("{model_id} ({eff})"),
-            None => model_id,
+            Some(eff) => format!("{} ({eff})", model_id.replace('-', " ")),
+            None => model_id.replace('-', " "),
         };
         let model_label = model_label_base;
         let composer_mode = if effective_plan { "Plan" } else { "Build" };
@@ -4451,7 +4454,7 @@ impl AgentView {
             tasks,
             workflows,
             prompts,
-            vec!["No Notes Yet".to_string()],
+            sidebar_notes_lines(),
             subagents,
             vec!["No LSP Servers Yet".to_string()],
             plugins,
@@ -4497,6 +4500,29 @@ impl AgentView {
             .unwrap_or_else(|| "Waiting for an assistant response…".to_string());
         Some((title, response))
     }
+}
+/// Memory notes for the right panel's Notes section: reads
+/// `<grok_home>/memory/MEMORY.md` and shows its first lines (up to a cap).
+/// Falls back to an empty-state message when the file is missing or blank.
+fn sidebar_notes_lines() -> Vec<String> {
+    const MAX_LINES: usize = 8;
+    let path = xai_grok_tools::util::grok_home::grok_home()
+        .join("memory")
+        .join("MEMORY.md");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return vec!["No Notes Yet".to_string()];
+    };
+    let mut lines: Vec<String> = content
+        .lines()
+        .map(str::trim_end)
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .take(MAX_LINES)
+        .collect();
+    if lines.is_empty() {
+        lines.push("No Notes Yet".to_string());
+    }
+    lines
 }
 /// Pad `msg` for the toast slot, truncating with a trailing ellipsis when it
 /// cannot fit in `avail_width` columns (long clipboard toasts embed backup

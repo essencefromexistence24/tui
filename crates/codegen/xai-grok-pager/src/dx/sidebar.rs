@@ -56,6 +56,31 @@ pub struct SidebarUiState {
     pub panel_area: Rect,
     pub section_areas: [Rect; SECTION_COUNT],
     pub row_areas: Vec<(usize, usize, Rect)>,
+    /// Right-click-style context menu for the Notes box (Add / Edit / Delete).
+    pub notes_menu: NotesMenuState,
+}
+
+/// Context menu shown when the Notes box is clicked.
+#[derive(Debug, Clone)]
+pub struct NotesMenuState {
+    pub open: bool,
+    pub selected: usize,
+    /// Hit-test rects for the three menu items (painted by the last render).
+    pub item_areas: [Rect; 3],
+}
+
+impl NotesMenuState {
+    pub const ITEMS: [&'static str; 3] = ["Add note", "Edit note", "Delete note"];
+}
+
+impl Default for NotesMenuState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            selected: 0,
+            item_areas: [Rect::default(); 3],
+        }
+    }
 }
 
 impl Default for SidebarUiState {
@@ -66,6 +91,7 @@ impl Default for SidebarUiState {
             panel_area: Rect::default(),
             section_areas: [Rect::default(); SECTION_COUNT],
             row_areas: Vec::new(),
+            notes_menu: NotesMenuState::default(),
         }
     }
 }
@@ -181,6 +207,7 @@ pub fn render(
         .min(content_height.saturating_sub(sections_area.height));
 
     let mut content_y = 0u16;
+    let mut notes_box_area: Option<Rect> = None;
     for (section_index, (section, section_height)) in
         model.sections.iter().zip(heights.iter()).enumerate()
     {
@@ -189,27 +216,18 @@ pub fn render(
         content_y = content_y.saturating_add(*section_height);
         if section_index == NOTES_SECTION && open && section_top >= state.scroll {
             let notes_y = sections_area.y + section_top - state.scroll;
-            let notes_height =
-                (*section_height).min(sections_area.bottom().saturating_sub(notes_y));
+            let notes_height = (*section_height).min(sections_area.bottom().saturating_sub(notes_y));
             if notes_height >= 3 {
-                let notes_area = Rect {
+                // Deferred until after the row loop so its borders paint on
+                // top of the following section's header (previously the next
+                // header overwrote the notes box's left/bottom border with a
+                // different color).
+                notes_box_area = Some(Rect {
                     x: sections_area.x + 1,
                     y: notes_y,
                     width: sections_area.width.saturating_sub(3),
                     height: notes_height,
-                };
-                state.section_areas[section_index] = notes_area;
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_type(ratatui::widgets::BorderType::Rounded)
-                    .border_style(Style::default().fg(theme.gray_dim))
-                    .title(Span::styled(
-                        " Notes ",
-                        Style::default()
-                            .fg(theme.text_primary)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                    .render(notes_area, buf);
+                });
             }
         }
         for row in 0..*section_height {
@@ -291,6 +309,34 @@ pub fn render(
         }
     }
 
+    // Render the Notes box on top of everything (borders must not be
+    // overwritten by the following section's header row).
+    if let Some(notes_area) = notes_box_area {
+        state.section_areas[NOTES_SECTION] = notes_area;
+        Block::default()
+            .borders(Borders::ALL)
+            .border_type(ratatui::widgets::BorderType::Rounded)
+            .border_style(Style::default().fg(theme.gray_dim))
+            .title(Span::styled(
+                " Notes ",
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .render(notes_area, buf);
+    }
+
+    // Notes context menu (Add / Edit / Delete), anchored under the notes box.
+    if state.notes_menu.open {
+        if let Some(notes_area) = notes_box_area {
+            render_notes_menu(state, theme, notes_area, buf);
+        } else {
+            state.notes_menu.open = false;
+        }
+    } else {
+        state.notes_menu.item_areas = [Rect::default(); 3];
+    }
+
     if content_height > sections_area.height && sections_area.height > 0 {
         let x = sections_area.right().saturating_sub(1);
         let thumb_height = ((sections_area.height as u32 * sections_area.height as u32)
@@ -324,6 +370,60 @@ pub fn render(
         Style::default().fg(theme.gray),
     ))
     .render(chunks[5], buf);
+}
+
+/// Render the Notes context menu (Add / Edit / Delete) below the notes box,
+/// publishing each item's hit rect so the pager's mouse handler can dispatch
+/// the chosen action.
+fn render_notes_menu(state: &mut SidebarUiState, theme: &Theme, anchor: Rect, buf: &mut Buffer) {
+    use crate::dx::sidebar::NotesMenuState;
+    let items = NotesMenuState::ITEMS;
+    let menu_w = 16u16;
+    let menu_h = (items.len() as u16).min(anchor.width.max(menu_w) / 1).max(3);
+    let x = anchor.x;
+    let y = anchor.bottom().saturating_add(1);
+    let width = menu_w.min(anchor.width.saturating_add(4));
+    let menu_rect = Rect::new(x, y, width, items.len() as u16 + 2);
+    // Keep the menu inside the panel.
+    let menu_rect = if menu_rect.bottom() > buf.area.bottom() {
+        Rect {
+            y: anchor.y.saturating_sub(menu_rect.height),
+            ..menu_rect
+        }
+    } else {
+        menu_rect
+    };
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(theme.gray_dim))
+        .render(menu_rect, buf);
+    for (i, item) in items.iter().enumerate() {
+        let row = Rect {
+            x: menu_rect.x + 1,
+            y: menu_rect.y + 1 + i as u16,
+            width: menu_rect.width.saturating_sub(2),
+            height: 1,
+        };
+        let selected = i == state.notes_menu.selected;
+        let style = if selected {
+            Style::default()
+                .fg(theme.bg)
+                .bg(theme.accent_user)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.text_primary)
+        };
+        for cx in row.x..row.right() {
+            buf[(cx, row.y)].set_bg(if selected {
+                theme.accent_user
+            } else {
+                theme.bg_dark
+            });
+        }
+        Paragraph::new(Span::styled(format!(" {item}"), style)).render(row, buf);
+        state.notes_menu.item_areas[i] = row;
+    }
 }
 
 fn wrapped_rows(text: &str, width: u16) -> u16 {

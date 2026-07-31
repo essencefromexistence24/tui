@@ -280,17 +280,41 @@ impl AgentView {
                 )
             })
             .count();
-        let elapsed = match &event {
-            crate::scrollback::blocks::SessionEvent::TurnCompleted {
-                elapsed: Some(elapsed),
-            } => crate::util::format_duration(*elapsed),
-            _ => String::new(),
+        let elapsed_opt = match &event {
+            crate::scrollback::blocks::SessionEvent::TurnCompleted { elapsed } => *elapsed,
+            _ => None,
         };
-        let footer = if elapsed.is_empty() {
-            format!("{model} · {tools} tools")
-        } else {
-            format!("{model} · {tools} tools · {elapsed}")
-        };
+        // Per-turn token count: the context total grew by exactly this
+        // message's tokens since the turn started. Rate is tokens over the
+        // turn's wall clock when both are known.
+        let current_total = self.context_state.as_ref().map(|c| c.used);
+        let baseline = self.turn_start_total_tokens;
+        let tokens = current_total.map(|used| match baseline {
+            Some(start) => used.saturating_sub(start),
+            None => used,
+        });
+        let tokens = tokens.filter(|&n| n > 0);
+        let mut parts = vec![model];
+        if let Some(tokens) = tokens {
+            let secs = elapsed_opt
+                .map(|d| d.as_secs_f64().max(1e-9))
+                .unwrap_or(0.0);
+            let rate = if secs > 0.0 {
+                tokens as f64 / secs
+            } else {
+                0.0
+            };
+            parts.push(format!(
+                "{} tok ({:.1} t/s)",
+                crate::views::turn_status::format_tokens_short(tokens),
+                rate
+            ));
+        }
+        parts.push(format!("{tools} tools"));
+        if let Some(d) = elapsed_opt {
+            parts.push(crate::util::format_duration(d));
+        }
+        let footer = parts.join(" · ");
         let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
             event, stop_hooks, prompt_id,
         )
