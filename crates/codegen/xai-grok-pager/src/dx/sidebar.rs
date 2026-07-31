@@ -239,7 +239,7 @@ pub fn render(
                 let count = section
                     .lines
                     .iter()
-                    .filter(|line| line.as_str() != "—")
+                    .filter(|line| !line.trim().is_empty() && !line.starts_with("No "))
                     .count();
                 let label = if count > 0 {
                     format!("{chevron} {} · {count}", section.name)
@@ -259,8 +259,8 @@ pub fn render(
                     .lines
                     .get(body_index)
                     .map(String::as_str)
-                    .unwrap_or("—");
-                let empty = line == "—" || line.starts_with("No ");
+                    .unwrap_or("");
+                let empty = line.trim().is_empty() || line.starts_with("No ");
                 let style = if empty {
                     Style::default()
                         .fg(theme.gray)

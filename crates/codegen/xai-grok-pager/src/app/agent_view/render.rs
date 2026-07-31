@@ -2167,13 +2167,6 @@ impl AgentView {
                 bold: false,
             });
         }
-        if self.session.is_yolo() && !effective_plan {
-            mode_flags_vec.push(PromptFlag {
-                text: "always-approve",
-                color: None,
-                bold: false,
-            });
-        }
         if self.auto_flag_visible(effective_plan) {
             mode_flags_vec.push(PromptFlag {
                 text: "auto",
@@ -4425,7 +4418,7 @@ impl AgentView {
                 .collect()
         };
         let subagents = if self.subagent_views.is_empty() {
-            vec!["—".to_string()]
+            vec!["No Subagents Yet".to_string()]
         } else {
             self.subagent_views
                 .keys()
@@ -4445,7 +4438,7 @@ impl AgentView {
                     .collect::<Vec<_>>()
             })
             .filter(|lines| !lines.is_empty())
-            .unwrap_or_else(|| vec!["—".to_string()]);
+            .unwrap_or_else(|| vec!["No Plugins Yet".to_string()]);
         let mcp = self
             .mcp_init_progress
             .as_ref()
@@ -4455,14 +4448,14 @@ impl AgentView {
                     progress.connected, progress.total
                 )]
             })
-            .unwrap_or_else(|| vec!["—".to_string()]);
+            .unwrap_or_else(|| vec!["No MCP Servers Yet".to_string()]);
         let bodies = [
             tasks,
             workflows,
             prompts,
             vec!["No Notes Yet".to_string()],
             subagents,
-            vec!["—".to_string()],
+            vec!["No LSP Servers Yet".to_string()],
             plugins,
             mcp,
         ];

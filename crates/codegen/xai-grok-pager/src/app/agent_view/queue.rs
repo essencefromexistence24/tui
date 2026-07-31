@@ -284,9 +284,13 @@ impl AgentView {
             crate::scrollback::blocks::SessionEvent::TurnCompleted {
                 elapsed: Some(elapsed),
             } => crate::util::format_duration(*elapsed),
-            _ => "—".to_string(),
+            _ => String::new(),
         };
-        let footer = format!("{model} · — tok (— t/s) · $— · {tools} tools · {elapsed}");
+        let footer = if elapsed.is_empty() {
+            format!("{model} · {tools} tools")
+        } else {
+            format!("{model} · {tools} tools · {elapsed}")
+        };
         let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
             event, stop_hooks, prompt_id,
         )
