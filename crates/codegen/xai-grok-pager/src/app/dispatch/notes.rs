@@ -38,6 +38,55 @@ pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
+/// Edit the memory note: load `MEMORY.md` into the prompt and enter remember
+/// mode so the user can amend it and press Enter to save (same submit path as
+/// a fresh note, which routes through LLM rewrite + save).
+pub(super) fn dispatch_edit_note(app: &mut AppView) -> Vec<Effect> {
+    with_active_agent(app, |agent| {
+        agent.prompt_input_mode = PromptInputMode::Remember;
+        let path = memory_notes_path();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let text = text.trim().to_string();
+        agent.prompt.set_text(&text);
+        if text.is_empty() {
+            agent
+                .scrollback
+                .push_block(RenderBlock::system("No memory note to edit yet.".to_string()));
+        }
+    });
+    vec![]
+}
+
+/// Delete the memory note: clear `MEMORY.md` and surface a confirmation.
+pub(super) fn dispatch_delete_note(app: &mut AppView) -> Vec<Effect> {
+    with_active_agent(app, |agent| {
+        let path = memory_notes_path();
+        let existed = path.exists();
+        match std::fs::write(&path, "") {
+            Ok(()) => {
+                agent.scrollback.push_block(RenderBlock::system(if existed {
+                    "Memory note deleted.".to_string()
+                } else {
+                    "No memory note to delete.".to_string()
+                }));
+            }
+            Err(error) => {
+                agent.scrollback.push_block(RenderBlock::system(format!(
+                    "Couldn't delete memory note: {error}"
+                )));
+            }
+        }
+    });
+    vec![]
+}
+
+/// Path to the global memory note file (`<grok_home>/memory/MEMORY.md`).
+fn memory_notes_path() -> std::path::PathBuf {
+    xai_grok_tools::util::grok_home::grok_home()
+        .join("memory")
+        .join("MEMORY.md")
+}
+
 /// Send feedback text to the server. Shows a thank-you message immediately
 /// and fires the HTTP POST as a background effect.
 pub(super) fn dispatch_send_feedback(app: &mut AppView, text: String) -> Vec<Effect> {

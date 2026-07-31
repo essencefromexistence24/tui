@@ -1158,14 +1158,10 @@ impl AgentView {
             watchers,
             parked,
         );
-        let prompt_gap = if appearance.prompt.compact
-            || (_turn_status_active && !appearance.turn_status.gap)
-            || area.height <= agent::SHORT_TERMINAL_ROWS
-        {
-            0
-        } else {
-            1
-        };
+        // The gap row above the chat input used to host the scroll-to-bottom
+        // "▼" indicator. It is now reclaimed by the scrollback so messages get
+        // every available row (the indicator rendering is commented out above).
+        let prompt_gap = 0u16;
         let voice_recording_height = if voice_listening { 1 } else { 0 };
         let _tool_usage_height = 0u16;
         let btw_height =
@@ -1721,59 +1717,65 @@ impl AgentView {
                 }
             }
         }
-        if self.block_viewer.is_none() && !search_active {
-            use crate::appearance::FollowIndicator;
-            let gap_y = layout.scrollback.y + layout.scrollback.height;
-            let gap_x = layout.scrollback.x;
-            let gap_w = layout.scrollback.width;
-            let mut content_line_y: Option<u16> = None;
-            if appearance.scrollback.display.line_under_last_entry && !self.scrollback.is_empty() {
-                let (scroll_offset, _, total_height) = self.scrollback.scroll_info();
-                let content_end_screen = u16::try_from(
-                    layout.scrollback.y as usize + total_height.saturating_sub(scroll_offset),
-                )
-                .unwrap_or(u16::MAX);
-                if content_end_screen <= gap_y && content_end_screen >= layout.scrollback.y {
-                    let line_y = content_end_screen;
-                    content_line_y = Some(line_y);
-                    let line_x = gap_x + 3;
-                    let line_end = (gap_x + gap_w).saturating_sub(2);
-                    let line_style = ratatui::style::Style::default().fg(theme.bg_light);
-                    for x in line_x..line_end {
-                        if let Some(cell) = buf.cell_mut((x, line_y)) {
-                            cell.set_symbol("╌");
-                            cell.set_style(line_style);
-                        }
-                    }
-                }
-            }
-            let show_indicator = appearance.scrollback.scroll.follow_indicator
-                != FollowIndicator::None
-                && !self.scrollback.is_follow_mode()
-                && self.scrollback.has_content_below()
-                && content_line_y.is_none();
-            if show_indicator {
-                let center_x = gap_x + gap_w / 2;
-                let indicator_style =
-                    ratatui::style::Style::default().fg(if self.hit_follow_indicator.hovered {
-                        theme.gray_bright
-                    } else {
-                        theme.gray
-                    });
-                if let Some(cell) = buf.cell_mut((center_x, gap_y)) {
-                    cell.set_symbol("▼");
-                    cell.set_style(indicator_style);
-                }
-                self.hit_follow_indicator.set(Some(Rect::new(
-                    center_x.saturating_sub(1),
-                    gap_y,
-                    3,
-                    1,
-                )));
-            } else {
-                self.hit_follow_indicator.clear();
-            }
-        }
+        // The scroll-to-bottom "▼" indicator (and the "╌" content-end line) used
+        // to occupy the gap row above the chat input. Commented out: the row is
+        // now reclaimed by the scrollback (`prompt_gap` is forced to 0 below) so
+        // every column is used for rendering messages. Clicking still scrolls to
+        // bottom via keys; the stale hit rect is cleared each frame.
+        // if self.block_viewer.is_none() && !search_active {
+        //     use crate::appearance::FollowIndicator;
+        //     let gap_y = layout.scrollback.y + layout.scrollback.height;
+        //     let gap_x = layout.scrollback.x;
+        //     let gap_w = layout.scrollback.width;
+        //     let mut content_line_y: Option<u16> = None;
+        //     if appearance.scrollback.display.line_under_last_entry && !self.scrollback.is_empty() {
+        //         let (scroll_offset, _, total_height) = self.scrollback.scroll_info();
+        //         let content_end_screen = u16::try_from(
+        //             layout.scrollback.y as usize + total_height.saturating_sub(scroll_offset),
+        //         )
+        //         .unwrap_or(u16::MAX);
+        //         if content_end_screen <= gap_y && content_end_screen >= layout.scrollback.y {
+        //             let line_y = content_end_screen;
+        //             content_line_y = Some(line_y);
+        //             let line_x = gap_x + 3;
+        //             let line_end = (gap_x + gap_w).saturating_sub(2);
+        //             let line_style = ratatui::style::Style::default().fg(theme.bg_light);
+        //             for x in line_x..line_end {
+        //                 if let Some(cell) = buf.cell_mut((x, line_y)) {
+        //                     cell.set_symbol("╌");
+        //                     cell.set_style(line_style);
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     let show_indicator = appearance.scrollback.scroll.follow_indicator
+        //         != FollowIndicator::None
+        //         && !self.scrollback.is_follow_mode()
+        //         && self.scrollback.has_content_below()
+        //         && content_line_y.is_none();
+        //     if show_indicator {
+        //         let center_x = gap_x + gap_w / 2;
+        //         let indicator_style =
+        //             ratatui::style::Style::default().fg(if self.hit_follow_indicator.hovered {
+        //                 theme.gray_bright
+        //             } else {
+        //                 theme.gray
+        //             });
+        //         if let Some(cell) = buf.cell_mut((center_x, gap_y)) {
+        //             cell.set_symbol("▼");
+        //             cell.set_style(indicator_style);
+        //         }
+        //         self.hit_follow_indicator.set(Some(Rect::new(
+        //             center_x.saturating_sub(1),
+        //             gap_y,
+        //             3,
+        //             1,
+        //         )));
+        //     } else {
+        //         self.hit_follow_indicator.clear();
+        //     }
+        // }
+        self.hit_follow_indicator.clear();
         if let Some(msg) = self.active_toast_message() {
             let sb = layout.scrollback;
             if let Some(toast_text) = fit_toast_text(msg, sb.width) {

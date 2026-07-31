@@ -708,6 +708,10 @@ pub enum Action {
     SendFeedback(String),
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
+    /// Edit the memory note: load MEMORY.md into the prompt in remember mode.
+    EditNote,
+    /// Delete the memory note (clears MEMORY.md).
+    DeleteNote,
     /// Send a remember note from # mode. Routes through LLM rewrite when a
     /// session is active; falls back to direct save otherwise.
     SendRememberNote(String),

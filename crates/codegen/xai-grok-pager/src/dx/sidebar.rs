@@ -378,21 +378,15 @@ pub fn render(
 fn render_notes_menu(state: &mut SidebarUiState, theme: &Theme, anchor: Rect, buf: &mut Buffer) {
     use crate::dx::sidebar::NotesMenuState;
     let items = NotesMenuState::ITEMS;
-    let menu_w = 16u16;
-    let menu_h = (items.len() as u16).min(anchor.width.max(menu_w) / 1).max(3);
-    let x = anchor.x;
-    let y = anchor.bottom().saturating_add(1);
-    let width = menu_w.min(anchor.width.saturating_add(4));
-    let menu_rect = Rect::new(x, y, width, items.len() as u16 + 2);
-    // Keep the menu inside the panel.
-    let menu_rect = if menu_rect.bottom() > buf.area.bottom() {
-        Rect {
+    let width = 16u16.min(anchor.width.saturating_add(4));
+    let mut menu_rect = Rect::new(anchor.x, anchor.bottom().saturating_add(1), width, items.len() as u16 + 2);
+    // Keep the menu inside the panel (flip above the box when it would clip).
+    if menu_rect.bottom() > buf.area.bottom() {
+        menu_rect = Rect {
             y: anchor.y.saturating_sub(menu_rect.height),
             ..menu_rect
-        }
-    } else {
-        menu_rect
-    };
+        };
+    }
     Block::default()
         .borders(Borders::ALL)
         .border_type(ratatui::widgets::BorderType::Rounded)
@@ -408,7 +402,7 @@ fn render_notes_menu(state: &mut SidebarUiState, theme: &Theme, anchor: Rect, bu
         let selected = i == state.notes_menu.selected;
         let style = if selected {
             Style::default()
-                .fg(theme.bg)
+                .fg(theme.bg_dark)
                 .bg(theme.accent_user)
                 .add_modifier(Modifier::BOLD)
         } else {
