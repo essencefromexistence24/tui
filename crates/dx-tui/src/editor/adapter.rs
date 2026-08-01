@@ -81,6 +81,8 @@ pub struct EditorAdapter {
     editor: Option<Editor>,
     needs_init: bool,
     last_cursor: Option<(Position, crossterm::cursor::SetCursorStyle)>,
+    pending_theme: Option<String>,
+    last_applied_theme: Option<String>,
 }
 
 impl EditorAdapter {
@@ -89,6 +91,8 @@ impl EditorAdapter {
             editor: None,
             needs_init: false,
             last_cursor: None,
+            pending_theme: None,
+            last_applied_theme: None,
         }
     }
 
@@ -139,6 +143,10 @@ impl EditorAdapter {
                 editor.focus_file_explorer();
                 // Drain async explorer init so the tree is ready on first paint.
                 let _ = editor.process_async_messages();
+                // Apply a theme requested before the editor finished init.
+                if let Some(theme) = self.pending_theme.take() {
+                    editor.apply_theme_external(&theme);
+                }
                 self.editor = Some(editor);
                 self.needs_init = false;
                 Ok(())
@@ -236,6 +244,22 @@ impl EditorAdapter {
 
     pub fn is_initialized(&self) -> bool {
         self.editor.is_some()
+    }
+
+    /// Apply a built-in editor theme so the code editor follows the host
+    /// pager's active theme. If the editor is not initialized yet the theme
+    /// is queued and applied once initialization completes. Re-applying the
+    /// same theme is a no-op.
+    pub fn apply_theme(&mut self, key_or_name: &str) {
+        if self.last_applied_theme.as_deref() == Some(key_or_name) {
+            return;
+        }
+        self.last_applied_theme = Some(key_or_name.to_string());
+        if let Some(editor) = &mut self.editor {
+            editor.apply_theme_external(key_or_name);
+        } else {
+            self.pending_theme = Some(key_or_name.to_string());
+        }
     }
 
     #[allow(dead_code)]

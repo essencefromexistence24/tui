@@ -28,6 +28,32 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
+
+/// Editor embedded-theme names (mirror of `dx-editor`'s `themes/*.json`).
+const EDITOR_THEME_NAMES: &[&str] = &[
+    "dark",
+    "light",
+    "high-contrast",
+    "nostalgia",
+    "terminal",
+    "vercel",
+    "dracula",
+    "nord",
+    "solarized-dark",
+];
+
+/// Map the active pager theme onto the DX editor's own embedded theme
+/// catalog. A theme name that exists in both catalogs (e.g. `vercel`)
+/// maps directly; every other theme snaps to the editor's `dark` or
+/// `light` by background polarity.
+fn editor_theme_for(theme: &Theme) -> &'static str {
+    if let Some(name) = Theme::current_dx()
+        && let Some(matched) = EDITOR_THEME_NAMES.iter().find(|n| **n == name)
+    {
+        return matched;
+    }
+    if theme.is_dark() { "dark" } else { "light" }
+}
 use std::collections::HashSet;
 use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
@@ -742,6 +768,11 @@ impl AgentView {
             if let Err(error) = self.dx_ui.editor.tick() {
                 tracing::error!(%error, "DX editor tick failed");
             }
+            // Full theme sync: the code editor follows the global pager
+            // theme by applying its own closest embedded theme. Names that
+            // exist in both catalogs match directly; everything else snaps
+            // to the editor's dark or light theme by background polarity.
+            self.dx_ui.editor.apply_theme(editor_theme_for(&theme));
             self.dx_ui.editor.render(full_area, buf);
             let cursor = self
                 .dx_ui

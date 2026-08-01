@@ -39,6 +39,7 @@ use mlua::{ObjectLike, Table};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Color,
     text::Line,
     widgets::{Paragraph, Widget, Wrap},
 };
@@ -47,12 +48,212 @@ use tokio::sync::mpsc;
 
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
+/// Format a ratatui color as a YAZI/Lua TOML hex string, or `None` when the
+/// color carries no paint (Reset / named colors we cannot round-trip).
+fn hex(color: Color) -> Option<String> {
+    match color {
+        Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
+        _ => None,
+    }
+}
+
+/// Build a TOML theme override that maps the active pager palette onto the
+/// YAZI file-browser theme. Only color-bearing fields are emitted; the
+/// layout symbols, strings, and syntect path keep the embedded defaults.
+fn fb_theme_override(theme: &crate::theme::Theme) -> String {
+    let style = |fg: Option<String>, bg: Option<String>, bold: bool| {
+        let mut out = String::from("{");
+        let mut first = true;
+        for (key, value) in [("fg", fg), ("bg", bg)] {
+            if let Some(value) = value {
+                if !first {
+                    out.push_str(", ");
+                }
+                out.push_str(key);
+                out.push_str(" = \"");
+                out.push_str(&value);
+                out.push('"');
+                first = false;
+            }
+        }
+        if bold {
+            if !first {
+                out.push_str(", ");
+            }
+            out.push_str("bold = true");
+        }
+        out.push('}');
+        out
+    };
+    let hex = |c: Color| hex(c);
+    let bg = hex(theme.bg_base);
+    let bg_hl = hex(theme.bg_highlight);
+    let fg = hex(theme.text_primary);
+    let muted = hex(theme.gray);
+    let dim = hex(theme.gray_dim);
+    let accent = hex(theme.accent_user);
+    let ok = hex(theme.accent_success);
+    let err = hex(theme.accent_error);
+    let warn = hex(theme.warning);
+
+    format!(
+        r#"
+[app]
+overall = {app}
+
+[mgr]
+cwd = {cwd}
+find_keyword = {find_kw}
+find_position = {find_pos}
+symlink_target = {symlink}
+marker_copied = {mcopied}
+marker_cut = {mcut}
+marker_marked = {mmarked}
+marker_selected = {mselected}
+count_copied = {ccopied}
+count_cut = {ccut}
+count_selected = {cselected}
+border_style = {border}
+
+[tabs]
+active = {tabs_active}
+inactive = {tabs_inactive}
+
+[mode]
+normal_main = {mode_main}
+normal_alt = {mode_alt}
+select_main = {select_main}
+select_alt = {select_alt}
+unset_main = {unset_main}
+unset_alt = {unset_alt}
+
+[indicator]
+parent = {{ reversed = true }}
+current = {{ reversed = true }}
+preview = {{ underline = true }}
+
+[status]
+overall = {status_overall}
+perm_sep = {perm_sep}
+perm_type = {perm_type}
+perm_read = {perm_read}
+perm_write = {perm_write}
+perm_exec = {perm_exec}
+progress_label = {{ bold = true }}
+progress_normal = {progress_normal}
+progress_error = {progress_error}
+
+[which]
+cols = 3
+mask = {which_mask}
+cand = {which_cand}
+rest = {which_rest}
+desc = {which_desc}
+
+[confirm]
+border = {border}
+title = {title}
+body = {body}
+list = {body}
+btn_yes = {btn_yes}
+btn_no = {btn_no}
+
+[spot]
+border = {border}
+title = {title}
+tbl_col = {tbl_col}
+tbl_cell = {body}
+
+[notify]
+title_info = {notify_info}
+title_warn = {notify_warn}
+title_error = {notify_error}
+
+[pick]
+border = {border}
+active = {pick_active}
+inactive = {pick_inactive}
+
+[input]
+border = {border}
+title = {title}
+value = {body}
+selected = {input_selected}
+
+[cmp]
+border = {border}
+active = {pick_active}
+inactive = {pick_inactive}
+
+[tasks]
+border = {border}
+title = {title}
+hovered = {tasks_hovered}
+
+[help]
+on = {help_on}
+run = {body}
+desc = {body}
+hovered = {tasks_hovered}
+footer = {footer}
+"#,
+        app = style(None, bg.clone(), false),
+        cwd = style(fg.clone(), None, true),
+        find_kw = style(fg.clone(), None, true),
+        find_pos = style(dim.clone(), None, true),
+        symlink = style(muted.clone(), None, true),
+        mcopied = style(ok.clone(), ok.clone(), false),
+        mcut = style(err.clone(), err.clone(), false),
+        mmarked = style(fg.clone(), fg.clone(), false),
+        mselected = style(accent.clone(), accent.clone(), false),
+        ccopied = style(fg.clone(), ok.clone(), false),
+        ccut = style(fg.clone(), err.clone(), false),
+        cselected = style(bg.clone(), accent.clone(), false),
+        border = style(dim.clone(), None, false),
+        tabs_active = style(bg.clone(), accent.clone(), true),
+        tabs_inactive = style(fg.clone(), bg_hl.clone(), false),
+        mode_main = style(bg.clone(), accent.clone(), true),
+        mode_alt = style(fg.clone(), bg_hl.clone(), false),
+        select_main = style(bg.clone(), accent.clone(), true),
+        select_alt = style(fg.clone(), bg_hl.clone(), false),
+        unset_main = style(fg.clone(), err.clone(), true),
+        unset_alt = style(err.clone(), bg_hl.clone(), false),
+        status_overall = style(None, bg.clone(), false),
+        perm_sep = style(dim.clone(), None, false),
+        perm_type = style(ok.clone(), None, false),
+        perm_read = style(warn.clone(), None, false),
+        perm_write = style(err.clone(), None, false),
+        perm_exec = style(ok.clone(), None, false),
+        progress_normal = style(ok.clone(), bg.clone(), false),
+        progress_error = style(warn.clone(), err.clone(), false),
+        which_mask = style(None, bg.clone(), false),
+        which_cand = style(fg.clone(), None, false),
+        which_rest = style(dim.clone(), None, false),
+        which_desc = style(muted.clone(), None, false),
+        title = style(fg.clone(), None, true),
+        body = style(fg.clone(), None, false),
+        tbl_col = style(dim.clone(), None, false),
+        btn_yes = style(bg.clone(), ok.clone(), true),
+        btn_no = style(bg.clone(), err.clone(), true),
+        notify_info = style(ok.clone(), None, false),
+        notify_warn = style(warn.clone(), None, false),
+        notify_error = style(err.clone(), None, false),
+        pick_active = style(bg.clone(), accent.clone(), false),
+        pick_inactive = style(fg.clone(), None, false),
+        input_selected = style(bg.clone(), accent.clone(), false),
+        tasks_hovered = style(None, bg_hl.clone(), false),
+        help_on = style(ok.clone(), None, false),
+        footer = style(dim.clone(), None, false),
+    )
+}
+
 struct BrowserEngine {
     core: Option<Core>,
     term: Option<fb_term::Term>,
     events: Option<mpsc::UnboundedReceiver<FbEvent>>,
     error: Option<String>,
     last_area: Rect,
+    applied_theme: Option<String>,
 }
 
 impl Default for BrowserEngine {
@@ -63,6 +264,7 @@ impl Default for BrowserEngine {
             events: None,
             error: None,
             last_area: Rect::default(),
+            applied_theme: None,
         }
     }
 }
@@ -361,6 +563,19 @@ impl BrowserEngine {
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         self.last_area = area;
         self.ensure_initialized();
+        // Full theme sync: push the active pager palette into the YAZI Lua
+        // theme so the file browser follows the global theme. Rebuilds the
+        // embedded preset only when the canonical theme changes.
+        let canonical = crate::theme::Theme::current_canonical();
+        if self.applied_theme.as_deref() != Some(canonical) {
+            let theme = crate::theme::Theme::current();
+            let override_toml = fb_theme_override(&theme);
+            if let Err(error) = fb_config::override_theme(theme.is_dark(), &override_toml) {
+                tracing::warn!(%error, "DX file browser theme override failed");
+            } else {
+                self.applied_theme = Some(canonical.to_string());
+            }
+        }
         if let Err(error) = self.pump_events() {
             self.error = Some(format!("DX file browser event error: {error}"));
         }

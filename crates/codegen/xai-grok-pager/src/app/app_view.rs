@@ -5222,6 +5222,10 @@ impl AppView {
             needs_redraw |= agent.todo.list_state.tick();
             needs_redraw |= agent.todo.badge_tick();
             needs_redraw |= agent.tasks.tick();
+            // The minimap hover card has a short open-delay; keep requesting
+            // redraws while a turn is hovered so the card actually appears
+            // once the mouse stops moving (no further Moved events fire).
+            needs_redraw |= agent.dx_ui.minimap.hovered_turn.is_some();
             for child_view in agent.subagent_views.values_mut() {
                 needs_redraw |= child_view.scrollback.tick();
                 needs_redraw |= child_view.tick_toast();

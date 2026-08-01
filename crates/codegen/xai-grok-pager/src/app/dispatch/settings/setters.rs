@@ -1272,6 +1272,13 @@ fn auto_theme_setting_is_live(key: &str) -> bool {
 /// failure mode than an unknown commit-time value) and no-op.
 pub(super) fn set_theme_inner(app: &mut AppView, value: &str) {
     let Some(kind) = crate::theme::ThemeKind::from_name(value) else {
+        // Not a built-in kind — try a DX theme (themes.json catalog).
+        if crate::theme::Theme::apply_dx(value) {
+            let canonical = crate::theme::canonical_name(value).unwrap_or(value);
+            app.current_ui.theme = Some(canonical.to_string());
+            crate::theme::cache::set_auto_mode(false);
+            return;
+        }
         tracing::warn!(
             target: "settings",
             key = "theme",
@@ -1333,12 +1340,8 @@ pub(in crate::app::dispatch) fn set_theme(app: &mut AppView, new: String) -> Vec
 /// `AUTO_MODE` (commit-only side effect).
 fn preview_theme_inner(value: &str) {
     let Some(kind) = crate::theme::ThemeKind::from_name(value) else {
-        tracing::warn!(
-            target: "settings",
-            key = "theme",
-            value = value,
-            "unknown theme name — preview_theme_inner no-op",
-        );
+        // Not a built-in kind — try a DX theme (themes.json catalog).
+        crate::theme::Theme::apply_dx(value);
         return;
     };
     apply_theme_kind_for_display(kind);

@@ -11,16 +11,23 @@
 //! pager-side in-memory cache + resolution layer only.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
 
 use super::ThemeKind;
 use super::system_appearance;
+use super::DX_THEME_NAMES;
 
 /// In-memory theme kind, encoded as a `u8` matching the
 /// `ThemeKind` discriminants. Loaded from disk once at startup via
 /// `load_from_disk()`, then kept in sync by `set()`.
 static CURRENT: AtomicU8 = AtomicU8::new(ThemeKind::GrokNight as u8);
 static LOADED: AtomicBool = AtomicBool::new(false);
+
+/// Index into `DX_THEME_NAMES` for the active DX theme, or `u16::MAX`
+/// when no DX theme is active (a built-in `ThemeKind` is in effect).
+/// Seeded from disk once at startup alongside `CURRENT`.
+static CURRENT_DX: AtomicU16 = AtomicU16::new(u16::MAX);
+static DX_LOADED: AtomicBool = AtomicBool::new(false);
 #[cfg(any(test, feature = "test-support"))]
 static TEST_LOCK: Mutex<()> = Mutex::new(());
 
@@ -97,9 +104,62 @@ pub fn current_kind() -> ThemeKind {
 /// Used by the dispatcher (after `Action::SetTheme` is processed) and
 /// by the live-preview path during the picker. Disk-write happens via
 /// `Effect::PersistSetting`, NOT here.
+///
+/// Does NOT touch the DX slot — [`set_dx`] clears it explicitly, and
+/// startup seeding preserves a DX theme loaded from disk (a concrete
+/// built-in kind set via `set()` and a DX theme are both authoritative;
+/// the most recent explicit choice wins).
 pub fn set(kind: ThemeKind) {
     CURRENT.store(kind as u8, Ordering::Relaxed);
     LOADED.store(true, Ordering::Release);
+}
+
+// -- DX themes ----------------------------------------------------------------
+
+/// Index into `DX_THEME_NAMES` for the active DX theme, or `None` when
+/// no DX theme is active (a built-in `ThemeKind` is in effect).
+///
+/// Seeds from disk on first call, mirroring [`current_kind`]'s lazy
+/// load. Returns `None` while the terminal-native lock is engaged.
+#[must_use]
+pub fn current_dx() -> Option<usize> {
+    if terminal_native_locked() {
+        return None;
+    }
+    if !DX_LOADED.load(Ordering::Acquire) {
+        // Same idempotent-disk-read reasoning as `current_kind`.
+        if let Some(kind) = load_from_disk() {
+            CURRENT.store(kind as u8, Ordering::Relaxed);
+        }
+        DX_LOADED.store(true, Ordering::Release);
+    }
+    let idx = CURRENT_DX.load(Ordering::Relaxed);
+    if idx == u16::MAX {
+        None
+    } else {
+        Some(idx as usize)
+    }
+}
+
+/// Set the active DX theme by catalog index without writing to disk.
+///
+/// The nominal `ThemeKind` stays `GrokNight` (the syntect/syntax
+/// fallback used by DX themes); the DX theme drives the rendered
+/// palette. Disk-write happens via `Effect::PersistSetting`.
+pub fn set_dx(index: usize) {
+    debug_assert!(index < DX_THEME_NAMES.len());
+    CURRENT_DX.store(index as u16, Ordering::Relaxed);
+    CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
+    DX_LOADED.store(true, Ordering::Release);
+    LOADED.store(true, Ordering::Release);
+}
+
+/// Clear the active DX theme (falling back to the nominal `ThemeKind`).
+/// Called by [`super::Theme::apply_kind`] so an explicit built-in theme
+/// always wins over a previously-selected DX theme.
+pub fn clear_dx() {
+    CURRENT_DX.store(u16::MAX, Ordering::Relaxed);
+    DX_LOADED.store(true, Ordering::Release);
 }
 
 // -- Terminal-native lock (minimal mode) --------------------------------------
@@ -234,6 +294,11 @@ pub fn resolve_initial_theme_no_osc11() -> ThemeKind {
 ///
 /// Checks `[ui].theme` first (the canonical location), then falls back
 /// to a top-level `theme` key for backwards compatibility.
+///
+/// Returns the built-in `ThemeKind` for built-in names, and as a side
+/// effect seeds `CURRENT_DX` when the stored value is a DX theme name
+/// (returns `None` — the nominal kind is `GrokNight`; the DX theme
+/// drives the rendered palette).
 fn load_from_disk() -> Option<ThemeKind> {
     let root = xai_grok_config::load_effective_config_disk_only().ok()?;
     let table = root.as_table()?;
@@ -243,8 +308,13 @@ fn load_from_disk() -> Option<ThemeKind> {
         .and_then(|ui| ui.get("theme"))
         .and_then(|v| v.as_str())
         // Fallback: top-level `theme` key (legacy)
-        .or_else(|| table.get("theme").and_then(|v| v.as_str()));
-    value.and_then(ThemeKind::from_name)
+        .or_else(|| table.get("theme").and_then(|v| v.as_str()))?;
+    // DX theme: seed the DX slot, leave the nominal kind as GrokNight.
+    if let Some(idx) = DX_THEME_NAMES.iter().position(|name| name.eq_ignore_ascii_case(value)) {
+        CURRENT_DX.store(idx as u16, Ordering::Relaxed);
+        return None;
+    }
+    ThemeKind::from_name(value)
 }
 
 /// Load auto-theme configuration from the effective config.
@@ -280,6 +350,8 @@ pub fn reset_for_test() {
     // Tests are serialized via TEST_LOCK so the AtomicU8/AtomicBool
     // pair is safe to reset without any cross-thread coordination.
     CURRENT.store(ThemeKind::GrokNight as u8, Ordering::Relaxed);
+    CURRENT_DX.store(u16::MAX, Ordering::Relaxed);
+    DX_LOADED.store(false, Ordering::Release);
     LOADED.store(false, Ordering::Release);
     AUTO_MODE.store(false, Ordering::Relaxed);
     set_terminal_native_lock(false);

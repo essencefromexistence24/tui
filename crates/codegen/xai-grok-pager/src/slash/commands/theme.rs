@@ -12,7 +12,7 @@
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::{ModeSupport, Remedy};
-use crate::theme::{Theme, ThemeKind, cache as theme_cache};
+use crate::theme::{Theme, ThemeKind, cache as theme_cache, DX_THEME_NAMES, dx_theme_title};
 
 /// Switch the pager color theme.
 pub struct ThemeCommand;
@@ -57,7 +57,7 @@ impl SlashCommand for ThemeCommand {
     }
 
     fn preview_state(&self) -> Option<String> {
-        Some(Theme::current_kind().display_name().to_string())
+        Some(Theme::current_canonical().to_string())
     }
 
     fn preview_arg(&self, arg: &str) {
@@ -69,12 +69,16 @@ impl SlashCommand for ThemeCommand {
             } else {
                 Theme::apply_kind(kind);
             }
+        } else if !Theme::apply_dx(arg) {
+            // Unknown name: no-op (mirrors the commit-path warning).
         }
     }
 
     fn cancel_preview(&self, previous: &str) {
         if let Some(kind) = ThemeKind::from_name(previous) {
             Theme::apply_kind(kind);
+        } else {
+            Theme::apply_dx(previous);
         }
     }
 
@@ -92,7 +96,7 @@ impl SlashCommand for ThemeCommand {
             description: format!("auto (follow system){auto_active}"),
         }];
 
-        // Concrete themes — only show "(active)" when not in auto mode.
+        // Concrete built-in themes — only show "(active)" when not in auto mode.
         items.extend(available.iter().map(|kind| {
             let active = if *kind == current && !is_auto {
                 " (active)"
@@ -104,6 +108,23 @@ impl SlashCommand for ThemeCommand {
                 match_text: kind.display_name().to_string(),
                 insert_text: kind.display_name().to_string(),
                 description: format!("{}{active}", kind.display_name()),
+            }
+        }));
+
+        // DX themes from themes.json (always dark palettes).
+        let active_dx = Theme::current_dx();
+        items.extend(DX_THEME_NAMES.iter().map(|name| {
+            let active = if active_dx == Some(*name) && !is_auto {
+                " (active)"
+            } else {
+                ""
+            };
+            let title = dx_theme_title(name).unwrap_or(name);
+            ArgItem {
+                display: name.to_string(),
+                match_text: name.to_string(),
+                insert_text: name.to_string(),
+                description: format!("{title}{active}"),
             }
         }));
 
@@ -126,21 +147,21 @@ impl SlashCommand for ThemeCommand {
         // Named theme (including "auto"): parse and dispatch.
         // Truecolor-only themes are accepted regardless of terminal —
         // `Theme::apply_kind` clamps the live visual as needed.
-        match ThemeKind::from_name(trimmed) {
-            Some(kind) => {
-                // Normalise alias to canonical display_name.
-                CommandResult::Action(Action::SetTheme(kind.display_name().to_string()))
-            }
-            None => {
-                let all_names: Vec<&str> =
-                    ThemeKind::ALL.iter().map(|k| k.display_name()).collect();
-                CommandResult::Error(format!(
-                    "Unknown theme: {}. Available: auto, {}",
-                    trimmed,
-                    all_names.join(", ")
-                ))
-            }
+        if let Some(kind) = ThemeKind::from_name(trimmed) {
+            return CommandResult::Action(Action::SetTheme(kind.display_name().to_string()));
         }
+        // DX theme (case-insensitive): dispatch the canonical catalog name.
+        if let Some(canonical) = crate::theme::canonical_name(trimmed) {
+            return CommandResult::Action(Action::SetTheme(canonical.to_string()));
+        }
+        let mut all_names: Vec<&str> =
+            ThemeKind::ALL.iter().map(|k| k.display_name()).collect();
+        all_names.extend(DX_THEME_NAMES.iter().copied());
+        CommandResult::Error(format!(
+            "Unknown theme: {}. Available: auto, {}",
+            trimmed,
+            all_names.join(", ")
+        ))
     }
 }
 
@@ -184,8 +205,11 @@ mod tests {
             let items = cmd.suggest_args(&ctx, "").expect("should return items");
             assert_eq!(items[0].insert_text, "auto");
             assert!(items[0].description.contains("follow system"));
-            // auto + all available concrete themes
-            assert_eq!(items.len(), ThemeKind::available().len() + 1);
+            // auto + all available concrete themes + all DX themes
+            assert_eq!(
+                items.len(),
+                ThemeKind::available().len() + 1 + DX_THEME_NAMES.len()
+            );
         });
     }
 

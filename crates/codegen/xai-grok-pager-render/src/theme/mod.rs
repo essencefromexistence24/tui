@@ -12,6 +12,7 @@
 
 pub mod cache;
 pub mod color_support;
+mod dx_themes;
 mod grokday;
 mod groknight;
 pub mod md_style;
@@ -23,6 +24,7 @@ mod terminal_default;
 pub mod tokyonight;
 
 pub use color_support::quantize;
+pub use dx_themes::{dx_theme, dx_theme_title, DX_THEME_NAMES, DX_THEME_TITLES};
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
 /// Four-color compatibility view used by directly merged DX widgets.
@@ -184,8 +186,15 @@ impl std::str::FromStr for ThemeKind {
 
 /// Resolve a theme string to its canonical `&'static str` name.
 /// Used by both dispatch and registry layers.
+///
+/// Built-in themes (and their aliases) resolve through
+/// [`ThemeKind::from_name`]; DX themes resolve to their catalog name
+/// (case-insensitive).
 pub fn canonical_name(value: &str) -> Option<&'static str> {
-    ThemeKind::from_name(value).map(|k| k.display_name())
+    if let Some(kind) = ThemeKind::from_name(value) {
+        return Some(kind.display_name());
+    }
+    DX_THEME_NAMES.iter().find(|n| n.eq_ignore_ascii_case(value)).copied()
 }
 
 /// Human-friendly display name for a canonical theme value (e.g.
@@ -197,7 +206,7 @@ pub fn display_name_for_canonical(value: &str) -> &str {
         "grokday" => "Grok Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
-        other => other,
+        other => dx_theme_title(other).unwrap_or(other),
     }
 }
 
@@ -319,15 +328,23 @@ impl Theme {
         if cache::terminal_native_locked() {
             return Self::terminal_default().quantized(level);
         }
-        let base = match cache::current_kind() {
-            ThemeKind::GrokNight => Self::groknight(),
-            ThemeKind::TokyoNight => Self::tokyonight(),
-            ThemeKind::GrokDay => Self::grokday(),
-            ThemeKind::RosePineMoon => Self::rosepine_moon(),
-            ThemeKind::OscuraMidnight => Self::oscura_midnight(),
-            // Auto is resolved to a concrete theme before being stored;
-            // if reached, fall back to GrokNight.
-            ThemeKind::Auto => Self::groknight(),
+        let base = if let Some(idx) = cache::current_dx() {
+            // DX theme: resolve the palette from the generated catalog.
+            match DX_THEME_NAMES.get(idx).and_then(|name| dx_theme(name)) {
+                Some(theme) => theme,
+                None => Self::groknight(),
+            }
+        } else {
+            match cache::current_kind() {
+                ThemeKind::GrokNight => Self::groknight(),
+                ThemeKind::TokyoNight => Self::tokyonight(),
+                ThemeKind::GrokDay => Self::grokday(),
+                ThemeKind::RosePineMoon => Self::rosepine_moon(),
+                ThemeKind::OscuraMidnight => Self::oscura_midnight(),
+                // Auto is resolved to a concrete theme before being stored;
+                // if reached, fall back to GrokNight.
+                ThemeKind::Auto => Self::groknight(),
+            }
         };
         // Sample polarity pre-quantization — post-quantize `bg_base` may
         // land on a named/indexed entry whose luminance is host-palette-
@@ -366,6 +383,22 @@ impl Theme {
         cache::current_kind()
     }
 
+    /// Get the currently active DX theme name, if any.
+    pub fn current_dx() -> Option<&'static str> {
+        cache::current_dx().and_then(|idx| DX_THEME_NAMES.get(idx).copied())
+    }
+
+    /// Get the canonical name of the currently active theme — either the
+    /// built-in kind's `display_name` or the active DX theme's catalog
+    /// name. Used for preview-state restoration and picker display.
+    pub fn current_canonical() -> &'static str {
+        if let Some(name) = Self::current_dx() {
+            name
+        } else {
+            cache::current_kind().display_name()
+        }
+    }
+
     /// Whether this theme paints no diff row bands (`diff_*_bg` = `Reset`),
     /// in which case changed diff lines carry a whole-line red/green
     /// *foreground* instead of syntax highlighting on a colored band.
@@ -385,8 +418,25 @@ impl Theme {
         }
         let effective = Self::clamp_to_terminal(kind);
         cache::set(effective);
+        cache::clear_dx();
         apply_cursor_color();
         effective
+    }
+
+    /// Apply a DX theme (from `themes.json`) to the in-memory state
+    /// without persisting. Returns `true` on success.
+    ///
+    /// No-op (returns `false`) while the terminal-native lock is engaged.
+    pub fn apply_dx(name: &str) -> bool {
+        if cache::terminal_native_locked() {
+            return false;
+        }
+        let Some(idx) = DX_THEME_NAMES.iter().position(|n| n.eq_ignore_ascii_case(name)) else {
+            return false;
+        };
+        cache::set_dx(idx);
+        apply_cursor_color();
+        true
     }
 
     /// Clamp a theme kind to what the terminal supports.

@@ -60,6 +60,22 @@ pub fn init_flavor_embedded(light: bool) -> anyhow::Result<()> {
 	try_init_flavor(light, true).or_else(|_| try_init_flavor(light, false))
 }
 
+/// Apply a runtime TOML theme override on top of the embedded preset,
+/// rebuilding `THEME` so the file browser follows a host palette.
+///
+/// The embedded host owns the terminal, so unlike `init_flavor_embedded`
+/// this never reads user `theme.toml`; it starts from the preset and merges
+/// exactly the given `overrides` (typically colors pushed by the pager).
+pub fn override_theme(light: bool, overrides: &str) -> anyhow::Result<()> {
+	let mut preset = Preset::theme(light)?;
+	let theme = toml::de::DeTable::parse(overrides)?;
+	preset = error_with_input(preset.deserialize_over_with(theme), overrides)?;
+	let built = preset.reshape(light)?;
+	let _old = THEME.drop();
+	THEME.init(built);
+	Ok(())
+}
+
 fn try_init_flavor(light: bool, merge: bool) -> anyhow::Result<()> {
 	let mut preset = Preset::theme(light)?;
 

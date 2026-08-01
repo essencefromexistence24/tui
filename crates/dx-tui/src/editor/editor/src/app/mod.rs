@@ -1564,6 +1564,14 @@ impl Editor {
 			.collect()
 	}
 
+	/// Apply a built-in editor theme by key or name, persisting to config.
+	/// Public surface for the host pager's full theme sync: the code editor
+	/// follows the global pager theme by applying its own closest embedded
+	/// theme (name match, else dark/light polarity).
+	pub fn apply_theme_external(&mut self, key_or_name: &str) {
+		self.apply_theme(key_or_name);
+	}
+
 	/// Snapshot of token values for a specific buffer (render path).
 	pub fn get_status_bar_element_values(&self, buffer_id: BufferId) -> HashMap<String, String> {
 		for window in self.windows.values() {
