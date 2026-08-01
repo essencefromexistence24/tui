@@ -150,23 +150,22 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                 }
                 // Inject placeholder `id` if missing (some API backends omit it)
                 if first_err.to_string().contains("missing field `id`") {
-                    if let Some(obj) = value.as_object_mut() {
-                        if !obj.contains_key("id") {
-                            obj.insert(
-                                "id".to_string(),
-                                serde_json::Value::String("placeholder".to_string()),
-                            );
-                        }
+                    if let Some(obj) = value.as_object_mut()
+                        && !obj.contains_key("id")
+                    {
+                        obj.insert(
+                            "id".to_string(),
+                            serde_json::Value::String("placeholder".to_string()),
+                        );
                     }
-                    if let Some(response) = value.pointer_mut("/response") {
-                        if let Some(resp_obj) = response.as_object_mut() {
-                            if !resp_obj.contains_key("id") {
-                                resp_obj.insert(
-                                    "id".to_string(),
-                                    serde_json::Value::String("placeholder".to_string()),
-                                );
-                            }
-                        }
+                    if let Some(response) = value.pointer_mut("/response")
+                        && let Some(resp_obj) = response.as_object_mut()
+                        && !resp_obj.contains_key("id")
+                    {
+                        resp_obj.insert(
+                            "id".to_string(),
+                            serde_json::Value::String("placeholder".to_string()),
+                        );
                     }
                 }
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
@@ -1175,7 +1174,7 @@ impl SamplingClient {
                                             "choices": [],
                                         }),
                                     )
-                                    .map_err(|e| SamplingError::Serialization(e))
+                                    .map_err(SamplingError::Serialization)
                                 } else {
                                     serde_json::from_str::<ChatCompletionChunk>(data).or_else(|e| {
                                         let msg = e.to_string();

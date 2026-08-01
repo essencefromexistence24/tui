@@ -750,8 +750,8 @@ impl SessionActor {
     pub(crate) async fn prepare_sampler_for_turn(&self) -> Result<(), acp::Error> {
         self.refresh_token_if_expired().await;
         let mut sampler_config = self.reconstruct_full_config().await;
-        if crate::agent::local_model::is_local_base_url(&sampler_config.base_url) {
-            if let Err(error) = crate::agent::local_model::ensure_local_server(
+        if crate::agent::local_model::is_local_base_url(&sampler_config.base_url)
+            && let Err(error) = crate::agent::local_model::ensure_local_server(
                 &sampler_config.model,
                 &sampler_config.base_url,
             )
@@ -764,7 +764,6 @@ impl SessionActor {
                 );
                 return Err(acp::Error::internal_error()
                     .data(format!("Local model could not start: {error}")));
-            }
         }
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output

@@ -263,50 +263,45 @@ impl AgentView {
             .current_model_name()
             .unwrap_or_else(|| "Model".to_string());
         let entries = self.scrollback.iter_entries().collect::<Vec<_>>();
-        let tools = entries
-            .into_iter()
-            .rev()
-            .take_while(|(_, entry)| {
-                !matches!(
-                    entry.block,
-                    crate::scrollback::block::RenderBlock::SessionEvent(ref event)
-                        if event.event.is_turn_terminal()
-                )
-            })
-            .filter(|(_, entry)| {
-                matches!(
-                    entry.block,
-                    crate::scrollback::block::RenderBlock::ToolCall(_)
-                )
-            })
-            .count();
+        let mut tools = 0usize;
+        // Output tokens: estimated from the agent's response text written this
+        // turn — the context-total delta also counts the user's input and tool
+        // outputs, which isn't "what the AI produced". Rate is those output
+        // tokens over the turn's wall clock.
+        let mut output_tokens = 0u64;
+        for (_, entry) in entries.iter().rev() {
+            if matches!(
+                entry.block,
+                crate::scrollback::block::RenderBlock::SessionEvent(ref event)
+                    if event.event.is_turn_terminal()
+            ) {
+                break;
+            }
+            match &entry.block {
+                crate::scrollback::block::RenderBlock::ToolCall(_) => tools += 1,
+                crate::scrollback::block::RenderBlock::AgentMessage(msg) => {
+                    output_tokens += xai_token_estimation::estimate_tokens(&msg.text());
+                }
+                _ => {}
+            }
+        }
         let elapsed_opt = match &event {
             crate::scrollback::blocks::SessionEvent::TurnCompleted { elapsed } => *elapsed,
             _ => None,
         };
-        // Per-turn token count: the context total grew by exactly this
-        // message's tokens since the turn started. Rate is tokens over the
-        // turn's wall clock when both are known.
-        let current_total = self.context_state.as_ref().map(|c| c.used);
-        let baseline = self.turn_start_total_tokens;
-        let tokens = current_total.map(|used| match baseline {
-            Some(start) => used.saturating_sub(start),
-            None => used,
-        });
-        let tokens = tokens.filter(|&n| n > 0);
         let mut parts = vec![model];
-        if let Some(tokens) = tokens {
+        if output_tokens > 0 {
             let secs = elapsed_opt
                 .map(|d| d.as_secs_f64().max(1e-9))
                 .unwrap_or(0.0);
             let rate = if secs > 0.0 {
-                tokens as f64 / secs
+                output_tokens as f64 / secs
             } else {
                 0.0
             };
             parts.push(format!(
-                "{} tok ({:.1} t/s)",
-                crate::views::turn_status::format_tokens_short(tokens),
+                "{} tokens ({:.1} t/s)",
+                crate::views::turn_status::format_tokens_short(output_tokens),
                 rate
             ));
         }

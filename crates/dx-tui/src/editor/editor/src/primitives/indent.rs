@@ -73,7 +73,7 @@ impl IndentCalculator {
 		#[cfg(not(feature = "tree-sitter"))]
 		{
 			let _ = language;
-			return None;
+			None
 		}
 		#[cfg(feature = "tree-sitter")]
 		{

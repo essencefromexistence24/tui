@@ -19,7 +19,7 @@ use xai_grok_tools::util::{ProcessGroup, detach_command, global_process_scope};
 /// Global singleton handle for the managed local server.
 fn global_handle() -> &'static LocalServerHandle {
     static HANDLE: OnceLock<LocalServerHandle> = OnceLock::new();
-    HANDLE.get_or_init(|| LocalServerHandle::new())
+    HANDLE.get_or_init(LocalServerHandle::new)
 }
 
 /// Configuration for a managed local inference server.
@@ -160,17 +160,12 @@ impl LocalServerHandle {
 
         detach_command(&mut cmd);
 
-        let mut child = cmd
-            .spawn()
+        // Spawn and enroll with the global process scope so the server is
+        // reaped on shutdown even if the session actor is no longer running.
+        let (mut child, process_group) = global_process_scope()
+            .spawn(cmd)
             .map_err(|e| format!("failed to spawn llama-server: {e}"))?;
-
-        // Register with global process scope for cleanup on exit
-        if let Ok(mut group) = ProcessGroup::new() {
-            group.attach(&child).ok();
-            let arc = Arc::new(group);
-            global_process_scope().register(&arc);
-            state.process_group = Some(arc);
-        }
+        state.process_group = Some(process_group);
 
         // Loading can take longer on CPU-only Windows hosts, especially while
         // antivirus scans the GGUF mapping. Fail immediately if the process

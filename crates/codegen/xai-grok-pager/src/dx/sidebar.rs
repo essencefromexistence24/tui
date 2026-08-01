@@ -146,7 +146,7 @@ pub fn render(
     .render(title_area, buf);
     Paragraph::new(Span::styled(
         format!("#{}", model.session_id),
-        Style::default().fg(theme.gray).add_modifier(Modifier::DIM),
+        Style::default().fg(theme.text_secondary),
     ))
     .render(
         Rect {

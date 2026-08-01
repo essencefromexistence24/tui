@@ -3483,6 +3483,9 @@ impl PromptWidget {
             buf.set_line_safe(rx, area.y, &right_line, right_w);
         } else {
             // Right-align: clamp to area width so text doesn't overflow borders.
+            // Keep the home-screen info line one cell away from the right
+            // corner when no Build/Plan/multiline item occupies right_spans.
+            left_spans.push(Span::styled(" ", pad_style));
             let line = Line::from(left_spans);
             let text_w = (line.width() as u16).min(area.width);
             let x = area.x + area.width.saturating_sub(text_w);

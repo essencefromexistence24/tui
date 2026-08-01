@@ -1122,7 +1122,7 @@ impl Editor {
 			// Check file explorer scrollbar column (one column before the right border)
 			let scrollbar_x = explorer_area.x + explorer_area.width.saturating_sub(2);
 			if col == scrollbar_x
-				&& row >= explorer_area.y + 1
+				&& row > explorer_area.y
 				&& row < explorer_area.y + explorer_area.height.saturating_sub(1)
 			{
 				return Some(HoverTarget::FileExplorerScrollbar);
@@ -2080,7 +2080,7 @@ impl Editor {
 		// File explorer scrollbar click (one column before the right border)
 		let scrollbar_x = explorer_area.x + explorer_area.width.saturating_sub(2);
 		if col == scrollbar_x
-			&& row >= explorer_area.y + 1
+			&& row > explorer_area.y
 			&& row < explorer_area.y + explorer_area.height.saturating_sub(1)
 		{
 			if let Some(explorer) = self.file_explorer().as_ref() {

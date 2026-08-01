@@ -138,7 +138,7 @@ impl Default for AnimationSurface {
             started_at: Instant::now(),
             rainbow: RainbowEffect::new(),
             current: 0,
-            intro: AnimationKind::Splash,
+            intro: AnimationKind::Matrix,
             outro: AnimationKind::Train,
             exiting: false,
             last_width: 120,
@@ -174,6 +174,16 @@ impl AnimationSurface {
 
     pub fn select_intro(&mut self) {
         self.intro = self.current();
+    }
+
+    /// Jump to the configured intro animation and restart its timeline for a
+    /// welcome→chat intro playback.
+    pub fn begin_intro(&mut self) {
+        self.current = AnimationKind::ALL
+            .iter()
+            .position(|kind| *kind == self.intro)
+            .unwrap_or(0);
+        self.restart();
     }
 
     pub fn select_outro(&mut self) {

@@ -218,7 +218,6 @@ impl ReferenceHighlighter {
 			self.identifier_query = None;
 			self.locals_query = None;
 			self.locals_captures = LocalsCaptures::default();
-			return;
 		}
 		#[cfg(feature = "tree-sitter")]
 		{

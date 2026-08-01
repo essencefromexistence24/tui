@@ -2170,7 +2170,7 @@ impl AgentView {
             }
         };
         let editing_label;
-        let mut commenting_label = String::new();
+        let commenting_label: String;
         let theme = Theme::current();
         let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
         let approval_is_commenting = self

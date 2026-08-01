@@ -290,7 +290,7 @@ impl AnimationState {
 			shimmer: ShimmerEffect::new(vec![ratatui::style::Color::Rgb(150, 150, 150)]),
 			show_train_animation: false,
 			show_matrix_animation: false,
-			intro_animation: AnimationType::Splash,
+			intro_animation: AnimationType::Matrix,
 			outro_animation: AnimationType::Train,
 			playing_intro: false,
 			playing_outro: false,

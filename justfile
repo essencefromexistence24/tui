@@ -9,7 +9,7 @@ default:
 # Windows machines with a small page file then fail with misleading metadata
 # and linker errors after the first allocation failure. Prime the exact release
 # graph with bounded concurrency; the public build/run recipes still finish
-# with the requested 12-job build once the heavy artifacts are available.
+# with the requested 1-job build once the heavy artifacts are available.
 _release-prime:
     $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12
 
