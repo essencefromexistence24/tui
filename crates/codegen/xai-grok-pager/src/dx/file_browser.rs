@@ -39,7 +39,7 @@ use mlua::{ObjectLike, Table};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Color,
+    style::{Color, Style},
     text::Line,
     widgets::{Paragraph, Widget, Wrap},
 };
@@ -79,8 +79,9 @@ fn color_value(color: Color) -> Option<String> {
 }
 
 /// Build a TOML theme override that maps the active pager palette onto the
-/// YAZI file-browser theme. Only color-bearing fields are emitted; the
-/// layout symbols, strings, and syntect path keep the embedded defaults.
+/// YAZI file-browser theme. Layout symbols, strings, and the syntect path keep
+/// their embedded defaults, while chrome, file rows, and icons all receive
+/// colors from the live Grok palette.
 fn fb_theme_override(theme: &crate::theme::Theme) -> String {
     let style = |fg: Option<String>, bg: Option<String>, bold: bool| {
         let mut out = String::from("{");
@@ -127,6 +128,14 @@ fn fb_theme_override(theme: &crate::theme::Theme) -> String {
     let warn = color(theme.warning);
     let fuzzy = color(theme.fuzzy_accent);
     let border_color = color(theme.selection_border);
+    let file = color(theme.text_primary).expect("every ratatui color has a TOML value");
+    let directory = color(theme.path).expect("every ratatui color has a TOML value");
+    let image = color(theme.warning).expect("every ratatui color has a TOML value");
+    let media = color(theme.accent_assistant).expect("every ratatui color has a TOML value");
+    let archive = color(theme.accent_error).expect("every ratatui color has a TOML value");
+    let document = color(theme.text_secondary).expect("every ratatui color has a TOML value");
+    let executable = color(theme.accent_success).expect("every ratatui color has a TOML value");
+    let link = color(theme.gray_dim).expect("every ratatui color has a TOML value");
 
     format!(
         r#"
@@ -228,8 +237,39 @@ run = {body}
 desc = {body}
 hovered = {tasks_hovered}
 footer = {footer}
+
+[filetype]
+rules = [
+  {{ mime = "image/*", fg = "{image}" }},
+  {{ mime = "{{audio,video}}/*", fg = "{media}" }},
+  {{ mime = "application/{{zip,rar,7z*,tar,gzip,xz,zstd,bzip*,lzma,compress,archive,cpio,arj,xar,ms-cab*}}", fg = "{archive}" }},
+  {{ mime = "application/{{pdf,doc,rtf}}", fg = "{document}" }},
+  {{ mime = "vfs/{{absent,stale}}", fg = "{link}" }},
+  {{ url = "*", is = "orphan", bg = "{archive}" }},
+  {{ url = "*", is = "exec", fg = "{executable}" }},
+  {{ url = "*", is = "dummy", bg = "{archive}" }},
+  {{ url = "*/", is = "dummy", bg = "{archive}" }},
+  {{ url = "*/", fg = "{directory}" }},
+  {{ url = "*", fg = "{file}" }},
+]
+
+[icon]
+conds = [
+  {{ if = "orphan", text = "", fg = "{archive}" }},
+  {{ if = "link", text = "", fg = "{link}" }},
+  {{ if = "block", text = "", fg = "{image}" }},
+  {{ if = "char", text = "", fg = "{image}" }},
+  {{ if = "fifo", text = "", fg = "{image}" }},
+  {{ if = "sock", text = "", fg = "{image}" }},
+  {{ if = "sticky", text = "", fg = "{image}" }},
+  {{ if = "dummy", text = "", fg = "{archive}" }},
+  {{ if = "dir & hovered", text = "", fg = "{file}" }},
+  {{ if = "dir", text = "", fg = "{directory}" }},
+  {{ if = "exec", text = "", fg = "{executable}" }},
+  {{ if = "!dir", text = "", fg = "{file}" }},
+]
 "#,
-        app = style(None, bg.clone(), false),
+        app = style(fg.clone(), bg.clone(), false),
         cwd = style(fg.clone(), None, true),
         find_kw = style(fuzzy.clone(), None, true),
         find_pos = style(secondary.clone(), None, true),
@@ -276,6 +316,14 @@ footer = {footer}
         tasks_hovered = style(None, hover, false),
         help_on = style(ok.clone(), None, false),
         footer = style(dim.clone(), None, false),
+        file = file,
+        directory = directory,
+        image = image,
+        media = media,
+        archive = archive,
+        document = document,
+        executable = executable,
+        link = link,
     )
 }
 
@@ -303,6 +351,9 @@ impl Default for BrowserEngine {
 
 impl BrowserEngine {
     pub fn ensure_initialized(&mut self) {
+        let pager_theme = crate::theme::Theme::current();
+        let override_toml = fb_theme_override(&pager_theme);
+        let light = !pager_theme.is_dark();
         let result = INITIALIZED.get_or_init(|| {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 fb_shared::init();
@@ -312,6 +363,8 @@ impl BrowserEngine {
                 fb_config::init_embedded().map_err(|error| error.to_string())?;
                 fb_vfs::init();
                 fb_adapter::init_embedded().map_err(|error| error.to_string())?;
+                fb_config::override_theme(light, &override_toml)
+                    .map_err(|error| error.to_string())?;
                 fb_boot::init_default();
                 fb_dds::init();
                 fb_dds::serve();
@@ -331,6 +384,7 @@ impl BrowserEngine {
         });
         match result {
             Ok(()) if self.core.is_none() => {
+                self.applied_theme = Some((light, override_toml));
                 let mut core = Core::make();
                 let mut term = None;
                 let cx = &mut fb_actor::Ctx::active(&mut core, &mut term);
@@ -594,17 +648,29 @@ impl BrowserEngine {
 
     pub fn render(&mut self, area: Rect, buf: &mut Buffer) {
         self.last_area = area;
+        // The embedded browser renders directly into Grok's frame and does
+        // not run the standalone terminal's background clear. Fill the whole
+        // surface first so cells that are not touched by a browser widget
+        // still use the active Grok theme instead of a previous frame's
+        // colors (or Ratatui's reset color).
+        let theme = crate::theme::Theme::current();
+        buf.set_style(
+            area,
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base),
+        );
         self.ensure_initialized();
         // Full theme sync: push the active pager palette into the YAZI Lua
         // theme so the file browser follows the global theme. Compare the
         // generated values, not just the theme name: terminal quantization,
         // auto light/dark changes, and runtime palette updates can all change
         // the colors while the canonical name stays the same.
-        let theme = crate::theme::Theme::current();
         let override_toml = fb_theme_override(&theme);
-        let theme_signature = (theme.is_dark(), override_toml.clone());
+        let light = !theme.is_dark();
+        let theme_signature = (light, override_toml.clone());
         if self.applied_theme.as_ref() != Some(&theme_signature) {
-            if let Err(error) = fb_config::override_theme(theme.is_dark(), &override_toml) {
+            if let Err(error) = fb_config::override_theme(light, &override_toml) {
                 tracing::warn!(%error, "DX file browser theme override failed");
             } else {
                 self.applied_theme = Some(theme_signature);
@@ -788,6 +854,16 @@ mod tests {
         assert_eq!(
             value["notify"]["title_error"]["fg"].as_str(),
             Some("#0d0e0f")
+        );
+        let primary = color_value(theme.text_primary);
+        assert_eq!(value["app"]["overall"]["fg"].as_str(), primary.as_deref());
+        assert_eq!(
+            value["filetype"]["rules"][10]["fg"].as_str(),
+            primary.as_deref()
+        );
+        assert!(
+            fb_config::validate_theme_override(!theme.is_dark(), &fb_theme_override(&theme))
+                .is_ok()
         );
     }
 }

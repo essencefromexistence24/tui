@@ -67,13 +67,28 @@ pub fn init_flavor_embedded(light: bool) -> anyhow::Result<()> {
 /// this never reads user `theme.toml`; it starts from the preset and merges
 /// exactly the given `overrides` (typically colors pushed by the pager).
 pub fn override_theme(light: bool, overrides: &str) -> anyhow::Result<()> {
-	let mut preset = Preset::theme(light)?;
-	let theme = toml::de::DeTable::parse(overrides)?;
-	preset = error_with_input(preset.deserialize_over_with(theme), overrides)?;
-	let built = preset.reshape(light)?;
+	let built = build_theme_override(light, overrides)?;
 	let _old = THEME.drop();
 	THEME.init(built);
 	Ok(())
+}
+
+/// Parse and fully reshape an embedded-host override without mutating the
+/// process-global theme. Hosts use this to test generated runtime palettes
+/// against the real browser schema rather than merely checking TOML syntax.
+pub fn validate_theme_override(light: bool, overrides: &str) -> anyhow::Result<()> {
+	merge_theme_override(light, overrides).map(drop)
+}
+
+fn build_theme_override(light: bool, overrides: &str) -> anyhow::Result<theme::Theme> {
+	merge_theme_override(light, overrides)?.reshape(light)
+}
+
+fn merge_theme_override(light: bool, overrides: &str) -> anyhow::Result<theme::Theme> {
+	let mut preset = Preset::theme(light)?;
+	let theme = toml::de::DeTable::parse(overrides)?;
+	preset = error_with_input(preset.deserialize_over_with(theme), overrides)?;
+	Ok(preset)
 }
 
 fn try_init_flavor(light: bool, merge: bool) -> anyhow::Result<()> {

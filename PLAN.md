@@ -420,6 +420,11 @@ dx-animations = ["dx-chat", "dep:tachyonfx"] # animations
 - [x] The player is launched without a shell, with null stdio, its runtime directory as the working directory, and no console-detach flag that can suppress GUI startup.
 - [x] Windows launch success requires a visible player window; early exit or a three-second headless startup returns an error instead of a false `Playing` toast.
 - [x] The Windows per-user installer verifies and atomically installs the working player plus its 113-DLL recursive runtime manifest under `%LOCALAPPDATA%\Programs\DX\Video`.
+- [x] macOS and Linux use their native per-user data locations and a POSIX installer with atomic staging, executable validation, and private-library manifests.
+- [x] Linux rejects headless sessions without `WAYLAND_DISPLAY` or `DISPLAY` instead of showing a false playback notification.
+- [x] x86_64 and ARM64 native player artifacts exist for both macOS and Linux; resolver layout tests cover Windows, macOS, and Linux.
+- [x] The graphical x86_64 Linux player enables Wayland, X11, EGL/OpenGL, PulseAudio, and ALSA; installed-package playback was verified with the Titanic sample under WSLg. The older static musl artifact is headless and is not a `/video` package.
+- [x] The POSIX installer runs `--version` against each staged package and rejects unresolved shared-library dependencies before activation.
 - [x] Unit tests cover registration, case-insensitive dispatch, quoted/relative paths, failures, runtime files, and resolver precedence.
 - [x] The installed x64 player was smoke-tested with `G:\Dx\hexxed\terminal\dx-video-player\titanic.mp4`; the resulting visible window was verified by its nonzero `HWND` and `titanic.mp4 - dx` title.
 
@@ -498,8 +503,8 @@ DX video player is not installed. Run the DX installation/update command.
 
 ### 10.4 Player installation layout
 
-Windows should use a per-user installation, not `C:\Program Files`, so the
-feature works without administrator rights:
+Every OS uses a per-user installation so the feature works without
+administrator/root rights:
 
 ```text
 %LOCALAPPDATA%\Programs\DX\Video\
@@ -511,6 +516,18 @@ feature works without administrator rights:
     libass-9.dll
     libplacebo-360.dll
     ... all recursively required runtime DLLs
+```
+
+```text
+~/Library/Application Support/DX/Video/       # macOS
+    dx-video-player
+    runtime-manifest.txt
+    ... private dylibs, when shipped
+
+${XDG_DATA_HOME:-~/.local/share}/dx/video/     # Linux
+    dx-video-player
+    runtime-manifest.txt
+    ... private shared objects, when shipped
 ```
 
 `dirs::data_local_dir()` is the preferred Rust API for resolving
@@ -530,10 +547,10 @@ The production player should be copied from a release artifact during the DX
 installation/update flow. Do not download or execute an unverified binary
 silently from inside `/video`.
 
-For Windows architecture selection, ship the x86_64 player for normal x64
-systems and an ARM64 player for native ARM64 systems. The resolver should
-select the matching installed artifact and report a clear unsupported-platform
-error if no matching player exists.
+Ship x86_64 artifacts for normal x64 systems and ARM64 artifacts for native
+ARM64 systems on Windows, macOS, and Linux. The installer selects the native
+package supplied by the release flow, while the resolver rejects unsupported
+operating systems and CPU architectures with a clear error.
 
 ### 10.5 Process-launch behavior
 
@@ -602,6 +619,16 @@ Windows integration/smoke tests:
 - Confirm the player process does not inherit or corrupt the TUI's raw mode and
   alternate screen.
 
+macOS/Linux integration criteria:
+
+- Install a native release directory with `install-video-player.sh` into the
+  OS-specific per-user data location.
+- Confirm the player remains alive after startup with a local GUI session.
+- On Linux, confirm Wayland and X11 sessions are accepted and a headless
+  session returns the no-graphical-session error.
+- Run native smoke tests on macOS x86_64/ARM64 and Linux x86_64/ARM64 release
+  runners; cross-compilation alone cannot prove a desktop window opens.
+
 Cross-terminal acceptance:
 
 - Windows Terminal, ConHost, VS Code terminal, and an SSH/remote terminal may
@@ -626,8 +653,8 @@ Cross-terminal acceptance:
 - `/video "<path>"` launches the installed DX video player in a separate native
   window.
 - The TUI remains responsive and its terminal state is preserved.
-- The player and all required FFmpeg DLLs are available from the per-user
-  `%LOCALAPPDATA%\Programs\DX\Video` installation.
+- The player and all required private runtime libraries are available from the
+  OS-native per-user installation on Windows, macOS, and Linux.
 - Quoted paths, relative paths, generated-output paths, and failure cases are
   tested.
 - Documentation clearly states that embedded playback inside the terminal is

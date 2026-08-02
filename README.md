@@ -101,6 +101,25 @@ The installer copies the verified executable and its complete DLL runtime to
 `%LOCALAPPDATA%\Programs\DX\Video`. For development, `DX_VIDEO_PLAYER` may
 point directly to another player executable.
 
+On macOS or Linux, install a native release package with:
+
+```sh
+sh ./crates/codegen/xai-grok-pager/scripts/install-video-player.sh /path/to/dx-video-player-package
+```
+
+The package directory must contain an executable named `dx-video-player` and
+may include `runtime-manifest.txt` listing private shared libraries beside it.
+Before installation, the staged executable is run with its staged library path
+and rejected if any private runtime dependency is unavailable. For Linux x64,
+use the graphical `build-x86_64-unknown-linux-gnu-gui` package; it includes
+Wayland, X11, EGL/OpenGL, PulseAudio, and ALSA support. The older musl package
+is headless and must not be used for `/video` window playback. Standard Linux
+desktop libraries are still supplied by the distribution.
+The per-user destination is `~/Library/Application Support/DX/Video` on macOS
+and `${XDG_DATA_HOME:-~/.local/share}/dx/video` on Linux. Linux playback
+requires an active Wayland or X11 graphical session; remote/headless sessions
+receive an actionable error instead of a false playback notification.
+
 ## Documentation
 
 Full online documentation is available at

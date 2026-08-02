@@ -51,6 +51,11 @@ pub enum VideoPlayerError {
         directory: PathBuf,
         files: Vec<String>,
     },
+    RuntimeManifestUnreadable {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    NoGraphicalSession(String),
     MediaNotFound(PathBuf),
     MediaIsDirectory(PathBuf),
     MediaUnreadable {
@@ -93,6 +98,15 @@ impl fmt::Display for VideoPlayerError {
                 directory.display(),
                 files.join(", ")
             ),
+            Self::RuntimeManifestUnreadable { path, error } => write!(
+                f,
+                "DX video player runtime manifest is unreadable: {} ({error})",
+                path.display()
+            ),
+            Self::NoGraphicalSession(platform) => write!(
+                f,
+                "DX video player cannot open a native window: no graphical session is available on {platform}"
+            ),
             Self::MediaNotFound(path) => write!(f, "Video file not found: {}", path.display()),
             Self::MediaIsDirectory(path) => {
                 write!(f, "Video path is a directory: {}", path.display())
@@ -133,6 +147,7 @@ pub struct VideoLaunch {
 
 /// Launch one media path in the detached native DX player.
 pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlayerError> {
+    validate_graphical_session()?;
     let media = resolve_media_path(raw_path, workspace)?;
     let player = resolve_player()?;
 
@@ -189,7 +204,7 @@ fn verify_player_started(
     child: &mut std::process::Child,
     executable: &Path,
 ) -> Result<(), VideoPlayerError> {
-    thread::sleep(Duration::from_millis(150));
+    thread::sleep(Duration::from_millis(500));
     if let Some(status) = child.try_wait().map_err(|error| VideoPlayerError::Spawn {
         executable: executable.to_path_buf(),
         error,
@@ -199,6 +214,23 @@ fn verify_player_started(
             status,
         });
     }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn validate_graphical_session() -> Result<(), VideoPlayerError> {
+    let has_display = ["WAYLAND_DISPLAY", "DISPLAY"]
+        .into_iter()
+        .any(|name| std::env::var_os(name).is_some_and(|value| !value.is_empty()));
+    if has_display {
+        Ok(())
+    } else {
+        Err(VideoPlayerError::NoGraphicalSession("Linux".to_owned()))
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn validate_graphical_session() -> Result<(), VideoPlayerError> {
     Ok(())
 }
 
@@ -332,6 +364,13 @@ fn resolve_player_from(
 }
 
 fn installed_executable() -> Result<PathBuf, VideoPlayerError> {
+    if !matches!(std::env::consts::OS, "windows" | "macos" | "linux") {
+        return Err(VideoPlayerError::UnsupportedPlatform(format!(
+            "{}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )));
+    }
     if !matches!(std::env::consts::ARCH, "x86_64" | "aarch64") {
         return Err(VideoPlayerError::UnsupportedPlatform(format!(
             "{}-{}",
@@ -346,15 +385,21 @@ fn installed_executable() -> Result<PathBuf, VideoPlayerError> {
             std::env::consts::ARCH
         ))
     })?;
-    Ok(base
-        .join("Programs")
-        .join("DX")
-        .join("Video")
-        .join(player_filename()))
+    Ok(installed_directory(&base, std::env::consts::OS)
+        .join(player_filename_for(std::env::consts::OS)))
 }
 
-fn player_filename() -> &'static str {
-    if cfg!(windows) {
+fn installed_directory(base: &Path, os: &str) -> PathBuf {
+    match os {
+        "windows" => base.join("Programs").join("DX").join("Video"),
+        "macos" => base.join("DX").join("Video"),
+        "linux" => base.join("dx").join("video"),
+        _ => base.join("dx").join("video"),
+    }
+}
+
+fn player_filename_for(os: &str) -> &'static str {
+    if os == "windows" {
         "dx-video-player.exe"
     } else {
         "dx-video-player"
@@ -379,39 +424,38 @@ fn development_executable() -> Option<PathBuf> {
 }
 
 fn validate_installed_runtime(executable: &Path) -> Result<(), VideoPlayerError> {
+    let directory = executable.parent().unwrap_or_else(|| Path::new("."));
+    let manifest = directory.join(RUNTIME_MANIFEST);
+    let contents = std::fs::read_to_string(&manifest).map_err(|error| {
+        VideoPlayerError::RuntimeManifestUnreadable {
+            path: manifest.clone(),
+            error,
+        }
+    })?;
+    let mut required: Vec<String> = contents
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect();
     #[cfg(windows)]
-    {
-        let directory = executable.parent().unwrap_or_else(|| Path::new("."));
-        let mut required: Vec<String> = WINDOWS_RUNTIME_FILES
+    required.extend(
+        WINDOWS_RUNTIME_FILES
             .iter()
             .map(|name| (*name).to_string())
-            .collect();
-        let manifest = directory.join(RUNTIME_MANIFEST);
-        if manifest.is_file() {
-            if let Ok(contents) = std::fs::read_to_string(&manifest) {
-                required.extend(
-                    contents
-                        .lines()
-                        .map(str::trim)
-                        .filter(|name| !name.is_empty())
-                        .map(str::to_string),
-                );
-            }
-        } else {
-            required.push(RUNTIME_MANIFEST.to_string());
-        }
-        required.sort();
-        required.dedup();
-        let missing: Vec<String> = required
-            .into_iter()
-            .filter(|name| !directory.join(name).is_file())
-            .collect();
-        if !missing.is_empty() {
-            return Err(VideoPlayerError::MissingRuntimeFiles {
-                directory: directory.to_path_buf(),
-                files: missing,
-            });
-        }
+            .collect::<Vec<_>>(),
+    );
+    required.sort();
+    required.dedup();
+    let missing: Vec<String> = required
+        .into_iter()
+        .filter(|name| !directory.join(name).is_file())
+        .collect();
+    if !missing.is_empty() {
+        return Err(VideoPlayerError::MissingRuntimeFiles {
+            directory: directory.to_path_buf(),
+            files: missing,
+        });
     }
     Ok(())
 }
@@ -471,6 +515,26 @@ mod tests {
         assert_eq!(resolved.source, PlayerSource::Environment);
     }
 
+    #[test]
+    fn installed_layout_uses_each_operating_system_convention() {
+        let base = Path::new("base");
+        assert_eq!(
+            installed_directory(base, "windows"),
+            base.join("Programs").join("DX").join("Video")
+        );
+        assert_eq!(
+            installed_directory(base, "macos"),
+            base.join("DX").join("Video")
+        );
+        assert_eq!(
+            installed_directory(base, "linux"),
+            base.join("dx").join("video")
+        );
+        assert_eq!(player_filename_for("windows"), "dx-video-player.exe");
+        assert_eq!(player_filename_for("macos"), "dx-video-player");
+        assert_eq!(player_filename_for("linux"), "dx-video-player");
+    }
+
     #[cfg(windows)]
     #[test]
     fn incomplete_installed_player_reports_missing_runtime_files() {
@@ -479,13 +543,9 @@ mod tests {
         std::fs::write(&installed, b"player").unwrap();
 
         let error = resolve_player_from(None, &installed, None).unwrap_err();
-        match error {
-            VideoPlayerError::MissingRuntimeFiles { files, .. } => {
-                assert_eq!(files.len(), WINDOWS_RUNTIME_FILES.len() + 1);
-                assert!(files.contains(&"avcodec-62.dll".to_string()));
-                assert!(files.contains(&RUNTIME_MANIFEST.to_string()));
-            }
-            other => panic!("expected missing runtime files, got {other:?}"),
-        }
+        assert!(matches!(
+            error,
+            VideoPlayerError::RuntimeManifestUnreadable { .. }
+        ));
     }
 }
