@@ -52,6 +52,7 @@ impl SoundCue {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationSound {
     Splash,
+    Workspace,
     Train,
     Matrix,
     Confetti,
@@ -86,6 +87,8 @@ impl AnimationSound {
             Self::Fireworks => &[SoundAsset::Fireworks],
             // File browser: silent (no eagle).
             Self::FileBrowser => &[],
+            // Workspace is a live chat surface rather than an animation.
+            Self::Workspace => &[],
         }
     }
 

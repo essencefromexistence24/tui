@@ -618,6 +618,8 @@ pub enum Action {
     OpenCommandPalette,
     /// Switch the active agent to a directly embedded DX surface.
     SwitchDxView(crate::dx::DxView),
+    /// Validate and launch one video path in the separate native DX player.
+    PlayVideo(String),
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
     /// Open the onboarding tutorial overlay (`/tutorial` or the command

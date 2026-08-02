@@ -107,11 +107,15 @@ pub fn render(
     state.panel_area = area;
     state.section_areas = [Rect::default(); SECTION_COUNT];
     state.row_areas.clear();
+    // Keep the panel on the theme's elevated surface. Every child style below
+    // repeats this background so widget rendering cannot fall back to the
+    // terminal default when themes change at runtime.
+    let panel_bg = theme.bg_light;
 
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             buf[(x, y)].reset();
-            buf[(x, y)].set_bg(theme.bg_dark);
+            buf[(x, y)].set_bg(panel_bg);
         }
     }
 
@@ -140,13 +144,14 @@ pub fn render(
         model.title.as_str(),
         Style::default()
             .fg(theme.text_primary)
+            .bg(panel_bg)
             .add_modifier(Modifier::BOLD),
     ))
     .wrap(ratatui::widgets::Wrap { trim: true })
     .render(title_area, buf);
     Paragraph::new(Span::styled(
         format!("#{}", model.session_id),
-        Style::default().fg(theme.text_secondary),
+        Style::default().fg(theme.text_secondary).bg(panel_bg),
     ))
     .render(
         Rect {
@@ -190,7 +195,8 @@ pub fn render(
         content_y = content_y.saturating_add(*section_height);
         if section_index == NOTES_SECTION && open && section_top >= state.scroll {
             let notes_y = sections_area.y + section_top - state.scroll;
-            let notes_height = (*section_height).min(sections_area.bottom().saturating_sub(notes_y));
+            let notes_height =
+                (*section_height).min(sections_area.bottom().saturating_sub(notes_y));
             if notes_height >= 3 {
                 // Deferred until after the row loop so its borders paint on
                 // top of the following section's header (previously the next
@@ -241,7 +247,8 @@ pub fn render(
                 Paragraph::new(Span::styled(
                     label,
                     Style::default()
-                        .fg(theme.gray_bright)
+                        .fg(theme.accent_user)
+                        .bg(panel_bg)
                         .add_modifier(Modifier::BOLD),
                 ))
                 .render(row_area, buf);
@@ -256,23 +263,27 @@ pub fn render(
                 let style = if empty {
                     Style::default()
                         .fg(theme.gray)
+                        .bg(panel_bg)
                         .add_modifier(Modifier::ITALIC)
                 } else if section_index == TASKS_SECTION && line.contains("[done]") {
                     Style::default()
                         .fg(theme.accent_success)
+                        .bg(panel_bg)
                         .add_modifier(Modifier::DIM)
                 } else if (section_index == TASKS_SECTION || section_index == WORKFLOWS_SECTION)
                     && line.contains("[active]")
                 {
                     Style::default()
                         .fg(theme.warning)
+                        .bg(panel_bg)
                         .add_modifier(Modifier::BOLD)
                 } else if section_index == TASKS_SECTION && line.contains("[cancelled]") {
                     Style::default()
                         .fg(theme.gray)
+                        .bg(panel_bg)
                         .add_modifier(Modifier::CROSSED_OUT)
                 } else {
-                    Style::default().fg(theme.text_primary)
+                    Style::default().fg(theme.text_primary).bg(panel_bg)
                 };
                 let display = ellipsize(&format!("  {line}"), row_area.width as usize);
                 Paragraph::new(Span::styled(display, style)).render(row_area, buf);
@@ -292,11 +303,13 @@ pub fn render(
         Block::default()
             .borders(Borders::ALL)
             .border_type(ratatui::widgets::BorderType::Rounded)
-            .border_style(Style::default().fg(theme.gray_dim))
+            .border_style(Style::default().fg(theme.gray_dim).bg(panel_bg))
+            .style(Style::default().fg(theme.text_primary).bg(panel_bg))
             .title(Span::styled(
                 " Notes ",
                 Style::default()
                     .fg(theme.text_primary)
+                    .bg(panel_bg)
                     .add_modifier(Modifier::BOLD),
             ))
             .render(notes_area, buf);
@@ -314,11 +327,13 @@ pub fn render(
             let cell = &mut buf[(x, y)];
             cell.set_char('│');
             cell.set_fg(theme.scrollbar_bg);
+            cell.set_bg(panel_bg);
         }
         for y in 0..thumb_height {
             let cell = &mut buf[(x, sections_area.y + thumb_y + y)];
             cell.set_char('┃');
             cell.set_fg(theme.scrollbar_fg);
+            cell.set_bg(panel_bg);
         }
     }
 
@@ -327,12 +342,12 @@ pub fn render(
             " {}",
             truncate_start(&model.cwd, chunks[4].width.saturating_sub(1) as usize)
         ),
-        Style::default().fg(theme.text_primary),
+        Style::default().fg(theme.text_primary).bg(panel_bg),
     ))
     .render(chunks[4], buf);
     Paragraph::new(Span::styled(
         format!(" {}", model.version),
-        Style::default().fg(theme.gray),
+        Style::default().fg(theme.text_secondary).bg(panel_bg),
     ))
     .render(chunks[5], buf);
 }

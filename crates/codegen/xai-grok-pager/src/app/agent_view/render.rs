@@ -29,30 +29,158 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-/// Editor embedded-theme names (mirror of `dx-editor`'s `themes/*.json`).
-const EDITOR_THEME_NAMES: &[&str] = &[
-    "dark",
-    "light",
-    "high-contrast",
-    "nostalgia",
-    "terminal",
-    "vercel",
-    "dracula",
-    "nord",
-    "solarized-dark",
-];
+/// Translate every editor color role onto the active Grok palette. The DX
+/// editor keeps its layout and behavior, but no longer carries an independent
+/// built-in color scheme while embedded in Grok Build.
+fn editor_theme_overrides(theme: &Theme) -> Vec<(&'static str, ratatui::style::Color)> {
+    vec![
+        ("editor.bg", theme.bg_base),
+        ("editor.fg", theme.text_primary),
+        ("editor.cursor", theme.accent_user),
+        ("editor.inactive_cursor", theme.gray),
+        ("editor.selection_bg", theme.bg_visual),
+        ("editor.current_line_bg", theme.bg_highlight),
+        ("editor.line_number_fg", theme.gray_dim),
+        ("editor.line_number_bg", theme.bg_base),
+        ("editor.after_eof_bg", theme.bg_base),
+        ("editor.ruler_bg", theme.bg_dark),
+        ("editor.indentation_guide_fg", theme.gray_dim),
+        ("editor.whitespace_indicator_fg", theme.gray_dim),
+        ("editor.bracket_match_fg", theme.fuzzy_accent),
+        ("editor.bracket_rainbow_1", theme.md_heading_h1),
+        ("editor.bracket_rainbow_2", theme.md_heading_h2),
+        ("editor.bracket_rainbow_3", theme.md_heading_h3),
+        ("editor.bracket_rainbow_4", theme.md_heading_h4),
+        ("editor.bracket_rainbow_5", theme.md_heading_h5),
+        ("editor.bracket_rainbow_6", theme.md_heading_h6),
+        ("editor.diff_add_bg", theme.diff_insert_bg),
+        ("editor.diff_remove_bg", theme.diff_delete_bg),
+        ("editor.diff_modify_bg", theme.bg_hover),
+        ("editor.diff_add_highlight_bg", theme.diff_insert_bg),
+        ("editor.diff_remove_highlight_bg", theme.diff_delete_bg),
+        ("ui.tab_active_fg", theme.text_primary),
+        ("ui.tab_active_bg", theme.bg_highlight),
+        ("ui.tab_inactive_fg", theme.text_secondary),
+        ("ui.tab_inactive_bg", theme.bg_dark),
+        ("ui.tab_separator_bg", theme.bg_base),
+        ("ui.tab_close_hover_fg", theme.accent_error),
+        ("ui.tab_hover_bg", theme.bg_hover),
+        ("ui.menu_bg", theme.bg_light),
+        ("ui.menu_fg", theme.text_primary),
+        ("ui.menu_active_bg", theme.bg_visual),
+        ("ui.menu_active_fg", theme.text_primary),
+        ("ui.menu_dropdown_bg", theme.bg_light),
+        ("ui.menu_dropdown_fg", theme.text_primary),
+        ("ui.menu_highlight_bg", theme.bg_visual),
+        ("ui.menu_highlight_fg", theme.text_primary),
+        ("ui.menu_border_fg", theme.selection_border),
+        ("ui.menu_separator_fg", theme.gray_dim),
+        ("ui.menu_hover_bg", theme.bg_hover),
+        ("ui.menu_hover_fg", theme.text_primary),
+        ("ui.menu_disabled_fg", theme.gray_dim),
+        ("ui.menu_disabled_bg", theme.bg_light),
+        ("ui.status_bar_fg", theme.text_secondary),
+        ("ui.status_bar_bg", theme.bg_dark),
+        ("ui.status_palette_fg", theme.text_primary),
+        ("ui.status_palette_bg", theme.accent_model),
+        ("ui.status_separator_fg", theme.gray_dim),
+        ("ui.status_separator_bg", theme.bg_dark),
+        ("ui.status_lsp_on_fg", theme.text_primary),
+        ("ui.status_lsp_on_bg", theme.accent_running),
+        ("ui.status_lsp_actionable_fg", theme.bg_base),
+        ("ui.status_lsp_actionable_bg", theme.warning),
+        ("ui.prompt_fg", theme.text_primary),
+        ("ui.prompt_bg", theme.bg_light),
+        ("ui.prompt_selection_fg", theme.text_primary),
+        ("ui.prompt_selection_bg", theme.bg_visual),
+        ("ui.popup_border_fg", theme.prompt_border_active),
+        ("ui.popup_bg", theme.bg_light),
+        ("ui.popup_selection_bg", theme.bg_visual),
+        ("ui.popup_selection_fg", theme.text_primary),
+        ("ui.popup_text_fg", theme.text_primary),
+        ("ui.text_input_selection_bg", theme.bg_visual),
+        ("ui.suggestion_bg", theme.bg_light),
+        ("ui.suggestion_fg", theme.text_secondary),
+        ("ui.suggestion_selected_bg", theme.bg_visual),
+        ("ui.help_bg", theme.bg_light),
+        ("ui.help_fg", theme.text_primary),
+        ("ui.help_key_fg", theme.accent_skill),
+        ("ui.help_separator_fg", theme.gray_dim),
+        ("ui.help_indicator_fg", theme.bg_base),
+        ("ui.help_indicator_bg", theme.accent_system),
+        ("ui.inline_code_bg", theme.md_code_bg),
+        ("ui.split_separator_fg", theme.gray_dim),
+        ("ui.split_separator_hover_fg", theme.hover_border),
+        ("ui.scrollbar_track_fg", theme.scrollbar_bg),
+        ("ui.scrollbar_thumb_fg", theme.scrollbar_fg),
+        ("ui.scrollbar_track_hover_fg", theme.bg_hover),
+        ("ui.scrollbar_thumb_hover_fg", theme.accent_user),
+        ("ui.compose_margin_bg", theme.bg_dark),
+        ("ui.semantic_highlight_bg", theme.bg_visual),
+        ("ui.terminal_bg", theme.bg_terminal),
+        ("ui.terminal_fg", theme.text_primary),
+        ("ui.status_warning_indicator_bg", theme.warning),
+        ("ui.status_warning_indicator_fg", theme.bg_base),
+        ("ui.status_error_indicator_bg", theme.accent_error),
+        ("ui.status_error_indicator_fg", theme.bg_base),
+        ("ui.status_warning_indicator_hover_bg", theme.accent_plan),
+        ("ui.status_warning_indicator_hover_fg", theme.bg_base),
+        ("ui.status_error_indicator_hover_bg", theme.accent_error),
+        ("ui.status_error_indicator_hover_fg", theme.text_primary),
+        ("ui.tab_drop_zone_bg", theme.bg_visual),
+        ("ui.tab_drop_zone_border", theme.selection_border),
+        ("ui.settings_selected_bg", theme.bg_visual),
+        ("ui.settings_selected_fg", theme.text_primary),
+        ("ui.file_status_added_fg", theme.accent_success),
+        ("ui.file_status_modified_fg", theme.warning),
+        ("ui.file_status_deleted_fg", theme.accent_error),
+        ("ui.file_status_renamed_fg", theme.accent_user),
+        ("ui.file_status_untracked_fg", theme.gray_bright),
+        ("ui.file_status_conflicted_fg", theme.accent_error),
+        ("search.match_bg", theme.bg_visual),
+        ("search.match_fg", theme.fuzzy_accent),
+        ("search.label_bg", theme.bg_highlight),
+        ("search.label_fg", theme.text_primary),
+        ("diagnostic.error_fg", theme.accent_error),
+        ("diagnostic.error_bg", theme.diff_delete_bg),
+        ("diagnostic.warning_fg", theme.warning),
+        ("diagnostic.warning_bg", theme.bg_highlight),
+        ("diagnostic.info_fg", theme.running),
+        ("diagnostic.info_bg", theme.bg_highlight),
+        ("diagnostic.hint_fg", theme.accent_thinking),
+        ("diagnostic.hint_bg", theme.bg_highlight),
+        ("syntax.keyword", theme.command),
+        ("syntax.string", theme.accent_success),
+        ("syntax.comment", theme.gray),
+        ("syntax.function", theme.accent_user),
+        ("syntax.type", theme.accent_assistant),
+        ("syntax.variable", theme.md_text),
+        ("syntax.variable_builtin", theme.accent_verify),
+        ("syntax.constant", theme.path),
+        ("syntax.operator", theme.md_code),
+        ("syntax.punctuation_bracket", theme.gray_bright),
+        ("syntax.punctuation_delimiter", theme.text_secondary),
+    ]
+}
 
-/// Map the active pager theme onto the DX editor's own embedded theme
-/// catalog. A theme name that exists in both catalogs (e.g. `vercel`)
-/// maps directly; every other theme snaps to the editor's `dark` or
-/// `light` by background polarity.
-fn editor_theme_for(theme: &Theme) -> &'static str {
-    if let Some(name) = Theme::current_dx()
-        && let Some(matched) = EDITOR_THEME_NAMES.iter().find(|n| **n == name)
-    {
-        return matched;
+#[cfg(test)]
+mod editor_theme_sync_tests {
+    use super::*;
+
+    #[test]
+    fn every_grok_editor_override_is_a_real_editor_theme_key() {
+        let grok = Theme::tokyonight();
+        let overrides = editor_theme_overrides(&grok);
+        let mut editor = dx::view::theme::Theme::load_builtin("dark").expect("dark editor theme");
+        let applied = editor.override_colors(overrides.iter().copied());
+
+        assert_eq!(applied, overrides.len());
+        assert_eq!(editor.editor_bg, grok.bg_base);
+        assert_eq!(editor.editor_fg, grok.text_primary);
+        assert_eq!(editor.selection_bg, grok.bg_visual);
+        assert_eq!(editor.syntax_keyword, grok.command);
+        assert_eq!(editor.diagnostic_error_fg, grok.accent_error);
     }
-    if theme.is_dark() { "dark" } else { "light" }
 }
 use std::collections::HashSet;
 use std::time::Instant;
@@ -727,21 +855,22 @@ impl AgentView {
         let full_area = area;
         let dx_chrome_visible =
             !in_dashboard_overlay && !self.modal_owns_input() && !self.dx_ui.palette_visible;
+        let dx_workspace_screen = self.dx_ui.view == crate::dx::DxView::Animation
+            && self.dx_ui.animation.current() == crate::dx::animation::AnimationKind::Workspace;
+        let dx_chat_layout = self.dx_ui.view == crate::dx::DxView::Chat || dx_workspace_screen;
         // The unified extensions menu is an overlay over the working chat,
         // not a replacement screen. Keep the right sidebar in the underlying
         // layout so session context remains visible around the modal.
         let dx_sidebar_visible = !in_dashboard_overlay
             && !self.dx_ui.palette_visible
-            && self.dx_ui.view == crate::dx::DxView::Chat
+            && dx_chat_layout
             && (!self.modal_owns_input() || self.extensions_modal.is_some());
         let (area, dx_sidebar_area) =
             crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_sidebar_visible);
         // Minimap is a short rail beside scrollback only — not a full-height
         // column — so the prompt keeps the full width of the left column.
         // Hidden on non-chat screens (carousel, editor, file browser).
-        let dx_minimap_visible = self.dx_ui.minimap_visible
-            && dx_chrome_visible
-            && self.dx_ui.view == crate::dx::DxView::Chat;
+        let dx_minimap_visible = self.dx_ui.minimap_visible && dx_chrome_visible && dx_chat_layout;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -768,11 +897,10 @@ impl AgentView {
             if let Err(error) = self.dx_ui.editor.tick() {
                 tracing::error!(%error, "DX editor tick failed");
             }
-            // Full theme sync: the code editor follows the global pager
-            // theme by applying its own closest embedded theme. Names that
-            // exist in both catalogs match directly; everything else snaps
-            // to the editor's dark or light theme by background polarity.
-            self.dx_ui.editor.apply_theme(editor_theme_for(&theme));
+            let base = if theme.is_dark() { "dark" } else { "light" };
+            self.dx_ui
+                .editor
+                .apply_host_theme(base, editor_theme_overrides(&theme));
             self.dx_ui.editor.render(full_area, buf);
             let cursor = self
                 .dx_ui
@@ -786,7 +914,7 @@ impl AgentView {
             return (None, None);
         }
         let dx_animation_mode = self.dx_ui.view == crate::dx::DxView::Animation;
-        if dx_animation_mode {
+        if dx_animation_mode && !dx_workspace_screen {
             // Carousel screens keep the real prompt and completion menus, but
             // intentionally omit the passive bottom-left ghost suggestion.
             self.prompt.prompt_suggestion.dismiss();
@@ -1060,7 +1188,7 @@ impl AgentView {
             let style = PromptStyle {
                 focused: true,
                 show_prefix: false,
-            vpad_top: 1,
+                vpad_top: 1,
                 chrome: false,
                 chrome_pad_left: 0,
                 chrome_pad_right: 0,
@@ -2305,7 +2433,7 @@ impl AgentView {
                     let perm_followup_style = PromptStyle {
                         focused: true,
                         show_prefix: false,
-            vpad_top: 1,
+                        vpad_top: 1,
                         chrome: false,
                         chrome_pad_left: 0,
                         chrome_pad_right: 0,
@@ -4314,7 +4442,7 @@ impl AgentView {
         } else {
             prompt_cursor_pos
         };
-        if dx_animation_mode {
+        if dx_animation_mode && !dx_workspace_screen {
             // Grok input dropdowns are painted before the DX carousel. Stop
             // the animation above their top edge so `/`, `@`, completion, and
             // history menus remain visible and interactive over every screen.
@@ -4335,6 +4463,7 @@ impl AgentView {
                 && std::time::Instant::now() >= dl
             {
                 self.dx_ui.intro_deadline = None;
+                self.dx_ui.sound.stop_animation_loop();
                 self.dx_ui.view = crate::dx::DxView::Chat;
             }
             // Carousel uses only the left column so the sidebar stays

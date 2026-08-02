@@ -1089,6 +1089,24 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Action::PlayVideo(raw_path) => {
+            let cwd = get_active_agent_mut(app).map(|agent| agent.session.cwd.clone());
+            match cwd {
+                Some(cwd) => match crate::video_player::launch(&raw_path, &cwd) {
+                    Ok(launched) => app.show_toast(&format!(
+                        "Playing video: {}",
+                        launched
+                            .media
+                            .file_name()
+                            .unwrap_or_else(|| launched.media.as_os_str())
+                            .to_string_lossy()
+                    )),
+                    Err(error) => app.show_toast(&error.to_string()),
+                },
+                None => app.show_toast("Open a Grok session before using /video"),
+            }
+            Vec::new()
+        }
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
         Action::ConfirmResetSetting { choice } => dispatch_confirm_reset_setting(app, choice),

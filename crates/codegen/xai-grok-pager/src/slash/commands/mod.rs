@@ -68,6 +68,7 @@ pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
 pub mod usage;
+pub mod video;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
@@ -86,6 +87,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(dx_view::DxViewCommand::browser()),
         Arc::new(dx_view::DxViewCommand::diff()),
         Arc::new(dx_view::DxViewCommand::animation()),
+        Arc::new(video::VideoCommand),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
         Arc::new(delete::DeleteCommand),
@@ -220,6 +222,15 @@ mod tests {
         assert!(reg.get("model").is_some());
         assert!(reg.get("home").is_some());
         assert!(reg.get("view-plan").is_some());
+        assert!(reg.get("video").is_some(), "/video should be registered");
+        assert!(
+            reg.triggers().iter().any(|trigger| {
+                trigger.canonical == "video"
+                    && trigger.display == "/video"
+                    && trigger.usage == "/video <path>"
+            }),
+            "/video should appear in autocomplete and command help metadata"
+        );
         reg.set_available_tools(std::collections::HashSet::from([
             "scheduler_create".to_string()
         ]));

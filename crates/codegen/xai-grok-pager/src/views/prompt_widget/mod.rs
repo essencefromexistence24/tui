@@ -2906,10 +2906,14 @@ impl PromptWidget {
         let theme = Theme::current();
         let bg = style.bg.color(theme.bg_base);
 
+        // Use the active theme's semantic foregrounds directly. The older
+        // prompt-border slots can be Reset or too close to the canvas in
+        // some themes, which makes the box disappear even though the theme
+        // changed successfully.
         let border_color = style.border_color_override.unwrap_or(if style.focused {
-            theme.prompt_border_active
+            theme.accent_user
         } else {
-            theme.prompt_border
+            theme.text_secondary
         });
 
         // Fill entire area with fg + bg so every cell has RGB colors (needed for blending)

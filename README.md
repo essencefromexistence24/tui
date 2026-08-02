@@ -82,6 +82,25 @@ The binary artifact is named `xai-grok-pager`; official installs ship it as
 `grok`. On first launch it opens your browser to authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
+### DX video playback
+
+The full TUI supports `/video "<path>"`, which opens the media in the separate
+native DX video-player window and leaves Grok's terminal responsive. Relative
+paths are resolved from the active session workspace, so generated video output
+can be played directly. Native-window embedding in a terminal is intentionally
+not supported.
+
+On Windows, install or update a trusted local player package without
+administrator rights:
+
+```powershell
+.\crates\codegen\xai-grok-pager\scripts\install-video-player.ps1 -SourceDirectory G:\Dx\hexxed\terminal\dx-video-player
+```
+
+The installer copies the verified executable and its complete DLL runtime to
+`%LOCALAPPDATA%\Programs\DX\Video`. For development, `DX_VIDEO_PLAYER` may
+point directly to another player executable.
+
 ## Documentation
 
 Full online documentation is available at

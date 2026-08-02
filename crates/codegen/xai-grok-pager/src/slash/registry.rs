@@ -212,8 +212,9 @@ impl CommandRegistry {
     /// command (the shell may advertise a same-named command with different
     /// semantics).
     pub fn get_for_dispatch(&self, key: &str) -> Option<&Arc<dyn SlashCommand>> {
+        let key = key.to_ascii_lowercase();
         self.key_to_index
-            .get(key)
+            .get(&key)
             .and_then(|idx| self.commands.get(*idx))
             .filter(|cmd| !self.hidden.contains(cmd.name()))
             .filter(|cmd| !self.restricted_match(cmd))
@@ -225,7 +226,13 @@ impl CommandRegistry {
     pub(crate) fn mode_support(&self, key: &str) -> ModeSupport {
         self.commands
             .iter()
-            .find(|cmd| cmd.name() == key || cmd.aliases().contains(&key))
+            .find(|cmd| {
+                cmd.name().eq_ignore_ascii_case(key)
+                    || cmd
+                        .aliases()
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(key))
+            })
             .map_or(ModeSupport::Both, |cmd| cmd.mode_support())
     }
 
@@ -315,8 +322,9 @@ impl CommandRegistry {
 
     /// Returns true if the command (by canonical name or alias) is a builtin.
     pub fn is_builtin(&self, key: &str) -> bool {
+        let key = key.to_ascii_lowercase();
         self.key_to_index
-            .get(key)
+            .get(&key)
             .and_then(|idx| self.sources.get(*idx))
             .is_some_and(|s| *s == CommandSource::Builtin)
     }
@@ -580,7 +588,8 @@ impl CommandRegistry {
             // invoking one shows the SuperGrok upsell instead.
 
             // Insert canonical key.
-            self.key_to_index.insert(canonical.to_string(), idx);
+            self.key_to_index
+                .insert(canonical.to_ascii_lowercase(), idx);
             if !menu_only {
                 self.triggers
                     .push(CommandTrigger::new(command, None, canonical, idx, source));
@@ -588,13 +597,16 @@ impl CommandRegistry {
 
             // Insert alias keys.
             for alias in command.aliases() {
-                if source == CommandSource::Builtin && self.key_to_index.contains_key(*alias) {
+                let normalized_alias = alias.to_ascii_lowercase();
+                if source == CommandSource::Builtin
+                    && self.key_to_index.contains_key(&normalized_alias)
+                {
                     panic!(
                         "slash command alias '{}' is already registered (builtin collision)",
                         alias
                     );
                 }
-                self.key_to_index.insert(alias.to_string(), idx);
+                self.key_to_index.insert(normalized_alias, idx);
                 if !menu_only {
                     self.triggers.push(CommandTrigger::new(
                         command,

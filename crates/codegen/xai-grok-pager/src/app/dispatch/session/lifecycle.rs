@@ -418,12 +418,12 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
                 crate::dx::DxView::Chat => {}
             }
             agent.dx_ui.view = view;
-            // Welcome→chat intro animation: play the configured intro and
-            // auto-dismiss to Chat after 3 s.
+            // Welcome→chat intro animation: show the default Splash screen
+            // and auto-dismiss to Chat after 2 s.
             if view == crate::dx::DxView::Animation {
-                agent.dx_ui.animation.begin_intro();
+                agent.dx_ui.animation.begin_splash();
                 agent.dx_ui.intro_deadline =
-                    Some(Instant::now() + std::time::Duration::from_secs(3));
+                    Some(Instant::now() + std::time::Duration::from_secs(2));
             }
         }
     }

@@ -48,12 +48,33 @@ use tokio::sync::mpsc;
 
 static INITIALIZED: OnceLock<Result<(), String>> = OnceLock::new();
 
-/// Format a ratatui color as a YAZI/Lua TOML hex string, or `None` when the
-/// color carries no paint (Reset / named colors we cannot round-trip).
-fn hex(color: Color) -> Option<String> {
+/// Format a ratatui color as a YAZI/Lua TOML color value.
+///
+/// The active pager theme can contain RGB, ANSI named, reset, or indexed
+/// colors depending on terminal capabilities. Dropping the non-RGB variants
+/// makes the file browser silently fall back to its embedded preset, which is
+/// why this conversion must preserve every color representation.
+fn color_value(color: Color) -> Option<String> {
     match color {
+        Color::Reset => Some("reset".to_owned()),
+        Color::Black => Some("black".to_owned()),
+        Color::Red => Some("red".to_owned()),
+        Color::Green => Some("green".to_owned()),
+        Color::Yellow => Some("yellow".to_owned()),
+        Color::Blue => Some("blue".to_owned()),
+        Color::Magenta => Some("magenta".to_owned()),
+        Color::Cyan => Some("cyan".to_owned()),
+        Color::Gray => Some("gray".to_owned()),
+        Color::DarkGray => Some("darkgray".to_owned()),
+        Color::LightRed => Some("lightred".to_owned()),
+        Color::LightGreen => Some("lightgreen".to_owned()),
+        Color::LightYellow => Some("lightyellow".to_owned()),
+        Color::LightBlue => Some("lightblue".to_owned()),
+        Color::LightMagenta => Some("lightmagenta".to_owned()),
+        Color::LightCyan => Some("lightcyan".to_owned()),
+        Color::White => Some("white".to_owned()),
+        Color::Indexed(index) => Some(index.to_string()),
         Color::Rgb(r, g, b) => Some(format!("#{r:02x}{g:02x}{b:02x}")),
-        _ => None,
     }
 }
 
@@ -85,16 +106,27 @@ fn fb_theme_override(theme: &crate::theme::Theme) -> String {
         out.push('}');
         out
     };
-    let hex = |c: Color| hex(c);
-    let bg = hex(theme.bg_base);
-    let bg_hl = hex(theme.bg_highlight);
-    let fg = hex(theme.text_primary);
-    let muted = hex(theme.gray);
-    let dim = hex(theme.gray_dim);
-    let accent = hex(theme.accent_user);
-    let ok = hex(theme.accent_success);
-    let err = hex(theme.accent_error);
-    let warn = hex(theme.warning);
+    let color = |c: Color| color_value(c);
+    let bg = color(theme.bg_base);
+    let surface = color(theme.bg_light);
+    let raised = color(theme.bg_dark);
+    let bg_hl = color(theme.bg_highlight);
+    let hover = color(theme.bg_hover);
+    let selected = color(theme.bg_visual);
+    let fg = color(theme.text_primary);
+    let secondary = color(theme.text_secondary);
+    let dim = color(theme.gray_dim);
+    let bright = color(theme.gray_bright);
+    let accent = color(theme.accent_user);
+    let assistant = color(theme.accent_assistant);
+    let tool = color(theme.accent_tool);
+    let system = color(theme.accent_system);
+    let ok = color(theme.accent_success);
+    let running = color(theme.accent_running);
+    let err = color(theme.accent_error);
+    let warn = color(theme.warning);
+    let fuzzy = color(theme.fuzzy_accent);
+    let border_color = color(theme.selection_border);
 
     format!(
         r#"
@@ -199,49 +231,49 @@ footer = {footer}
 "#,
         app = style(None, bg.clone(), false),
         cwd = style(fg.clone(), None, true),
-        find_kw = style(fg.clone(), None, true),
-        find_pos = style(dim.clone(), None, true),
-        symlink = style(muted.clone(), None, true),
+        find_kw = style(fuzzy.clone(), None, true),
+        find_pos = style(secondary.clone(), None, true),
+        symlink = style(color(theme.path), None, true),
         mcopied = style(ok.clone(), ok.clone(), false),
         mcut = style(err.clone(), err.clone(), false),
-        mmarked = style(fg.clone(), fg.clone(), false),
+        mmarked = style(assistant.clone(), assistant.clone(), false),
         mselected = style(accent.clone(), accent.clone(), false),
         ccopied = style(fg.clone(), ok.clone(), false),
         ccut = style(fg.clone(), err.clone(), false),
         cselected = style(bg.clone(), accent.clone(), false),
-        border = style(dim.clone(), None, false),
-        tabs_active = style(bg.clone(), accent.clone(), true),
-        tabs_inactive = style(fg.clone(), bg_hl.clone(), false),
+        border = style(border_color, None, false),
+        tabs_active = style(fg.clone(), bg_hl.clone(), true),
+        tabs_inactive = style(secondary.clone(), raised.clone(), false),
         mode_main = style(bg.clone(), accent.clone(), true),
-        mode_alt = style(fg.clone(), bg_hl.clone(), false),
-        select_main = style(bg.clone(), accent.clone(), true),
-        select_alt = style(fg.clone(), bg_hl.clone(), false),
+        mode_alt = style(secondary.clone(), surface.clone(), false),
+        select_main = style(fg.clone(), selected.clone(), true),
+        select_alt = style(assistant.clone(), surface.clone(), false),
         unset_main = style(fg.clone(), err.clone(), true),
-        unset_alt = style(err.clone(), bg_hl.clone(), false),
-        status_overall = style(None, bg.clone(), false),
+        unset_alt = style(err.clone(), surface.clone(), false),
+        status_overall = style(None, raised.clone(), false),
         perm_sep = style(dim.clone(), None, false),
-        perm_type = style(ok.clone(), None, false),
+        perm_type = style(tool.clone(), None, false),
         perm_read = style(warn.clone(), None, false),
         perm_write = style(err.clone(), None, false),
         perm_exec = style(ok.clone(), None, false),
-        progress_normal = style(ok.clone(), bg.clone(), false),
+        progress_normal = style(running.clone(), bg.clone(), false),
         progress_error = style(warn.clone(), err.clone(), false),
-        which_mask = style(None, bg.clone(), false),
-        which_cand = style(fg.clone(), None, false),
+        which_mask = style(None, surface.clone(), false),
+        which_cand = style(fuzzy, None, false),
         which_rest = style(dim.clone(), None, false),
-        which_desc = style(muted.clone(), None, false),
-        title = style(fg.clone(), None, true),
+        which_desc = style(secondary.clone(), None, false),
+        title = style(system, None, true),
         body = style(fg.clone(), None, false),
-        tbl_col = style(dim.clone(), None, false),
+        tbl_col = style(bright, None, false),
         btn_yes = style(bg.clone(), ok.clone(), true),
         btn_no = style(bg.clone(), err.clone(), true),
-        notify_info = style(ok.clone(), None, false),
+        notify_info = style(running, None, false),
         notify_warn = style(warn.clone(), None, false),
         notify_error = style(err.clone(), None, false),
-        pick_active = style(bg.clone(), accent.clone(), false),
-        pick_inactive = style(fg.clone(), None, false),
-        input_selected = style(bg.clone(), accent.clone(), false),
-        tasks_hovered = style(None, bg_hl.clone(), false),
+        pick_active = style(fg.clone(), selected.clone(), false),
+        pick_inactive = style(secondary, None, false),
+        input_selected = style(fg.clone(), selected, false),
+        tasks_hovered = style(None, hover, false),
         help_on = style(ok.clone(), None, false),
         footer = style(dim.clone(), None, false),
     )
@@ -253,7 +285,7 @@ struct BrowserEngine {
     events: Option<mpsc::UnboundedReceiver<FbEvent>>,
     error: Option<String>,
     last_area: Rect,
-    applied_theme: Option<String>,
+    applied_theme: Option<(bool, String)>,
 }
 
 impl Default for BrowserEngine {
@@ -564,16 +596,18 @@ impl BrowserEngine {
         self.last_area = area;
         self.ensure_initialized();
         // Full theme sync: push the active pager palette into the YAZI Lua
-        // theme so the file browser follows the global theme. Rebuilds the
-        // embedded preset only when the canonical theme changes.
-        let canonical = crate::theme::Theme::current_canonical();
-        if self.applied_theme.as_deref() != Some(canonical) {
-            let theme = crate::theme::Theme::current();
-            let override_toml = fb_theme_override(&theme);
+        // theme so the file browser follows the global theme. Compare the
+        // generated values, not just the theme name: terminal quantization,
+        // auto light/dark changes, and runtime palette updates can all change
+        // the colors while the canonical name stays the same.
+        let theme = crate::theme::Theme::current();
+        let override_toml = fb_theme_override(&theme);
+        let theme_signature = (theme.is_dark(), override_toml.clone());
+        if self.applied_theme.as_ref() != Some(&theme_signature) {
             if let Err(error) = fb_config::override_theme(theme.is_dark(), &override_toml) {
                 tracing::warn!(%error, "DX file browser theme override failed");
             } else {
-                self.applied_theme = Some(canonical.to_string());
+                self.applied_theme = Some(theme_signature);
             }
         }
         if let Err(error) = self.pump_events() {
@@ -626,9 +660,7 @@ impl BrowserEngine {
                 LAYOUT.set(layout);
             }
             let elements = root.call_method("redraw", ())?;
-            render_once(elements, buf, |position| {
-                core.mgr.area(position)
-            });
+            render_once(elements, buf, |position| core.mgr.area(position));
             Ok::<(), mlua::Error>(())
         });
         if let Err(error) = lua_result {
@@ -726,5 +758,36 @@ mod tests {
         let first = FileBrowserSurface::default();
         let second = FileBrowserSurface::default();
         assert!(Rc::ptr_eq(&first.engine, &second.engine));
+    }
+
+    #[test]
+    fn active_theme_colors_round_trip_to_file_browser_values() {
+        assert_eq!(color_value(Color::Reset).as_deref(), Some("reset"));
+        assert_eq!(color_value(Color::DarkGray).as_deref(), Some("darkgray"));
+        assert_eq!(color_value(Color::Indexed(42)).as_deref(), Some("42"));
+        assert_eq!(
+            color_value(Color::Rgb(12, 34, 56)).as_deref(),
+            Some("#0c2238")
+        );
+    }
+
+    #[test]
+    fn browser_theme_sync_uses_live_surface_selection_and_semantic_colors() {
+        let mut theme = crate::theme::Theme::tokyonight();
+        theme.bg_base = Color::Rgb(1, 2, 3);
+        theme.bg_hover = Color::Rgb(4, 5, 6);
+        theme.bg_visual = Color::Rgb(7, 8, 9);
+        theme.fuzzy_accent = Color::Rgb(10, 11, 12);
+        theme.accent_error = Color::Rgb(13, 14, 15);
+
+        let value: toml::Value = toml::from_str(&fb_theme_override(&theme)).expect("valid TOML");
+        assert_eq!(value["app"]["overall"]["bg"].as_str(), Some("#010203"));
+        assert_eq!(value["tasks"]["hovered"]["bg"].as_str(), Some("#040506"));
+        assert_eq!(value["pick"]["active"]["bg"].as_str(), Some("#070809"));
+        assert_eq!(value["which"]["cand"]["fg"].as_str(), Some("#0a0b0c"));
+        assert_eq!(
+            value["notify"]["title_error"]["fg"].as_str(),
+            Some("#0d0e0f")
+        );
     }
 }

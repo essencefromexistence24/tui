@@ -6,6 +6,7 @@ use ratatui::{
     backend::{Backend, ClearType, WindowSize},
     buffer::{Buffer, Cell},
     layout::{Position, Rect, Size},
+    style::Color,
 };
 use tracing::error;
 
@@ -81,8 +82,14 @@ pub struct EditorAdapter {
     editor: Option<Editor>,
     needs_init: bool,
     last_cursor: Option<(Position, crossterm::cursor::SetCursorStyle)>,
-    pending_theme: Option<String>,
-    last_applied_theme: Option<String>,
+    pending_theme: Option<HostTheme>,
+    last_applied_theme: Option<HostTheme>,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct HostTheme {
+    base: &'static str,
+    overrides: Vec<(&'static str, Color)>,
 }
 
 impl EditorAdapter {
@@ -144,8 +151,22 @@ impl EditorAdapter {
                 // Drain async explorer init so the tree is ready on first paint.
                 let _ = editor.process_async_messages();
                 // Apply a theme requested before the editor finished init.
-                if let Some(theme) = self.pending_theme.take() {
-                    editor.apply_theme_external(&theme);
+                if let Some(theme) = self.pending_theme.clone()
+                    && let Some(applied) = editor.apply_theme_overrides_external(
+                        theme.base,
+                        "grok-build-active",
+                        theme.overrides.iter().copied(),
+                    )
+                {
+                    if applied != theme.overrides.len() {
+                        error!(
+                            applied,
+                            requested = theme.overrides.len(),
+                            "Some Grok theme roles were not recognized by the editor"
+                        );
+                    }
+                    self.last_applied_theme = Some(theme);
+                    self.pending_theme = None;
                 }
                 self.editor = Some(editor);
                 self.needs_init = false;
@@ -246,19 +267,33 @@ impl EditorAdapter {
         self.editor.is_some()
     }
 
-    /// Apply a built-in editor theme so the code editor follows the host
-    /// pager's active theme. If the editor is not initialized yet the theme
-    /// is queued and applied once initialization completes. Re-applying the
-    /// same theme is a no-op.
-    pub fn apply_theme(&mut self, key_or_name: &str) {
-        if self.last_applied_theme.as_deref() == Some(key_or_name) {
+    /// Apply the host's complete semantic palette to the embedded editor.
+    /// The built-in base supplies non-color behavior; every rendered color
+    /// role is then replaced by the host values. Re-applying an unchanged
+    /// palette is a no-op.
+    pub fn apply_host_theme(&mut self, base: &'static str, overrides: Vec<(&'static str, Color)>) {
+        let theme = HostTheme { base, overrides };
+        if self.last_applied_theme.as_ref() == Some(&theme) {
             return;
         }
-        self.last_applied_theme = Some(key_or_name.to_string());
         if let Some(editor) = &mut self.editor {
-            editor.apply_theme_external(key_or_name);
+            if let Some(applied) = editor.apply_theme_overrides_external(
+                theme.base,
+                "grok-build-active",
+                theme.overrides.iter().copied(),
+            ) {
+                if applied != theme.overrides.len() {
+                    error!(
+                        applied,
+                        requested = theme.overrides.len(),
+                        "Some Grok theme roles were not recognized by the editor"
+                    );
+                }
+                self.last_applied_theme = Some(theme);
+                self.pending_theme = None;
+            }
         } else {
-            self.pending_theme = Some(key_or_name.to_string());
+            self.pending_theme = Some(theme);
         }
     }
 

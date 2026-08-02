@@ -406,3 +406,229 @@ dx-animations = ["dx-chat", "dep:tachyonfx"] # animations
 | mlua adds Lua VM | Security surface | Gate behind `file-browser` feature; keep optional |
 | Two tokio runtimes (grok + editor) | Complex blocking patterns | Already handled in `EditorAdapter` via `block_in_place` |
 | Windows compatibility | Testing burden | Grok already supports Windows (protoc workaround documented in AGENTS.md) |
+
+---
+
+## 10. Video playback command (`/video`)
+
+### Implementation status — complete
+
+- [x] `/video <path>` is registered in Grok's live slash-command registry and help/autocomplete metadata.
+- [x] Raw quoted arguments are preserved and relative paths resolve from the active session workspace.
+- [x] Media paths are canonicalized and checked for existence, file type, and readability.
+- [x] `DX_VIDEO_PLAYER`, per-user installation, and debug artifact resolution are implemented in that order.
+- [x] The player is launched without a shell, with null stdio, its runtime directory as the working directory, and no console-detach flag that can suppress GUI startup.
+- [x] Windows launch success requires a visible player window; early exit or a three-second headless startup returns an error instead of a false `Playing` toast.
+- [x] The Windows per-user installer verifies and atomically installs the working player plus its 113-DLL recursive runtime manifest under `%LOCALAPPDATA%\Programs\DX\Video`.
+- [x] Unit tests cover registration, case-insensitive dispatch, quoted/relative paths, failures, runtime files, and resolver precedence.
+- [x] The installed x64 player was smoke-tested with `G:\Dx\hexxed\terminal\dx-video-player\titanic.mp4`; the resulting visible window was verified by its nonzero `HWND` and `titanic.mp4 - dx` title.
+
+### 10.1 Goal and non-goals
+
+Add a TUI slash command that launches the DX video player for a user-supplied
+video path, including videos produced by grok-build:
+
+```text
+/video "C:\path\to\video.mp4"
+```
+
+The video player opens in its own native window. It must not attempt to embed a
+Windows `HWND` into the Ratatui terminal buffer. A terminal TUI is a
+character-cell application, and embedding a native window is not portable
+across Windows Terminal, ConPTY, SSH, tmux, Linux terminals, or macOS terminals.
+
+Terminal-native frame rendering through Kitty, Sixel, or ANSI escape sequences
+is explicitly out of scope for this feature. Those protocols are optional and
+terminal-dependent; they are not a replacement for the DX video player's native
+window.
+
+### 10.2 Existing integration points
+
+The slash-command and dispatch implementation is split across:
+
+```text
+crates\codegen\xai-grok-pager\src\slash\commands\video.rs
+crates\codegen\xai-grok-pager\src\slash\commands\mod.rs
+crates\codegen\xai-grok-pager\src\app\dispatch\router.rs
+crates\codegen\xai-grok-pager\src\video_player.rs
+```
+
+The implementation must update all of these in the same change:
+
+1. Register `VideoCommand` in the built-in registry so autocomplete and `/help` show it.
+2. Preserve argument text in `execute()` so paths containing spaces can be parsed.
+3. Dispatch a typed `Action::PlayVideo` through the application router.
+4. Delegate process and path handling to the video-player module instead of
+   putting filesystem and process-launching details in the command matcher.
+
+The command performs a bounded startup handshake and returns as soon as the
+native window is visible (normally well below one second). It must not take
+ownership of the terminal's raw mode, alternate screen, stdin, stdout, or stderr.
+
+### 10.3 Command syntax and path rules
+
+Support these forms:
+
+```text
+/video "C:\Users\me\Videos\demo.mp4"
+/video C:\Videos\demo.mp4
+/video .\output\render.mp4
+```
+
+Rules:
+
+- Require exactly one path argument for the first implementation.
+- Remove one matching pair of surrounding quotes and preserve spaces inside it.
+- Resolve relative paths against the active Grok workspace/current directory.
+- Canonicalize the path before launching it.
+- Reject missing paths, directories, and unreadable files with a TUI toast.
+- Do not invoke `cmd.exe`, PowerShell, a shell string, or shell interpolation.
+  Pass the executable and video path as separate `Command` arguments.
+- Keep the command case-insensitive and ensure normal non-slash messages are
+  unaffected.
+
+Recommended user-facing errors:
+
+```text
+Usage: /video <path>
+Video file not found: <path>
+Video path is a directory: <path>
+DX video player is not installed. Run the DX installation/update command.
+```
+
+### 10.4 Player installation layout
+
+Windows should use a per-user installation, not `C:\Program Files`, so the
+feature works without administrator rights:
+
+```text
+%LOCALAPPDATA%\Programs\DX\Video\
+    dx-video-player.exe
+    runtime-manifest.txt
+    avcodec-62.dll
+    avformat-62.dll
+    avutil-60.dll
+    libass-9.dll
+    libplacebo-360.dll
+    ... all recursively required runtime DLLs
+```
+
+`dirs::data_local_dir()` is the preferred Rust API for resolving
+`%LOCALAPPDATA%`; do not hardcode a username or assume that the environment is
+always installed on `C:`. The final package must include every DLL listed in
+the checked-in recursive runtime manifest next to the executable.
+
+Executable resolution order should be:
+
+1. An explicit `DX_VIDEO_PLAYER` environment-variable override, useful for
+   development and testing.
+2. The installed per-user path above.
+3. A development fallback only when running an x64 debug build, using the
+   verified working artifact under `G:\Dx\hexxed\terminal\dx-video-player`.
+
+The production player should be copied from a release artifact during the DX
+installation/update flow. Do not download or execute an unverified binary
+silently from inside `/video`.
+
+For Windows architecture selection, ship the x86_64 player for normal x64
+systems and an ARM64 player for native ARM64 systems. The resolver should
+select the matching installed artifact and report a clear unsupported-platform
+error if no matching player exists.
+
+### 10.5 Process-launch behavior
+
+Implement a `VideoPlayer` helper with responsibilities limited to:
+
+- Resolve the installed executable.
+- Validate and canonicalize the media path.
+- Spawn the player with one path argument.
+- Give the player null standard handles and its own runtime directory as the
+  working directory without applying Windows console-detach creation flags.
+- Verify that the process creates a visible native window within three seconds.
+- Return a structured error for missing executable, missing DLLs, spawn
+  failure, early process exit, or headless startup.
+
+The player should open independently while the TUI remains usable. A future
+optional `/video --wait <path>` mode may wait for the player, but it should not
+be part of the initial command because waiting can interfere with TUI input and
+terminal restoration.
+
+### 10.6 Grok-build generated videos
+
+The first version only needs the explicit path form:
+
+```text
+/video "<grok-build-output-path>"
+```
+
+To make generated videos discoverable later, add a small video-artifact record
+to the Grok task/session state containing:
+
+- canonical output path;
+- creation time;
+- producing task/session identifier;
+- optional title and duration;
+- existence/readability status.
+
+Then add an optional convenience form such as:
+
+```text
+/video last
+```
+
+`last` must resolve only through the recorded artifact registry. It must not
+scan arbitrary directories or execute a path supplied by model text without
+the same validation used by an explicit path.
+
+### 10.7 Testing and acceptance criteria
+
+Unit tests:
+
+- `/video` appears in autocomplete and help output.
+- Quoted Windows paths with spaces resolve correctly.
+- Relative paths resolve against the active workspace.
+- Missing files and directories produce errors without spawning a process.
+- Normal chat input containing `/video` in the middle of text remains normal
+  chat input.
+- Executable resolution honors `DX_VIDEO_PLAYER` before the installed path.
+
+Windows integration/smoke tests:
+
+- Install the player and FFmpeg DLLs under `%LOCALAPPDATA%\Programs\DX\Video`.
+- Run `/video "G:\Dx\hexxed\terminal\dx-video-player\titanic.mp4"`.
+- Confirm the native player window opens and the TUI remains responsive.
+- Confirm paths containing spaces work.
+- Confirm a missing player and a missing media file show actionable toasts.
+- Confirm the player process does not inherit or corrupt the TUI's raw mode and
+  alternate screen.
+
+Cross-terminal acceptance:
+
+- Windows Terminal, ConHost, VS Code terminal, and an SSH/remote terminal may
+  differ in their TUI rendering, but all should be able to request the same
+  separate native player window when a local GUI session is available.
+- A remote/headless session cannot display a local native window; return a
+  clear error or document that the player must run on the local machine.
+
+### 10.8 Implementation order
+
+1. Add the player resolver/launcher module and path validation.
+2. Add `/video` to the slash-command specification, resolver, handler, help,
+   and autocomplete.
+3. Add the per-user player package/install/update layout.
+4. Add explicit-path support for Grok-generated video outputs.
+5. Add unit tests and Windows smoke tests.
+6. Add the optional `last` artifact lookup only after explicit-path playback is
+   stable.
+
+### 10.9 Definition of done
+
+- `/video "<path>"` launches the installed DX video player in a separate native
+  window.
+- The TUI remains responsive and its terminal state is preserved.
+- The player and all required FFmpeg DLLs are available from the per-user
+  `%LOCALAPPDATA%\Programs\DX\Video` installation.
+- Quoted paths, relative paths, generated-output paths, and failure cases are
+  tested.
+- Documentation clearly states that embedded playback inside the terminal is
+  not supported and that separate-window playback is intentional.

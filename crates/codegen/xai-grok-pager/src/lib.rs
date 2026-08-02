@@ -74,6 +74,7 @@ pub use xai_grok_pager_render::{
 pub mod trace_cmd;
 pub mod tracing;
 pub mod unified_log;
+pub mod video_player;
 pub mod views;
 pub mod voice;
 pub mod worktree_cmd;

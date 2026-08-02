@@ -463,6 +463,8 @@ impl AgentView {
         {
             self.dx_ui.palette_visible = false;
             self.dx_ui.diff.close();
+            self.dx_ui.intro_deadline = None;
+            self.dx_ui.sound.stop_animation_loop();
             self.dx_ui.view = crate::dx::DxView::Chat;
             return InputOutcome::Changed;
         }
@@ -471,6 +473,8 @@ impl AgentView {
             && key.code == KeyCode::Char('2')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
+            self.dx_ui.intro_deadline = None;
+            self.dx_ui.sound.stop_animation_loop();
             if self.dx_ui.view == crate::dx::DxView::Editor {
                 self.dx_ui.view = crate::dx::DxView::Chat;
             } else {
@@ -501,6 +505,8 @@ impl AgentView {
             && key.code == KeyCode::Char('3')
             && key.modifiers.contains(KeyModifiers::CONTROL)
         {
+            self.dx_ui.intro_deadline = None;
+            self.dx_ui.sound.stop_animation_loop();
             if self.dx_ui.view == crate::dx::DxView::FileBrowser {
                 self.dx_ui.view = crate::dx::DxView::Chat;
             } else {
@@ -537,10 +543,14 @@ impl AgentView {
         {
             if self.dx_ui.view == crate::dx::DxView::Animation {
                 self.dx_ui.sound.stop_animation_loop();
+                self.dx_ui.intro_deadline = None;
                 self.dx_ui.view = crate::dx::DxView::Chat;
             } else {
                 self.dx_ui.animation.restart();
                 self.prompt.prompt_suggestion.dismiss();
+                // Ctrl+5 opens the carousel for browsing; only the startup
+                // splash/intro is timed.
+                self.dx_ui.intro_deadline = None;
                 let sound = self.dx_ui.animation.current().sound();
                 self.dx_ui.sound.start_animation_loop(sound);
                 self.dx_ui.view = crate::dx::DxView::Animation;
@@ -556,6 +566,7 @@ impl AgentView {
                 match key.code {
                     KeyCode::Esc => {
                         self.dx_ui.sound.stop_animation_loop();
+                        self.dx_ui.intro_deadline = None;
                         self.dx_ui.view = crate::dx::DxView::Chat;
                         handled = true;
                     }
@@ -581,6 +592,7 @@ impl AgentView {
                     }
                     KeyCode::Enter if !self.prompt.text().is_empty() => {
                         self.dx_ui.sound.stop_animation_loop();
+                        self.dx_ui.intro_deadline = None;
                         self.dx_ui.view = crate::dx::DxView::Chat;
                     }
                     _ => {}
@@ -611,6 +623,9 @@ impl AgentView {
             self.dx_ui.intro_seen = true;
             self.dx_ui.animation.restart();
             self.prompt.prompt_suggestion.dismiss();
+            self.dx_ui.intro_deadline = Some(
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            );
             let sound = self.dx_ui.animation.current().sound();
             self.dx_ui.sound.start_animation_loop(sound);
             self.dx_ui.view = crate::dx::DxView::Animation;

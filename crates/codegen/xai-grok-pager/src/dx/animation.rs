@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Style},
     text::{Line, Span},
     widgets::{Paragraph, Widget},
@@ -41,6 +41,7 @@ const TRAIN_START_RIGHT_GUTTER_COLUMNS: u64 = 6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationKind {
     Splash,
+    Workspace,
     Train,
     Matrix,
     GameOfLife,
@@ -53,8 +54,9 @@ pub enum AnimationKind {
 }
 
 impl AnimationKind {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::Splash,
+        Self::Workspace,
         Self::Train,
         Self::Matrix,
         Self::GameOfLife,
@@ -69,6 +71,7 @@ impl AnimationKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Splash => "Splash",
+            Self::Workspace => "Workspace",
             Self::Matrix => "Matrix",
             Self::Train => "Train",
             Self::GameOfLife => "Game of Life",
@@ -84,6 +87,7 @@ impl AnimationKind {
     pub fn sound(self) -> super::sound::AnimationSound {
         match self {
             Self::Splash | Self::Matrix => super::sound::AnimationSound::Matrix,
+            Self::Workspace => super::sound::AnimationSound::Workspace,
             Self::Train => super::sound::AnimationSound::Train,
             Self::GameOfLife => super::sound::AnimationSound::GameOfLife,
             Self::Starfield => super::sound::AnimationSound::Starfield,
@@ -186,6 +190,19 @@ impl AnimationSurface {
         self.restart();
     }
 
+    /// Start the default welcome surface at the Splash carousel item.
+    ///
+    /// This is deliberately separate from `begin_intro`: the configurable
+    /// intro animation is useful for explicit intro playback, while a new
+    /// workspace should always enter through the named Splash screen.
+    pub fn begin_splash(&mut self) {
+        self.current = AnimationKind::ALL
+            .iter()
+            .position(|kind| *kind == AnimationKind::Splash)
+            .unwrap_or(0);
+        self.restart();
+    }
+
     pub fn select_outro(&mut self) {
         self.outro = self.current();
     }
@@ -194,7 +211,12 @@ impl AnimationSurface {
         self.current = AnimationKind::ALL
             .iter()
             .position(|kind| *kind == self.outro)
-            .unwrap_or(2);
+            .unwrap_or_else(|| {
+                AnimationKind::ALL
+                    .iter()
+                    .position(|kind| *kind == AnimationKind::Train)
+                    .unwrap_or(0)
+            });
         self.started_at = Instant::now();
         self.exiting = true;
         match self.outro {
@@ -240,6 +262,22 @@ impl AnimationSurface {
                 );
                 // render_controls commented out: the carousel uses full
                 // screen real-estate; navigation still works via ←/→ keys.
+                return;
+            }
+            AnimationKind::Workspace => {
+                // AgentView renders the live workspace here so the normal
+                // scrollback, prompt, minimap, and sidebar stay interactive.
+                // Keep the standalone surface useful for direct callers and
+                // carousel rendering tests with a themed marker.
+                Paragraph::new(Line::from(Span::styled(
+                    "Workspace",
+                    Style::default()
+                        .fg(theme.accent_user)
+                        .bg(background)
+                        .add_modifier(ratatui::style::Modifier::BOLD),
+                )))
+                .alignment(Alignment::Center)
+                .render(area, buf);
                 return;
             }
             AnimationKind::Matrix => {
@@ -753,6 +791,8 @@ mod tests {
         let mut surface = AnimationSurface::default();
         assert_eq!(surface.current(), AnimationKind::Splash);
         surface.next();
+        assert_eq!(surface.current(), AnimationKind::Workspace);
+        surface.next();
         assert_eq!(surface.current(), AnimationKind::Train);
         surface.next();
         assert_eq!(surface.current(), AnimationKind::Matrix);
@@ -765,6 +805,8 @@ mod tests {
         assert_eq!(surface.current(), AnimationKind::Train);
         surface.select_outro();
         assert_eq!(surface.outro, AnimationKind::Train);
+        surface.previous();
+        assert_eq!(surface.current(), AnimationKind::Workspace);
         surface.previous();
         assert_eq!(surface.current(), AnimationKind::Splash);
     }

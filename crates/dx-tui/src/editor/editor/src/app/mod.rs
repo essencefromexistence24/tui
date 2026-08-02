@@ -1572,6 +1572,32 @@ impl Editor {
 		self.apply_theme(key_or_name);
 	}
 
+	/// Apply a host-owned palette without persisting it as an editor setting.
+	///
+	/// Embedded hosts use this to keep the editor visually identical to their
+	/// live theme instead of selecting an approximately matching built-in.
+	pub fn apply_theme_overrides_external<I, K>(
+		&mut self,
+		base_theme: &str,
+		name: &str,
+		overrides: I,
+	) -> Option<usize>
+	where
+		I: IntoIterator<Item = (K, ratatui::style::Color)>,
+		K: AsRef<str>,
+	{
+		let Some(mut theme) = self.theme_registry.get_cloned(base_theme) else {
+			return None;
+		};
+		theme.name = name.to_string();
+		let applied = theme.override_colors(overrides);
+		*self.theme.write().unwrap() = theme;
+		self.start_theme_transition_animation();
+		self.theme.read().unwrap().set_terminal_cursor_color();
+		self.reapply_all_overlays();
+		Some(applied)
+	}
+
 	/// Snapshot of token values for a specific buffer (render path).
 	pub fn get_status_bar_element_values(&self, buffer_id: BufferId) -> HashMap<String, String> {
 		for window in self.windows.values() {
