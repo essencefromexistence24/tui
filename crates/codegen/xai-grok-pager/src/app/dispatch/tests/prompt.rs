@@ -2,6 +2,22 @@
 
 use super::*;
 
+#[test]
+fn first_message_from_splash_arms_the_two_second_intro() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.mark_project_picker_done();
+
+    assert_eq!(app.agents[&id].dx_ui.view, crate::dx::DxView::Animation);
+    assert!(app.agents[&id].dx_ui.intro_deadline.is_none());
+
+    let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
+
+    assert!(matches!(effects.as_slice(), [Effect::SendPrompt { .. }]));
+    assert_eq!(app.agents[&id].dx_ui.view, crate::dx::DxView::Animation);
+    assert!(app.agents[&id].dx_ui.intro_deadline.is_some());
+}
+
 /// Sending a prompt is a submit: it retires the active ephemeral tip.
 #[test]
 fn send_prompt_clears_active_ephemeral_tip() {

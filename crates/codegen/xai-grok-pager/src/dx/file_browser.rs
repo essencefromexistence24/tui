@@ -1,4 +1,4 @@
-//! In-process host for the DX file-browser engine.
+//! In-process host for the File Browser engine.
 //!
 //! This adapter deliberately does not call `fb_term::Term::start` or consume
 //! Crossterm events. Grok owns both. DX owns its browser `Core`, Lua layout,
@@ -129,8 +129,8 @@ fn fb_theme_override(theme: &crate::theme::Theme) -> String {
     let fuzzy = color(theme.fuzzy_accent);
     let border_color = color(theme.selection_border);
     let file = color(theme.text_primary).expect("every ratatui color has a TOML value");
-    let directory = color(theme.path).expect("every ratatui color has a TOML value");
-    let image = color(theme.warning).expect("every ratatui color has a TOML value");
+    let directory = color(theme.accent_user).expect("every ratatui color has a TOML value");
+    let image = color(theme.accent_assistant).expect("every ratatui color has a TOML value");
     let media = color(theme.accent_assistant).expect("every ratatui color has a TOML value");
     let archive = color(theme.accent_error).expect("every ratatui color has a TOML value");
     let document = color(theme.text_secondary).expect("every ratatui color has a TOML value");
@@ -270,10 +270,10 @@ conds = [
 ]
 "#,
         app = style(fg.clone(), bg.clone(), false),
-        cwd = style(fg.clone(), None, true),
+        cwd = style(accent.clone(), None, true),
         find_kw = style(fuzzy.clone(), None, true),
         find_pos = style(secondary.clone(), None, true),
-        symlink = style(color(theme.path), None, true),
+        symlink = style(accent.clone(), None, true),
         mcopied = style(ok.clone(), ok.clone(), false),
         mcut = style(err.clone(), err.clone(), false),
         mmarked = style(assistant.clone(), assistant.clone(), false),
@@ -379,7 +379,7 @@ impl BrowserEngine {
                     .copied()
                     .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
                     .unwrap_or("unknown panic");
-                Err(format!("DX file browser initialization failed: {message}"))
+                Err(format!("File Browser initialization failed: {message}"))
             })
         });
         match result {
@@ -389,7 +389,7 @@ impl BrowserEngine {
                 let mut term = None;
                 let cx = &mut fb_actor::Ctx::active(&mut core, &mut term);
                 if let Err(error) = act!(app:bootstrap, cx) {
-                    self.error = Some(format!("DX file browser bootstrap failed: {error}"));
+                    self.error = Some(format!("File Browser bootstrap failed: {error}"));
                     return;
                 }
                 self.core = Some(core);
@@ -671,19 +671,19 @@ impl BrowserEngine {
         let theme_signature = (light, override_toml.clone());
         if self.applied_theme.as_ref() != Some(&theme_signature) {
             if let Err(error) = fb_config::override_theme(light, &override_toml) {
-                tracing::warn!(%error, "DX file browser theme override failed");
+                tracing::warn!(%error, "File Browser theme override failed");
             } else {
                 self.applied_theme = Some(theme_signature);
             }
         }
         if let Err(error) = self.pump_events() {
-            self.error = Some(format!("DX file browser event error: {error}"));
+            self.error = Some(format!("File Browser event error: {error}"));
         }
         let Some(core) = self.core.as_mut() else {
             let message = self
                 .error
                 .as_deref()
-                .unwrap_or("DX file browser failed to initialize");
+                .unwrap_or("File Browser failed to initialize");
             Paragraph::new(Line::from(message))
                 .wrap(Wrap { trim: false })
                 .render(area, buf);
@@ -732,7 +732,7 @@ impl BrowserEngine {
         if let Err(error) = lua_result {
             let cwd = core.mgr.cwd();
             Paragraph::new(format!(
-                "File Browser\n\n{}\n\nDX layout error: {error}",
+                "File Browser\n\n{}\n\nFile Browser layout error: {error}",
                 cwd.os_str().to_string_lossy()
             ))
             .wrap(Wrap { trim: false })
@@ -743,7 +743,7 @@ impl BrowserEngine {
         if previous_preview_area != LAYOUT.get().preview {
             let cx = &mut fb_actor::Ctx::active(core, &mut self.term);
             if let Err(error) = act!(mgr:peek, cx) {
-                self.error = Some(format!("DX file browser preview failed: {error}"));
+                self.error = Some(format!("File Browser preview failed: {error}"));
             }
         }
         mgr::Preview::new(core).render(area, buf);
@@ -838,13 +838,17 @@ mod tests {
     }
 
     #[test]
-    fn browser_theme_sync_uses_live_surface_selection_and_semantic_colors() {
+    fn theme_carousel_browser_uses_live_primary_and_semantic_colors() {
         let mut theme = crate::theme::Theme::tokyonight();
         theme.bg_base = Color::Rgb(1, 2, 3);
         theme.bg_hover = Color::Rgb(4, 5, 6);
         theme.bg_visual = Color::Rgb(7, 8, 9);
         theme.fuzzy_accent = Color::Rgb(10, 11, 12);
         theme.accent_error = Color::Rgb(13, 14, 15);
+        theme.accent_user = Color::Rgb(16, 17, 18);
+        // TokyoNight's path role is warm/orange; directory and symlink text
+        // must follow the selected primary accent instead.
+        theme.path = Color::Rgb(255, 128, 0);
 
         let value: toml::Value = toml::from_str(&fb_theme_override(&theme)).expect("valid TOML");
         assert_eq!(value["app"]["overall"]["bg"].as_str(), Some("#010203"));
@@ -855,6 +859,8 @@ mod tests {
             value["notify"]["title_error"]["fg"].as_str(),
             Some("#0d0e0f")
         );
+        assert_eq!(value["mgr"]["symlink_target"]["fg"].as_str(), Some("#101112"));
+        assert_eq!(value["filetype"]["rules"][9]["fg"].as_str(), Some("#101112"));
         let primary = color_value(theme.text_primary);
         assert_eq!(value["app"]["overall"]["fg"].as_str(), primary.as_deref());
         assert_eq!(

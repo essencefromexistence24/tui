@@ -44,6 +44,25 @@ pub struct Icon {
 }
 
 impl Icon {
+	/// Recolor preset icon glyphs for an embedded host while preserving their
+	/// text and matching rules. Preset icon tables contain their own palette,
+	/// so overriding only `[icon].conds` leaves extension/name matches using
+	/// stale colors because those matches take precedence.
+	pub fn recolor(&mut self, file: Color, directory: Color, fallback: Color) {
+		for (_, icon) in &mut self.globs.0 {
+			icon.style.fg = Some(file);
+		}
+		for icon in self.dirs.0.values_mut() {
+			icon.style.fg = Some(directory);
+		}
+		for icon in self.files.0.values_mut().chain(self.exts.0.values_mut()) {
+			icon.style.fg = Some(file);
+		}
+		for (_, icon) in &mut self.conds.0 {
+			icon.style.fg = Some(fallback);
+		}
+	}
+
 	pub fn matches(&self, file: &File, hovered: bool) -> Option<&I> {
 		if let Some(i) = self.match_by_glob(file) {
 			return Some(i);
@@ -207,3 +226,25 @@ impl<'de> Deserialize<'de> for CondIcons {
 	}
 }
 
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn recolor_replaces_preset_name_and_extension_colors() {
+		let preset = I {
+			text: "x".to_owned(),
+			style: Style { fg: Some(Color::Red), ..Default::default() },
+		};
+		let mut icons = Icon::default();
+		icons.dirs.0.insert("src".to_owned(), preset.clone());
+		icons.files.0.insert("Cargo.toml".to_owned(), preset.clone());
+		icons.exts.0.insert("rs".to_owned(), preset);
+
+		icons.recolor(Color::White, Color::Blue, Color::Green);
+
+		assert_eq!(icons.dirs.0["src"].style.fg, Some(Color::Blue));
+		assert_eq!(icons.files.0["Cargo.toml"].style.fg, Some(Color::White));
+		assert_eq!(icons.exts.0["rs"].style.fg, Some(Color::White));
+	}
+}

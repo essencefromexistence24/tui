@@ -2448,7 +2448,7 @@ impl AppView {
             && agent.dx_ui.view == crate::dx::DxView::FileBrowser
         {
             if let Err(error) = agent.dx_ui.file_browser.handle_mouse(*mouse) {
-                tracing::warn!(%error, "DX file browser mouse input failed");
+                tracing::warn!(%error, "File Browser mouse input failed");
             }
             self.last_mouse_pos = Some((mouse.column, mouse.row));
             self.scroll_state.cancel_stream();
@@ -7631,7 +7631,7 @@ pub(crate) mod tests {
     fn apply_auth_meta_clears_gate_on_subscription() {
         let mut app = test_app();
         app.gate = Some(xai_grok_shell::auth::GateInfo {
-            message: "Subscribe to use Grok Build".into(),
+            message: "Subscribe to use Dx".into(),
             url: Some("https://grok.com/supergrok?referrer=grok-build".into()),
             label: None,
         });

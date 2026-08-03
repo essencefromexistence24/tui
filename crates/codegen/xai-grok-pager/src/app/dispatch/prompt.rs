@@ -683,6 +683,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 return dispatch(action, app);
             }
             CommandResult::QueueCommand(cmd_text) => {
+                agent.dx_ui.begin_message_intro();
                 agent.session.enqueue_command(cmd_text);
             }
             CommandResult::InjectSkill {
@@ -691,6 +692,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 display_as_skill,
                 scheduled_task_preview,
             } => {
+                agent.dx_ui.begin_message_intro();
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
                 // invocation: display_as_skill owns styling (no ranges).
@@ -731,6 +733,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
+                agent.dx_ui.begin_message_intro();
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt
@@ -755,6 +758,9 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         return dispatch(Action::Quit, app);
     } else {
+        // Splash remains the idle home screen. Only an accepted model message
+        // starts the selected two-second intro before Chat is revealed.
+        agent.dx_ui.begin_message_intro();
         // ── Server-authoritative immediate send (plain prompt only) ──
         // A plain prompt typed while a turn is RUNNING is sent to the agent
         // immediately instead of being held in the local drip-feed queue. The

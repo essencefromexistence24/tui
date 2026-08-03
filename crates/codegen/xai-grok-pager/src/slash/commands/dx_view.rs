@@ -14,7 +14,7 @@ impl DxViewCommand {
     pub const fn editor() -> Self {
         Self {
             name: "editor",
-            description: "Open the embedded DX code editor",
+            description: "Open the Code Editor",
             view: DxView::Editor,
         }
     }
@@ -22,7 +22,7 @@ impl DxViewCommand {
     pub const fn browser() -> Self {
         Self {
             name: "browser",
-            description: "Open the embedded DX file browser",
+            description: "Open the File Browser",
             view: DxView::FileBrowser,
         }
     }
@@ -30,7 +30,7 @@ impl DxViewCommand {
     pub const fn diff() -> Self {
         Self {
             name: "diff",
-            description: "Open the embedded DX diff viewer",
+            description: "Open the Diff Viewer",
             view: DxView::Diff,
         }
     }
@@ -38,7 +38,7 @@ impl DxViewCommand {
     pub const fn animation() -> Self {
         Self {
             name: "anim",
-            description: "Open the embedded DX train animation",
+            description: "Open the Train screen",
             view: DxView::Animation,
         }
     }

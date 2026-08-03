@@ -78,11 +78,11 @@ impl fmt::Display for VideoPlayerError {
         match self {
             Self::Usage => write!(f, "Usage: /video <path>"),
             Self::UnsupportedPlatform(platform) => {
-                write!(f, "DX video player is not available for {platform}")
+                write!(f, "Video Player is not available for {platform}")
             }
             Self::PlayerNotInstalled(path) => write!(
                 f,
-                "DX video player is not installed at {}. Run the DX video-player installation/update command.",
+                "Video Player is not installed at {}. Run the video-player installation/update command.",
                 path.display()
             ),
             Self::PlayerNotFound(path) => {
@@ -94,18 +94,18 @@ impl fmt::Display for VideoPlayerError {
             }
             Self::MissingRuntimeFiles { directory, files } => write!(
                 f,
-                "DX video player installation is incomplete in {}. Missing: {}",
+                "Video Player installation is incomplete in {}. Missing: {}",
                 directory.display(),
                 files.join(", ")
             ),
             Self::RuntimeManifestUnreadable { path, error } => write!(
                 f,
-                "DX video player runtime manifest is unreadable: {} ({error})",
+                "Video Player runtime manifest is unreadable: {} ({error})",
                 path.display()
             ),
             Self::NoGraphicalSession(platform) => write!(
                 f,
-                "DX video player cannot open a native window: no graphical session is available on {platform}"
+                "Video Player cannot open a native window: no graphical session is available on {platform}"
             ),
             Self::MediaNotFound(path) => write!(f, "Video file not found: {}", path.display()),
             Self::MediaIsDirectory(path) => {
@@ -120,17 +120,17 @@ impl fmt::Display for VideoPlayerError {
             }
             Self::Spawn { executable, error } => write!(
                 f,
-                "Failed to launch DX video player {}: {error}",
+                "Failed to launch Video Player {}: {error}",
                 executable.display()
             ),
             Self::PlayerExited { executable, status } => write!(
                 f,
-                "DX video player exited before opening a window: {} ({status})",
+                "Video Player exited before opening a window: {} ({status})",
                 executable.display()
             ),
             Self::WindowDidNotOpen(executable) => write!(
                 f,
-                "DX video player started but did not open a window: {}. Reinstall the complete player runtime.",
+                "Video Player started but did not open a window: {}. Reinstall the complete player runtime.",
                 executable.display()
             ),
         }

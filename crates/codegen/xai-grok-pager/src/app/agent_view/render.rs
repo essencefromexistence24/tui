@@ -29,9 +29,9 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-/// Translate every editor color role onto the active Grok palette. The DX
-/// editor keeps its layout and behavior, but no longer carries an independent
-/// built-in color scheme while embedded in Grok Build.
+/// Translate every editor color role onto the active Dx palette. The Code
+/// Editor keeps its layout and behavior without carrying an independent
+/// built-in color scheme.
 fn editor_theme_overrides(theme: &Theme) -> Vec<(&'static str, ratatui::style::Color)> {
     vec![
         ("editor.bg", theme.bg_base),
@@ -168,18 +168,18 @@ mod editor_theme_sync_tests {
     use super::*;
 
     #[test]
-    fn every_grok_editor_override_is_a_real_editor_theme_key() {
-        let grok = Theme::tokyonight();
-        let overrides = editor_theme_overrides(&grok);
+    fn every_dx_editor_override_is_a_real_editor_theme_key() {
+        let dx_theme = Theme::tokyonight();
+        let overrides = editor_theme_overrides(&dx_theme);
         let mut editor = dx::view::theme::Theme::load_builtin("dark").expect("dark editor theme");
         let applied = editor.override_colors(overrides.iter().copied());
 
         assert_eq!(applied, overrides.len());
-        assert_eq!(editor.editor_bg, grok.bg_base);
-        assert_eq!(editor.editor_fg, grok.text_primary);
-        assert_eq!(editor.selection_bg, grok.bg_visual);
-        assert_eq!(editor.syntax_keyword, grok.command);
-        assert_eq!(editor.diagnostic_error_fg, grok.accent_error);
+        assert_eq!(editor.editor_bg, dx_theme.bg_base);
+        assert_eq!(editor.editor_fg, dx_theme.text_primary);
+        assert_eq!(editor.selection_bg, dx_theme.bg_visual);
+        assert_eq!(editor.syntax_keyword, dx_theme.command);
+        assert_eq!(editor.diagnostic_error_fg, dx_theme.accent_error);
     }
 }
 use std::collections::HashSet;
@@ -895,7 +895,7 @@ impl AgentView {
         let theme = Theme::current();
         if self.dx_ui.view == crate::dx::DxView::Editor {
             if let Err(error) = self.dx_ui.editor.tick() {
-                tracing::error!(%error, "DX editor tick failed");
+                tracing::error!(%error, "Code Editor tick failed");
             }
             let base = if theme.is_dark() { "dark" } else { "light" };
             self.dx_ui
@@ -4442,22 +4442,22 @@ impl AgentView {
         } else {
             prompt_cursor_pos
         };
+        let carousel_content_bottom = [
+            self.slash_dropdown_items_area,
+            self.dropdown_items_area,
+            self.completion_dropdown_items_area,
+            self.history_dropdown_area,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|rect| rect.y)
+        .min()
+        .unwrap_or(layout.prompt.y);
         if dx_animation_mode && !dx_workspace_screen {
-            // Grok input dropdowns are painted before the DX carousel. Stop
+            // Input dropdowns are painted before the carousel. Stop
             // the animation above their top edge so `/`, `@`, completion, and
             // history menus remain visible and interactive over every screen.
-            let dropdown_top = [
-                self.slash_dropdown_items_area,
-                self.dropdown_items_area,
-                self.completion_dropdown_items_area,
-                self.history_dropdown_area,
-            ]
-            .into_iter()
-            .flatten()
-            .map(|rect| rect.y)
-            .min()
-            .unwrap_or(layout.prompt.y);
-            // Welcome→chat intro animation: auto-dismiss after the deadline.
+            // Message intro animation: reveal Chat after the deadline.
             if self.dx_ui.view == crate::dx::DxView::Animation
                 && let Some(dl) = self.dx_ui.intro_deadline
                 && std::time::Instant::now() >= dl
@@ -4472,9 +4472,21 @@ impl AgentView {
                 x: area.x,
                 y: area.y,
                 width: area.width,
-                height: dropdown_top.saturating_sub(area.y),
+                height: carousel_content_bottom.saturating_sub(area.y),
             };
             self.dx_ui.animation.render(animation_area, buf, &theme);
+        }
+        if dx_workspace_screen {
+            self.dx_ui.animation.render_controls(
+                Rect {
+                    x: area.x,
+                    y: area.y,
+                    width: area.width,
+                    height: carousel_content_bottom.saturating_sub(area.y),
+                },
+                buf,
+                &theme,
+            );
         }
         if let Some(sidebar_area) = dx_sidebar_area {
             let sidebar_model = self.dx_sidebar_view_model();
@@ -4679,11 +4691,11 @@ impl AgentView {
                 self.display_name
                     .clone()
                     .or_else(|| self.generated_session_title.clone())
-                    .unwrap_or_else(|| "Grok Build".to_string())
+                    .unwrap_or_else(|| "Dx".to_string())
             },
             session_id: session_id.chars().take(12).collect(),
             cwd: self.session.cwd.display().to_string(),
-            version: format!("DX · {}", env!("CARGO_PKG_VERSION")),
+            version: format!("Dx · {}", env!("CARGO_PKG_VERSION")),
             sections,
         }
     }
@@ -4806,8 +4818,8 @@ mod dx_modal_layering_tests {
             "MCP modal was not painted: {text}"
         );
         assert!(
-            text.contains("DX ·"),
-            "DX sidebar should remain visible behind the extensions modal: {text}"
+            text.contains("Dx ·"),
+            "Dx sidebar should remain visible behind the extensions modal: {text}"
         );
         assert_ne!(
             buf[(area.right() - 1, area.y)].bg,

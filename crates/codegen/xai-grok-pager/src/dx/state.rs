@@ -3,11 +3,11 @@ use std::path::PathBuf;
 /// Full-screen DX surfaces hosted by Grok's existing terminal and event loop.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DxView {
-    #[default]
     Chat,
     Editor,
     FileBrowser,
     Diff,
+    #[default]
     Animation,
 }
 
@@ -30,7 +30,7 @@ pub struct DxUiState {
     pub intro_enabled: bool,
     pub outro_enabled: bool,
     pub intro_seen: bool,
-    /// When `Some`, the Animation view is showing a timed splash intro;
+    /// When `Some`, the Animation view is showing a timed message intro;
     /// when this instant passes the view snaps back to the Workspace/Chat
     /// screen automatically. `None` means the carousel was opened manually.
     pub intro_deadline: Option<std::time::Instant>,
@@ -60,9 +60,9 @@ impl Default for DxUiState {
             intro_enabled: true,
             outro_enabled: true,
             intro_seen: false,
-            intro_deadline: Some(
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-            ),
+            // The Splash carousel is the persistent home screen. A deadline
+            // is armed only after a message has actually been submitted.
+            intro_deadline: None,
             file_browser: super::file_browser::FileBrowserSurface::default(),
             menu: None,
             editor: super::editor::EditorAdapter::new(),
@@ -71,6 +71,23 @@ impl Default for DxUiState {
 }
 
 impl DxUiState {
+    /// Play the selected intro while a message submitted from the carousel is
+    /// being accepted, then reveal Chat after two seconds.
+    pub fn begin_message_intro(&mut self) -> bool {
+        if self.view != DxView::Animation || self.intro_deadline.is_some() {
+            return false;
+        }
+        self.intro_seen = true;
+        self.animation.begin_intro();
+        self.intro_deadline = Some(
+            std::time::Instant::now() + std::time::Duration::from_secs(2),
+        );
+        self.sound.stop_animation_loop();
+        self.sound
+            .start_animation_loop(self.animation.current().sound());
+        true
+    }
+
     pub fn close_overlay_or_return_to_chat(&mut self) {
         if self.palette_visible {
             self.palette_visible = false;
@@ -97,6 +114,23 @@ pub enum DxAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_surface_is_the_persistent_splash_carousel() {
+        let mut state = DxUiState::default();
+
+        assert_eq!(DxView::default(), DxView::Animation);
+        assert_eq!(state.view, DxView::Animation);
+        assert_eq!(
+            state.animation.current(),
+            crate::dx::animation::AnimationKind::Splash
+        );
+        assert!(state.intro_deadline.is_none());
+
+        assert!(state.begin_message_intro());
+        assert!(state.intro_deadline.is_some());
+        assert!(state.intro_seen);
+    }
 
     #[test]
     fn escape_closes_palette_before_leaving_fullscreen_view() {

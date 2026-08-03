@@ -418,12 +418,11 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
                 crate::dx::DxView::Chat => {}
             }
             agent.dx_ui.view = view;
-            // Welcome→chat intro animation: show the default Splash screen
-            // and auto-dismiss to Chat after 2 s.
+            // Splash is the persistent home screen. The two-second intro is
+            // armed later, only when a message is actually submitted.
             if view == crate::dx::DxView::Animation {
                 agent.dx_ui.animation.begin_splash();
-                agent.dx_ui.intro_deadline =
-                    Some(Instant::now() + std::time::Duration::from_secs(2));
+                agent.dx_ui.intro_deadline = None;
             }
         }
     }

@@ -1,4 +1,4 @@
-//! Launch videos in the separate native DX video-player window.
+//! Launch videos in the separate native Video Player window.
 
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
@@ -11,7 +11,7 @@ impl SlashCommand for VideoCommand {
     }
 
     fn description(&self) -> &str {
-        "Play a video in the native DX video player"
+        "Play a video in the native Video Player"
     }
 
     fn usage(&self) -> &str {

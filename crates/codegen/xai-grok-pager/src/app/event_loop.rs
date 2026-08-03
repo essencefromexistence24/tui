@@ -1685,6 +1685,17 @@ pub(crate) async fn run(
                 git_ref: args.worktree_ref.clone(),
             })
         }
+        MaterializedStartup::NewAuto
+            if args.initial_prompt().is_none()
+                && std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").as_deref() != Ok("1")
+                && std::env::var("GROK_OPEN_CONNECT_AT_STARTUP").as_deref() != Ok("1") =>
+        {
+            // The carousel Splash is the product home screen. Create the
+            // empty session immediately so its two-second Splash can render,
+            // then hand off to the Workspace/Chat screen automatically.
+            app.welcome_post_new_view = Some(crate::dx::DxView::Animation);
+            Some(Action::NewSession)
+        }
         MaterializedStartup::NewAuto => None,
     };
 

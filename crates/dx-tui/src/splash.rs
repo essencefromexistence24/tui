@@ -40,7 +40,7 @@ pub fn render(
     let all_fonts = get_valid_fonts();
     if all_fonts.is_empty() {
         Paragraph::new(Line::from(Span::styled(
-            "DX",
+            "Dx",
             Style::default().fg(theme.accent),
         )))
         .alignment(ratatui::layout::Alignment::Center)
@@ -93,29 +93,29 @@ fn render_figlet_title(
     font_name: &str,
     max_width: u16,
     max_rows: u16,
-    rainbow: &RainbowEffect,
+    _rainbow: &RainbowEffect,
     theme: &ChatTheme,
 ) -> Vec<Line<'static>> {
     let Ok(font_data) = crate::font::read_font(font_name) else {
-        return compact_dx_title(rainbow, theme);
+        return compact_dx_title(theme);
     };
     // FIGlet fonts are Latin-1 / ASCII — never fail UTF-8 strictly
     let font_str = String::from_utf8_lossy(&font_data);
     let hardblank = extract_hardblank(&font_str);
 
     let Ok(font) = FIGlet::from_content(&font_str) else {
-        return compact_dx_title(rainbow, theme);
+        return compact_dx_title(theme);
     };
 
     // Some fonts lack uppercase or certain glyphs — try variants
     let figure = font
-        .convert("DX")
-        .or_else(|| font.convert("Dx"))
+        .convert("Dx")
+        .or_else(|| font.convert("DX"))
         .or_else(|| font.convert("dx"))
         .or_else(|| font.convert("D"));
 
     let Some(figure) = figure else {
-        return compact_dx_title(rainbow, theme);
+        return compact_dx_title(theme);
     };
 
     let mut lines: Vec<String> = figure
@@ -147,7 +147,7 @@ fn render_figlet_title(
 
     // Drop lines that are only spaces
     if lines.iter().all(|l| l.trim().is_empty()) {
-        return compact_dx_title(rainbow, theme);
+        return compact_dx_title(theme);
     }
 
     // Keep vertical center portion so logo stays visible
@@ -170,11 +170,11 @@ fn render_figlet_title(
             continue;
         }
         let mut spans = Vec::new();
-        for (i, ch) in fitted.chars().enumerate() {
+        for ch in fitted.chars() {
             if ch.is_control() {
                 continue;
             }
-            let color = rainbow.color_at(i);
+            let color = if ch == ' ' { theme.muted_fg } else { theme.accent };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         if !spans.is_empty() {
@@ -183,7 +183,7 @@ fn render_figlet_title(
     }
 
     if out.is_empty() {
-        return compact_dx_title(rainbow, theme);
+        return compact_dx_title(theme);
     }
     out
 }
@@ -215,7 +215,7 @@ fn fit_width(s: &str, max_w: usize) -> String {
     s.chars().skip(start).take(max_w).collect()
 }
 
-fn compact_dx_title(rainbow: &RainbowEffect, theme: &ChatTheme) -> Vec<Line<'static>> {
+fn compact_dx_title(theme: &ChatTheme) -> Vec<Line<'static>> {
     // Small built-in block "DX" so we never show a blank splash
     const BLOCK: &[&str] = &[
         "██████╗ ██╗  ██╗",
@@ -228,12 +228,8 @@ fn compact_dx_title(rainbow: &RainbowEffect, theme: &ChatTheme) -> Vec<Line<'sta
     let mut lines = Vec::new();
     for row in BLOCK {
         let mut spans = Vec::new();
-        for (i, ch) in row.chars().enumerate() {
-            let color = if ch == ' ' {
-                theme.muted_fg
-            } else {
-                rainbow.color_at(i)
-            };
+        for ch in row.chars() {
+            let color = if ch == ' ' { theme.muted_fg } else { theme.accent };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
@@ -291,4 +287,32 @@ fn get_valid_fonts() -> &'static [String] {
 /// Public count for font cycling.
 pub fn splash_font_count() -> usize {
     get_valid_fonts().len().max(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn theme_carousel_splash_logo_uses_active_palette() {
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buffer = Buffer::empty(area);
+        let pager_theme = crate::theme::Theme::tokyonight();
+        let theme = ChatTheme::from(&pager_theme);
+
+        render(
+            area,
+            &mut buffer,
+            &theme,
+            0,
+            &RainbowEffect::new(),
+        );
+
+        assert!(buffer.content.iter().any(|cell| {
+            cell.symbol() != " " && cell.fg == theme.accent
+        }));
+        assert!(buffer.content.iter().all(|cell| {
+            cell.symbol() == " " || cell.fg == theme.accent || cell.fg == theme.muted_fg
+        }));
+    }
 }

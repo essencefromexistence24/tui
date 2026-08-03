@@ -260,8 +260,7 @@ impl AnimationSurface {
                     self.splash_font_index,
                     &self.rainbow,
                 );
-                // render_controls commented out: the carousel uses full
-                // screen real-estate; navigation still works via ←/→ keys.
+                self.render_controls(area, buf, theme);
                 return;
             }
             AnimationKind::Workspace => {
@@ -372,25 +371,33 @@ impl AnimationSurface {
         // navigation is handled via the keyboard shortcut layer (←/→).
     }
 
-    #[allow(dead_code)]
-    fn render_controls(&self, area: Rect, buf: &mut Buffer, background: Color) {
+    pub fn render_controls(
+        &self,
+        area: Rect,
+        buf: &mut Buffer,
+        theme: &crate::theme::Theme,
+    ) {
         if area.height < 2 {
             return;
         }
-        let style = Style::default().fg(Color::Gray).bg(background);
-        let accent = Style::default().fg(Color::Cyan).bg(background);
+        let current = self.current;
+        let previous = current
+            .checked_sub(1)
+            .unwrap_or(AnimationKind::ALL.len() - 1);
+        let next = (current + 1) % AnimationKind::ALL.len();
+        let style = Style::default()
+            .fg(theme.text_secondary)
+            .bg(theme.bg_base);
+        let accent = Style::default()
+            .fg(theme.accent_user)
+            .bg(theme.bg_base)
+            .add_modifier(ratatui::style::Modifier::BOLD);
         Paragraph::new(Line::from(vec![
-            Span::styled("←/→ ", style),
-            Span::styled(self.current().name(), accent),
-            Span::styled(
-                format!(
-                    "  ·  ↑ intro [{}]  ·  ↓ outro [{}]  ·  Esc chat",
-                    self.intro.name(),
-                    self.outro.name()
-                ),
-                style,
-            ),
+            Span::styled(format!("← {}  ", AnimationKind::ALL[previous].name()), style),
+            Span::styled(format!("[{}]", self.current().name()), accent),
+            Span::styled(format!("  {} →", AnimationKind::ALL[next].name()), style),
         ]))
+        .alignment(Alignment::Center)
         .render(
             Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
             buf,
@@ -809,6 +816,29 @@ mod tests {
         assert_eq!(surface.current(), AnimationKind::Workspace);
         surface.previous();
         assert_eq!(surface.current(), AnimationKind::Splash);
+    }
+
+    #[test]
+    fn theme_carousel_controls_expose_the_workspace_home_option() {
+        let surface = AnimationSurface::default();
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buffer = Buffer::empty(area);
+        let theme = crate::theme::Theme::tokyonight();
+
+        surface.render_controls(area, &mut buffer, &theme);
+
+        let row = area.bottom() - 1;
+        let text = (area.left()..area.right())
+            .map(|x| buffer[(x, row)].symbol())
+            .collect::<Vec<_>>()
+            .concat();
+        assert!(text.contains("[Splash]"));
+        assert!(text.contains("Workspace"));
+        assert!(buffer.content.iter().all(|cell| {
+            cell.fg == Color::Reset
+                || cell.fg == theme.text_secondary
+                || cell.fg == theme.accent_user
+        }));
     }
 
     #[test]

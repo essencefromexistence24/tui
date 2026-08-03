@@ -29,6 +29,28 @@ pub(crate) enum ExternalPromptEditorAccess {
     PastePending,
     OwnedElsewhere,
 }
+
+#[cfg(test)]
+mod carousel_prompt_routing_tests {
+    use super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn theme_carousel_up_arrow_reaches_nonempty_prompt() {
+        let mut agent = make_agent();
+        agent.prompt.set_text("/theme ");
+        agent.dx_ui.animation.next();
+        let intro_before = agent.dx_ui.animation.intro;
+
+        agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+        );
+
+        assert_eq!(agent.dx_ui.animation.intro, intro_before);
+    }
+}
 impl AgentView {
     /// Minimal's composer stays logically focused when Vim startup leaves the
     /// legacy pane field on Scrollback; overlays and dropdowns still own input.
@@ -496,7 +518,7 @@ impl AgentView {
                 return InputOutcome::Changed;
             }
             if let Err(error) = self.dx_ui.editor.handle_event(ev.clone()) {
-                tracing::error!(%error, "DX editor input failed");
+                tracing::error!(%error, "Code Editor input failed");
             }
             return InputOutcome::Changed;
         }
@@ -528,11 +550,11 @@ impl AgentView {
                 && key.kind != KeyEventKind::Release
                 && let Err(error) = self.dx_ui.file_browser.handle_key(*key)
             {
-                tracing::error!(%error, "DX file browser input failed");
+                tracing::error!(%error, "File Browser input failed");
             } else if let Event::Mouse(mouse) = ev
                 && let Err(error) = self.dx_ui.file_browser.handle_mouse(*mouse)
             {
-                tracing::error!(%error, "DX file browser mouse input failed");
+                tracing::error!(%error, "File Browser mouse input failed");
             }
             return InputOutcome::Changed;
         }
@@ -578,7 +600,7 @@ impl AgentView {
                         self.dx_ui.animation.next();
                         handled = true;
                     }
-                    KeyCode::Up => {
+                    KeyCode::Up if self.prompt.text().is_empty() => {
                         self.dx_ui.animation.select_intro();
                         let message = format!("Intro: {}", self.dx_ui.animation.intro.name());
                         self.show_toast(&message);
@@ -589,11 +611,6 @@ impl AgentView {
                         let message = format!("Outro: {}", self.dx_ui.animation.outro.name());
                         self.show_toast(&message);
                         handled = true;
-                    }
-                    KeyCode::Enter if !self.prompt.text().is_empty() => {
-                        self.dx_ui.sound.stop_animation_loop();
-                        self.dx_ui.intro_deadline = None;
-                        self.dx_ui.view = crate::dx::DxView::Chat;
                     }
                     _ => {}
                 }
