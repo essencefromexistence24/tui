@@ -227,7 +227,7 @@ mod tests {
             reg.triggers().iter().any(|trigger| {
                 trigger.canonical == "video"
                     && trigger.display == "/video"
-                    && trigger.usage == "/video <path>"
+                    && trigger.usage == "/video <local-path>"
             }),
             "/video should appear in autocomplete and command help metadata"
         );

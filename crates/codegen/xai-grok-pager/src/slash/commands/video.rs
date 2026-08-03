@@ -15,7 +15,7 @@ impl SlashCommand for VideoCommand {
     }
 
     fn usage(&self) -> &str {
-        "/video <path>"
+        "/video <local-path>"
     }
 
     fn takes_args(&self) -> bool {
@@ -27,7 +27,7 @@ impl SlashCommand for VideoCommand {
     }
 
     fn arg_placeholder(&self) -> Option<&str> {
-        Some("path to a video file")
+        Some("local video path")
     }
 
     fn session_scoped(&self) -> bool {
@@ -36,7 +36,7 @@ impl SlashCommand for VideoCommand {
 
     fn run(&self, _ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         if args.trim().is_empty() {
-            return CommandResult::Message("Usage: /video <path>".to_string());
+            return CommandResult::Message("Usage: /video <local-path>".to_string());
         }
         CommandResult::Action(Action::PlayVideo(args.to_string()))
     }
@@ -52,7 +52,7 @@ mod tests {
         let mut ctx = super::super::tests::make_ctx(&models);
         assert!(matches!(
             VideoCommand.run(&mut ctx, "  "),
-            CommandResult::Message(message) if message == "Usage: /video <path>"
+            CommandResult::Message(message) if message == "Usage: /video <local-path>"
         ));
     }
 

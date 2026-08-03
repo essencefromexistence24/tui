@@ -76,7 +76,7 @@ pub enum VideoPlayerError {
 impl fmt::Display for VideoPlayerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage => write!(f, "Usage: /video <path>"),
+            Self::Usage => write!(f, "Usage: /video <local-path>"),
             Self::UnsupportedPlatform(platform) => {
                 write!(f, "Video Player is not available for {platform}")
             }
@@ -145,10 +145,10 @@ pub struct VideoLaunch {
     pub executable: PathBuf,
 }
 
-/// Launch one media path in the detached native DX player.
+/// Launch one local media path or online URL in the detached native player.
 pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlayerError> {
     validate_graphical_session()?;
-    let media = resolve_media_path(raw_path, workspace)?;
+    let media = resolve_media_source(raw_path, workspace)?;
     let player = resolve_player()?;
 
     let mut command = Command::new(&player.executable);
@@ -157,7 +157,10 @@ pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlay
         .current_dir(player.executable.parent().unwrap_or_else(|| Path::new(".")))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        // Keep native-player/yt-dlp diagnostics visible. Online services can
+        // reject a request after the player starts, and swallowing stderr made
+        // that look like a no-op to the user.
+        .stderr(Stdio::inherit());
     #[cfg(not(windows))]
     xai_grok_tools::util::detach_std_command(&mut command);
     let mut child = command.spawn().map_err(|error| VideoPlayerError::Spawn {
@@ -265,9 +268,9 @@ fn process_has_visible_window(process_id: u32) -> bool {
     search.found
 }
 
-fn resolve_media_path(raw_path: &str, workspace: &Path) -> Result<PathBuf, VideoPlayerError> {
+fn resolve_media_source(raw_path: &str, workspace: &Path) -> Result<PathBuf, VideoPlayerError> {
     let path_text = strip_matching_quotes(raw_path)?;
-    let supplied = PathBuf::from(path_text);
+    let supplied = local_path_from_user_text(path_text);
     let candidate = if supplied.is_absolute() {
         supplied
     } else {
@@ -290,6 +293,21 @@ fn resolve_media_path(raw_path: &str, workspace: &Path) -> Result<PathBuf, Video
         error,
     })?;
     Ok(canonical)
+}
+
+fn local_path_from_user_text(path_text: &str) -> PathBuf {
+    #[cfg(windows)]
+    if path_text.len() >= 2
+        && path_text.as_bytes()[1] == b':'
+        && !path_text.as_bytes().get(2).is_some_and(|byte| *byte == b'\\' || *byte == b'/')
+    {
+        return PathBuf::from(format!(
+            "{}\\{}",
+            &path_text[..2],
+            path_text[2..].trim_start_matches(['\\', '/'])
+        ));
+    }
+    PathBuf::from(path_text)
 }
 
 fn strip_matching_quotes(raw: &str) -> Result<&str, VideoPlayerError> {
@@ -485,7 +503,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let media = temp.path().join("rendered clip.mp4");
         std::fs::write(&media, b"test").unwrap();
-        let resolved = resolve_media_path("rendered clip.mp4", temp.path()).unwrap();
+        let resolved = resolve_media_source("rendered clip.mp4", temp.path()).unwrap();
         assert_eq!(resolved, dunce::canonicalize(media).unwrap());
     }
 
@@ -493,11 +511,11 @@ mod tests {
     fn missing_media_and_directories_are_rejected() {
         let temp = tempfile::tempdir().unwrap();
         assert!(matches!(
-            resolve_media_path("missing.mp4", temp.path()),
+            resolve_media_source("missing.mp4", temp.path()),
             Err(VideoPlayerError::MediaNotFound(_))
         ));
         assert!(matches!(
-            resolve_media_path(".", temp.path()),
+            resolve_media_source(".", temp.path()),
             Err(VideoPlayerError::MediaIsDirectory(_))
         ));
     }
