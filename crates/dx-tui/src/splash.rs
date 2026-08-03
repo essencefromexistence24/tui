@@ -93,18 +93,18 @@ fn render_figlet_title(
     font_name: &str,
     max_width: u16,
     max_rows: u16,
-    _rainbow: &RainbowEffect,
+    rainbow: &RainbowEffect,
     theme: &ChatTheme,
 ) -> Vec<Line<'static>> {
     let Ok(font_data) = crate::font::read_font(font_name) else {
-        return compact_dx_title(theme);
+        return compact_dx_title(rainbow, theme);
     };
     // FIGlet fonts are Latin-1 / ASCII — never fail UTF-8 strictly
     let font_str = String::from_utf8_lossy(&font_data);
     let hardblank = extract_hardblank(&font_str);
 
     let Ok(font) = FIGlet::from_content(&font_str) else {
-        return compact_dx_title(theme);
+        return compact_dx_title(rainbow, theme);
     };
 
     // Some fonts lack uppercase or certain glyphs — try variants
@@ -115,7 +115,7 @@ fn render_figlet_title(
         .or_else(|| font.convert("D"));
 
     let Some(figure) = figure else {
-        return compact_dx_title(theme);
+        return compact_dx_title(rainbow, theme);
     };
 
     let mut lines: Vec<String> = figure
@@ -147,7 +147,7 @@ fn render_figlet_title(
 
     // Drop lines that are only spaces
     if lines.iter().all(|l| l.trim().is_empty()) {
-        return compact_dx_title(theme);
+        return compact_dx_title(rainbow, theme);
     }
 
     // Keep vertical center portion so logo stays visible
@@ -170,11 +170,15 @@ fn render_figlet_title(
             continue;
         }
         let mut spans = Vec::new();
-        for ch in fitted.chars() {
+        for (i, ch) in fitted.chars().enumerate() {
             if ch.is_control() {
                 continue;
             }
-            let color = if ch == ' ' { theme.muted_fg } else { theme.accent };
+            let color = if ch == ' ' {
+                theme.muted_fg
+            } else {
+                rainbow.color_at(i)
+            };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         if !spans.is_empty() {
@@ -183,7 +187,7 @@ fn render_figlet_title(
     }
 
     if out.is_empty() {
-        return compact_dx_title(theme);
+        return compact_dx_title(rainbow, theme);
     }
     out
 }
@@ -215,7 +219,7 @@ fn fit_width(s: &str, max_w: usize) -> String {
     s.chars().skip(start).take(max_w).collect()
 }
 
-fn compact_dx_title(theme: &ChatTheme) -> Vec<Line<'static>> {
+fn compact_dx_title(rainbow: &RainbowEffect, theme: &ChatTheme) -> Vec<Line<'static>> {
     // Small built-in block "DX" so we never show a blank splash
     const BLOCK: &[&str] = &[
         "██████╗ ██╗  ██╗",
@@ -228,8 +232,12 @@ fn compact_dx_title(theme: &ChatTheme) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     for row in BLOCK {
         let mut spans = Vec::new();
-        for ch in row.chars() {
-            let color = if ch == ' ' { theme.muted_fg } else { theme.accent };
+        for (i, ch) in row.chars().enumerate() {
+            let color = if ch == ' ' {
+                theme.muted_fg
+            } else {
+                rainbow.color_at(i)
+            };
             spans.push(Span::styled(ch.to_string(), Style::default().fg(color)));
         }
         lines.push(Line::from(spans));
@@ -292,9 +300,10 @@ pub fn splash_font_count() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ratatui::style::Color;
 
     #[test]
-    fn theme_carousel_splash_logo_uses_active_palette() {
+    fn splash_logo_uses_animated_rainbow_colors() {
         let area = Rect::new(0, 0, 80, 24);
         let mut buffer = Buffer::empty(area);
         let pager_theme = crate::theme::Theme::tokyonight();
@@ -308,11 +317,13 @@ mod tests {
             &RainbowEffect::new(),
         );
 
-        assert!(buffer.content.iter().any(|cell| {
-            cell.symbol() != " " && cell.fg == theme.accent
-        }));
-        assert!(buffer.content.iter().all(|cell| {
-            cell.symbol() == " " || cell.fg == theme.accent || cell.fg == theme.muted_fg
-        }));
+        let logo_colors = buffer
+            .content
+            .iter()
+            .filter(|cell| cell.symbol() != " ")
+            .map(|cell| cell.fg)
+            .collect::<std::collections::HashSet<_>>();
+        assert!(logo_colors.len() > 1);
+        assert!(logo_colors.iter().all(|color| matches!(color, Color::Rgb(_, _, _))));
     }
 }

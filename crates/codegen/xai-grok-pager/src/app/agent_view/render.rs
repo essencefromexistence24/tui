@@ -855,9 +855,7 @@ impl AgentView {
         let full_area = area;
         let dx_chrome_visible =
             !in_dashboard_overlay && !self.modal_owns_input() && !self.dx_ui.palette_visible;
-        let dx_workspace_screen = self.dx_ui.view == crate::dx::DxView::Animation
-            && self.dx_ui.animation.current() == crate::dx::animation::AnimationKind::Workspace;
-        let dx_chat_layout = self.dx_ui.view == crate::dx::DxView::Chat || dx_workspace_screen;
+        let dx_chat_layout = self.dx_ui.view == crate::dx::DxView::Chat;
         // The unified extensions menu is an overlay over the working chat,
         // not a replacement screen. Keep the right sidebar in the underlying
         // layout so session context remains visible around the modal.
@@ -914,7 +912,7 @@ impl AgentView {
             return (None, None);
         }
         let dx_animation_mode = self.dx_ui.view == crate::dx::DxView::Animation;
-        if dx_animation_mode && !dx_workspace_screen {
+        if dx_animation_mode {
             // Carousel screens keep the real prompt and completion menus, but
             // intentionally omit the passive bottom-left ghost suggestion.
             self.prompt.prompt_suggestion.dismiss();
@@ -4453,7 +4451,7 @@ impl AgentView {
         .map(|rect| rect.y)
         .min()
         .unwrap_or(layout.prompt.y);
-        if dx_animation_mode && !dx_workspace_screen {
+        if dx_animation_mode {
             // Input dropdowns are painted before the carousel. Stop
             // the animation above their top edge so `/`, `@`, completion, and
             // history menus remain visible and interactive over every screen.
@@ -4475,18 +4473,6 @@ impl AgentView {
                 height: carousel_content_bottom.saturating_sub(area.y),
             };
             self.dx_ui.animation.render(animation_area, buf, &theme);
-        }
-        if dx_workspace_screen {
-            self.dx_ui.animation.render_controls(
-                Rect {
-                    x: area.x,
-                    y: area.y,
-                    width: area.width,
-                    height: carousel_content_bottom.saturating_sub(area.y),
-                },
-                buf,
-                &theme,
-            );
         }
         if let Some(sidebar_area) = dx_sidebar_area {
             let sidebar_model = self.dx_sidebar_view_model();

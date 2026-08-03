@@ -31,7 +31,7 @@ pub struct DxUiState {
     pub outro_enabled: bool,
     pub intro_seen: bool,
     /// When `Some`, the Animation view is showing a timed message intro;
-    /// when this instant passes the view snaps back to the Workspace/Chat
+    /// when this instant passes the view snaps to Chat
     /// screen automatically. `None` means the carousel was opened manually.
     pub intro_deadline: Option<std::time::Instant>,
     pub file_browser: super::file_browser::FileBrowserSurface,
@@ -44,8 +44,7 @@ impl Default for DxUiState {
         let mut sound = super::sound::SoundPlayer::new();
         sound.play(super::sound::SoundCue::Startup);
         Self {
-            // Start in the splash screen; the live chat workspace is the
-            // Workspace item in the same carousel.
+            // Start in the splash screen; Chat is not a carousel item.
             view: DxView::Animation,
             minimap_visible: true,
             sidebar_visible: true,

@@ -683,7 +683,6 @@ pub(super) fn dispatch_send_prompt_inner(
                 return dispatch(action, app);
             }
             CommandResult::QueueCommand(cmd_text) => {
-                agent.dx_ui.begin_message_intro();
                 agent.session.enqueue_command(cmd_text);
             }
             CommandResult::InjectSkill {
@@ -692,7 +691,6 @@ pub(super) fn dispatch_send_prompt_inner(
                 display_as_skill,
                 scheduled_task_preview,
             } => {
-                agent.dx_ui.begin_message_intro();
                 // Enqueue with display text for scrollback but wire_blocks
                 // for the actual prompt sent to the model. Leading skill
                 // invocation: display_as_skill owns styling (no ranges).
@@ -733,7 +731,6 @@ pub(super) fn dispatch_send_prompt_inner(
                 }
             }
             CommandResult::PassThrough(pass_text) => {
-                agent.dx_ui.begin_message_intro();
                 // A recognized token later in the passthrough text still styles the echo.
                 let skill_token_ranges = agent
                     .prompt

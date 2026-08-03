@@ -9,10 +9,8 @@ use std::time::Instant;
 
 use ratatui::{
     buffer::Buffer,
-    layout::{Alignment, Rect},
+    layout::Rect,
     style::{Color, Style},
-    text::{Line, Span},
-    widgets::{Paragraph, Widget},
 };
 
 use super::effects::RainbowEffect;
@@ -41,7 +39,6 @@ const TRAIN_START_RIGHT_GUTTER_COLUMNS: u64 = 6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnimationKind {
     Splash,
-    Workspace,
     Train,
     Matrix,
     GameOfLife,
@@ -54,9 +51,8 @@ pub enum AnimationKind {
 }
 
 impl AnimationKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 10] = [
         Self::Splash,
-        Self::Workspace,
         Self::Train,
         Self::Matrix,
         Self::GameOfLife,
@@ -71,7 +67,6 @@ impl AnimationKind {
     pub fn name(self) -> &'static str {
         match self {
             Self::Splash => "Splash",
-            Self::Workspace => "Workspace",
             Self::Matrix => "Matrix",
             Self::Train => "Train",
             Self::GameOfLife => "Game of Life",
@@ -87,7 +82,6 @@ impl AnimationKind {
     pub fn sound(self) -> super::sound::AnimationSound {
         match self {
             Self::Splash | Self::Matrix => super::sound::AnimationSound::Matrix,
-            Self::Workspace => super::sound::AnimationSound::Workspace,
             Self::Train => super::sound::AnimationSound::Train,
             Self::GameOfLife => super::sound::AnimationSound::GameOfLife,
             Self::Starfield => super::sound::AnimationSound::Starfield,
@@ -260,23 +254,6 @@ impl AnimationSurface {
                     self.splash_font_index,
                     &self.rainbow,
                 );
-                self.render_controls(area, buf, theme);
-                return;
-            }
-            AnimationKind::Workspace => {
-                // AgentView renders the live workspace here so the normal
-                // scrollback, prompt, minimap, and sidebar stay interactive.
-                // Keep the standalone surface useful for direct callers and
-                // carousel rendering tests with a themed marker.
-                Paragraph::new(Line::from(Span::styled(
-                    "Workspace",
-                    Style::default()
-                        .fg(theme.accent_user)
-                        .bg(background)
-                        .add_modifier(ratatui::style::Modifier::BOLD),
-                )))
-                .alignment(Alignment::Center)
-                .render(area, buf);
                 return;
             }
             AnimationKind::Matrix => {
@@ -369,39 +346,6 @@ impl AnimationSurface {
         }
         // Controls removed: the carousel fills the full left panel and
         // navigation is handled via the keyboard shortcut layer (←/→).
-    }
-
-    pub fn render_controls(
-        &self,
-        area: Rect,
-        buf: &mut Buffer,
-        theme: &crate::theme::Theme,
-    ) {
-        if area.height < 2 {
-            return;
-        }
-        let current = self.current;
-        let previous = current
-            .checked_sub(1)
-            .unwrap_or(AnimationKind::ALL.len() - 1);
-        let next = (current + 1) % AnimationKind::ALL.len();
-        let style = Style::default()
-            .fg(theme.text_secondary)
-            .bg(theme.bg_base);
-        let accent = Style::default()
-            .fg(theme.accent_user)
-            .bg(theme.bg_base)
-            .add_modifier(ratatui::style::Modifier::BOLD);
-        Paragraph::new(Line::from(vec![
-            Span::styled(format!("← {}  ", AnimationKind::ALL[previous].name()), style),
-            Span::styled(format!("[{}]", self.current().name()), accent),
-            Span::styled(format!("  {} →", AnimationKind::ALL[next].name()), style),
-        ]))
-        .alignment(Alignment::Center)
-        .render(
-            Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1),
-            buf,
-        );
     }
 
     fn render_matrix(&self, area: Rect, buf: &mut Buffer, background: Color, elapsed_ms: usize) {
@@ -798,8 +742,6 @@ mod tests {
         let mut surface = AnimationSurface::default();
         assert_eq!(surface.current(), AnimationKind::Splash);
         surface.next();
-        assert_eq!(surface.current(), AnimationKind::Workspace);
-        surface.next();
         assert_eq!(surface.current(), AnimationKind::Train);
         surface.next();
         assert_eq!(surface.current(), AnimationKind::Matrix);
@@ -813,32 +755,7 @@ mod tests {
         surface.select_outro();
         assert_eq!(surface.outro, AnimationKind::Train);
         surface.previous();
-        assert_eq!(surface.current(), AnimationKind::Workspace);
-        surface.previous();
         assert_eq!(surface.current(), AnimationKind::Splash);
-    }
-
-    #[test]
-    fn theme_carousel_controls_expose_the_workspace_home_option() {
-        let surface = AnimationSurface::default();
-        let area = Rect::new(0, 0, 80, 24);
-        let mut buffer = Buffer::empty(area);
-        let theme = crate::theme::Theme::tokyonight();
-
-        surface.render_controls(area, &mut buffer, &theme);
-
-        let row = area.bottom() - 1;
-        let text = (area.left()..area.right())
-            .map(|x| buffer[(x, row)].symbol())
-            .collect::<Vec<_>>()
-            .concat();
-        assert!(text.contains("[Splash]"));
-        assert!(text.contains("Workspace"));
-        assert!(buffer.content.iter().all(|cell| {
-            cell.fg == Color::Reset
-                || cell.fg == theme.text_secondary
-                || cell.fg == theme.accent_user
-        }));
     }
 
     #[test]
