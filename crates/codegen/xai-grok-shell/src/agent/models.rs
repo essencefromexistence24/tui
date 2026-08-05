@@ -242,17 +242,17 @@ impl ModelsManager {
     }
 
     /// Subscribe to model-switch events. Returns a `watch::Receiver`
-    pub(crate) fn subscribe_model_switch(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn subscribe_model_switch(&self) -> tokio::sync::watch::Receiver<u64> {
         self.inner.model_switch_watch.subscribe()
     }
 
     /// Cheap snapshot of the current model-switch generation, for the laziness-check poll loop.
-    pub(crate) fn model_switch_generation(&self) -> u64 {
+    pub fn model_switch_generation(&self) -> u64 {
         *self.inner.model_switch_watch.borrow()
     }
 
     /// Build from a resolved config. Falls back to bundled default if no models available.
-    pub(crate) fn from_config(
+    pub fn from_config(
         cfg: &config::Config,
         prefetched_models: Option<IndexMap<String, ModelEntry>>,
         auth_manager: Arc<AuthManager>,
@@ -307,7 +307,7 @@ impl ModelsManager {
     }
 
     /// Swap config, rebuild catalog, and reselect the model.
-    pub(crate) fn apply_config(&self, new_config: config::Config) {
+    pub fn apply_config(&self, new_config: config::Config) {
         if let Err(e) = new_config.validate_model_filters() {
             tracing::error!(error = %e, "ignoring config reload: invalid model filters");
             return;
@@ -370,7 +370,7 @@ impl ModelsManager {
     }
 
     /// [`Self::apply_config`] plus an unconditional default re-resolve, for remote-settings arrival while no session exists.
-    pub(crate) fn apply_config_reselecting_default(&self, new_config: config::Config) {
+    pub fn apply_config_reselecting_default(&self, new_config: config::Config) {
         self.apply_config(new_config.clone());
         self.reselect_default_model(&new_config);
         self.notify_models_updated();
@@ -421,7 +421,7 @@ impl ModelsManager {
         self.inner.current_model_id.read().clone()
     }
 
-    pub(crate) fn set_current_model_id(&self, id: acp::ModelId) {
+    pub fn set_current_model_id(&self, id: acp::ModelId) {
         self.inner
             .user_selected_model
             .store(true, Ordering::Relaxed);
@@ -443,10 +443,7 @@ impl ModelsManager {
     }
 
     /// Per-model Layer-3 LazinessDetector config for `model_id` (disabled default when absent).
-    pub(crate) fn laziness_detector_for(
-        &self,
-        model_id: &str,
-    ) -> config::LazinessDetectorPerModelConfig {
+    pub fn laziness_detector_for(&self, model_id: &str) -> config::LazinessDetectorPerModelConfig {
         self.inner
             .catalog
             .read()
@@ -462,16 +459,16 @@ impl ModelsManager {
         self.inner.catalog.write().models.insert(id.into(), entry);
     }
 
-    pub(crate) fn current_reasoning_effort(&self) -> Option<ReasoningEffort> {
+    pub fn current_reasoning_effort(&self) -> Option<ReasoningEffort> {
         *self.inner.current_reasoning_effort.read()
     }
 
-    pub(crate) fn set_current_reasoning_effort(&self, effort: Option<ReasoningEffort>) {
+    pub fn set_current_reasoning_effort(&self, effort: Option<ReasoningEffort>) {
         *self.inner.current_reasoning_effort.write() = effort;
     }
 
     /// Whether the given model supports reasoning effort according to the catalog.
-    pub(crate) fn model_supports_reasoning_effort(&self, model_id: &str) -> bool {
+    pub fn model_supports_reasoning_effort(&self, model_id: &str) -> bool {
         self.inner
             .catalog
             .read()
@@ -481,7 +478,7 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
-    pub(crate) fn model_default_reasoning_effort(&self, model_id: &str) -> Option<ReasoningEffort> {
+    pub fn model_default_reasoning_effort(&self, model_id: &str) -> Option<ReasoningEffort> {
         self.inner
             .catalog
             .read()
@@ -491,7 +488,7 @@ impl ModelsManager {
     }
 
     /// The raw catalog `reasoning_efforts` list for `model_id` with no fallback,
-    pub(crate) fn model_reasoning_efforts(&self, model_id: &str) -> Vec<ReasoningEffortOption> {
+    pub fn model_reasoning_efforts(&self, model_id: &str) -> Vec<ReasoningEffortOption> {
         self.inner
             .catalog
             .read()
@@ -501,7 +498,7 @@ impl ModelsManager {
             .unwrap_or_default()
     }
 
-    pub(crate) fn model_supports_backend_search(&self, model_id: &str) -> bool {
+    pub fn model_supports_backend_search(&self, model_id: &str) -> bool {
         self.inner
             .catalog
             .read()
@@ -511,7 +508,7 @@ impl ModelsManager {
             .unwrap_or(false)
     }
 
-    pub(crate) fn model_compactions_remaining(
+    pub fn model_compactions_remaining(
         &self,
         model_id: &str,
     ) -> Option<xai_grok_sampling_types::CompactionsRemaining> {
@@ -523,7 +520,7 @@ impl ModelsManager {
             .and_then(|e| e.info().compactions_remaining)
     }
 
-    pub(crate) fn model_compaction_at_tokens(
+    pub fn model_compaction_at_tokens(
         &self,
         model_id: &str,
     ) -> Option<xai_grok_sampling_types::CompactionAtTokens> {
@@ -536,7 +533,7 @@ impl ModelsManager {
     }
 
     /// Catalog opt-in to display the served-checkpoint fingerprint for this model.
-    pub(crate) fn model_show_model_fingerprint(&self, model_id: &str) -> bool {
+    pub fn model_show_model_fingerprint(&self, model_id: &str) -> bool {
         let cat = self.inner.catalog.read();
         let models = &cat.models;
         resolve_catalog_key(models, &acp::ModelId::new(model_id))
@@ -546,12 +543,12 @@ impl ModelsManager {
     }
 
     /// Resolved next-prompt-suggestion model pin from the live config
-    pub(crate) fn prompt_suggest_model_pin(&self) -> crate::config::PromptSuggestModelPin {
+    pub fn prompt_suggest_model_pin(&self) -> crate::config::PromptSuggestModelPin {
         self.inner.cfg.read().prompt_suggest_model_pin.clone()
     }
 
     /// Whether `model_id` resolves in the current catalog — as a config key
-    pub(crate) fn model_in_catalog(&self, model_id: &str) -> bool {
+    pub fn model_in_catalog(&self, model_id: &str) -> bool {
         let cat = self.inner.catalog.read();
         let models = &cat.models;
         resolve_catalog_key(models, &acp::ModelId::new(model_id)).is_some()
@@ -574,7 +571,7 @@ impl ModelsManager {
     }
 
     /// Refresh models when the etag changes.
-    pub(crate) async fn refresh_if_new_etag(&self, etag: String) {
+    pub async fn refresh_if_new_etag(&self, etag: String) {
         let same_etag = {
             let cat = self.inner.catalog.read();
             cat.etag.as_deref() == Some(etag.as_str())
@@ -662,7 +659,7 @@ impl ModelsManager {
     }
 
     /// Hot-reload the catalog from `~/.grok/models_cache.json` after an external write (config-watcher detected).
-    pub(crate) fn reload_from_disk_cache(&self) {
+    pub fn reload_from_disk_cache(&self) {
         self.reload_from_cache_manager(&self.inner.cache);
     }
 

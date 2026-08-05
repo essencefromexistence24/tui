@@ -4,7 +4,7 @@
 #[cfg(test)]
 use super::test_fixtures;
 use super::{AgentPane, AgentView, PromptMode, overlay_action_to_outcome};
-use crate::actions::{ActionId, ActionRegistry};
+use crate::actions::ActionRegistry;
 use crate::app::actions::Action;
 use crate::app::app_view::InputOutcome;
 use crossterm::event::KeyEvent;
@@ -257,9 +257,63 @@ impl AgentView {
         prompt_id: Option<String>,
     ) {
         // The marker keeps its turn's pid for the tail-merge attribution check.
+        let model = self
+            .session
+            .models
+            .current_model_name()
+            .unwrap_or_else(|| "Model".to_string());
+        let entries = self.scrollback.iter_entries().collect::<Vec<_>>();
+        let mut tools = 0usize;
+        // Output tokens: estimated from the agent's response text written this
+        // turn — the context-total delta also counts the user's input and tool
+        // outputs, which isn't "what the AI produced". Rate is those output
+        // tokens over the turn's wall clock.
+        let mut output_tokens = 0u64;
+        for (_, entry) in entries.iter().rev() {
+            if matches!(
+                entry.block,
+                crate::scrollback::block::RenderBlock::SessionEvent(ref event)
+                    if event.event.is_turn_terminal()
+            ) {
+                break;
+            }
+            match &entry.block {
+                crate::scrollback::block::RenderBlock::ToolCall(_) => tools += 1,
+                crate::scrollback::block::RenderBlock::AgentMessage(msg) => {
+                    output_tokens += xai_token_estimation::estimate_tokens(&msg.text());
+                }
+                _ => {}
+            }
+        }
+        let elapsed_opt = match &event {
+            crate::scrollback::blocks::SessionEvent::TurnCompleted { elapsed } => *elapsed,
+            _ => None,
+        };
+        let mut parts = vec![model];
+        if output_tokens > 0 {
+            let secs = elapsed_opt
+                .map(|d| d.as_secs_f64().max(1e-9))
+                .unwrap_or(0.0);
+            let rate = if secs > 0.0 {
+                output_tokens as f64 / secs
+            } else {
+                0.0
+            };
+            parts.push(format!(
+                "{} tokens ({:.1} t/s)",
+                crate::views::turn_status::format_tokens_short(output_tokens),
+                rate
+            ));
+        }
+        parts.push(format!("{tools} tools"));
+        if let Some(d) = elapsed_opt {
+            parts.push(crate::util::format_duration(d));
+        }
+        let footer = parts.join(" · ");
         let block = crate::scrollback::blocks::SessionEventBlock::with_stop_hooks(
             event, stop_hooks, prompt_id,
-        );
+        )
+        .with_response_footer(footer);
         self.scrollback
             .push_block(crate::scrollback::block::RenderBlock::SessionEvent(block));
     }
@@ -539,9 +593,6 @@ impl AgentView {
                     self.session.swap_prompt_down(id);
                 }
                 QueueEvent::ForceInterject { id } => {
-                    // Same InterjectPrompt chord as the prompt; surface is the
-                    // queue pane (not When::PromptFocused).
-                    crate::actions::log_shortcut_used(key, ActionId::InterjectPrompt, "queue");
                     return self.force_interject_queue_row(id);
                 }
             }

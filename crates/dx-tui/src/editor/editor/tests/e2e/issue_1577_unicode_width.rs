@@ -1,0 +1,415 @@
+//! Tests for issue #1577: Variable-width Unicode rendering.
+//!
+//! A mix of FULLWIDTH Latin letters, Arabic ligatures, ZWJ family emoji
+//! and combining marks must render with widths that agree between the
+//! editor's internal column tracking and the terminal output.
+//!
+//! Root cause (pre-fix): `Buffer::next_grapheme_boundary` and
+//! `Buffer::prev_grapheme_boundary` only fetched a fixed 32-byte window of
+//! text from the buffer when looking for the next/previous grapheme
+//! boundary. For ZWJ emoji sequences and Zalgo strings with many combining
+//! marks, a single grapheme cluster easily exceeds 32 bytes, so the
+//! boundary search stopped mid-cluster. That made Right/Left arrow walk
+//! one codepoint at a time through a ZWJ sequence and End land inside the
+//! cluster.
+//!
+//! The fix is in `model/buffer.rs`: start with a 32-byte window but grow
+//! it geometrically whenever the boundary search hits the edge of the
+//! window, so arbitrarily long grapheme clusters are handled correctly.
+
+use crate::common::harness::EditorTestHarness;
+use crossterm::event::{KeyCode, KeyModifiers};
+
+const WIDTH: u16 = 120;
+const HEIGHT: u16 = 30;
+
+const FULLWIDTH_W: &str = "Ｗ"; // U+FF37 FULLWIDTH LATIN CAPITAL LETTER W (width 2)
+const ZWJ_FAMILY: &str = "👨\u{200D}👩\u{200D}👧\u{200D}👦";
+
+/// Build a Zalgo base character: an 'a' with many combining marks. The
+/// combining marks bring the byte length of the single grapheme well past
+/// the 32-byte lookahead that some of the grapheme boundary helpers used.
+fn zalgo_char() -> String {
+    let mut s = String::from("a");
+    // Each combining mark below is 2 bytes (U+0300..U+036F range, encoded
+    // with 2 UTF-8 bytes). 20 marks → 40 bytes of combining code points plus
+    // the 1-byte base → 41 bytes in a single grapheme cluster.
+    for cp in 0x0300u32..0x0314u32 {
+        if let Some(c) = char::from_u32(cp) {
+            s.push(c);
+        }
+    }
+    s
+}
+
+#[test]
+fn test_issue_1577_fullwidth_w_cursor_and_row() {
+    let mut harness = EditorTestHarness::new(WIDTH, HEIGHT).unwrap();
+    let content = format!("pre {FULLWIDTH_W} post\n");
+    let _fixture = harness.load_buffer_from_text(&content).unwrap();
+    harness.render().unwrap();
+
+    // End of line should be at the byte position after "post" (not mid-char).
+    harness.send_key(KeyCode::End, KeyModifiers::NONE).unwrap();
+    let end_pos = harness.cursor_position();
+    let line_bytes = content.trim_end_matches('\n').len();
+    assert_eq!(
+        end_pos, line_bytes,
+        "End should land past the last char on the line (byte {line_bytes}), got {end_pos}"
+    );
+
+    // Navigate Right from start and count the grapheme steps needed to reach
+    // the end. "pre " = 4, fullwidth W = 1 grapheme, " post" = 5 → 10 total.
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    let mut steps = 0usize;
+    loop {
+        let before = harness.cursor_position();
+        harness
+            .send_key(KeyCode::Right, KeyModifiers::NONE)
+            .unwrap();
+        let after = harness.cursor_position();
+        if after == before {
+            break;
+        }
+        steps += 1;
+        if steps > 100 {
+            panic!("Right key never reached end of line");
+        }
+        if after == line_bytes {
+            break;
+        }
+    }
+    assert_eq!(
+        steps, 10,
+        "expected 10 Right presses to cross 'pre Ｗ post' (one grapheme each), got {steps}"
+    );
+
+    // Locate the fullwidth W on screen and verify it occupies 2 terminal cells:
+    // the first cell carries the grapheme symbol, the second is a width-0
+    // continuation cell (empty symbol in ratatui).
+    let (x, y) = find_cell(&mut harness, FULLWIDTH_W).expect("fullwidth W must be visible");
+    let cell0 = harness.get_cell(x, y).unwrap_or_default();
+    let cell1 = harness.get_cell(x + 1, y).unwrap_or_default();
+    assert_eq!(
+        cell0, FULLWIDTH_W,
+        "first cell under fullwidth W should contain the grapheme"
+    );
+    assert!(
+        cell1.is_empty() || cell1 == " ",
+        "second cell under fullwidth W should be the empty continuation cell, got {cell1:?}"
+    );
+}
+
+/// Stepping the cursor through a line that starts with a ZWJ family
+/// emoji must advance the cursor by exactly one visual column per
+/// `Right` press through the cluster, and then by one per ASCII char.
+///
+/// Before the fix: `SpanAccumulator::push` and `push_span_with_map`
+/// both emitted `char_width(ch)` visual-column entries per codepoint,
+/// so the `"👨‍👩‍👧‍👦"` cluster contributed 8 entries (2+0+2+0+2+0+2)
+/// instead of 2 (the cluster's real screen width per
+/// `UnicodeWidthStr::width`). `render_line` then walked that
+/// per-visual-column map to find the cursor's screen x, placing the
+/// cursor 6 cells to the right of its visual position. The user
+/// reported this as "moving Right from BOL should put the cursor on
+/// 'a' (col 2) but I see weird artifacts at col 8".
+#[test]
+fn test_issue_1577_cursor_screen_column_advances_by_grapheme_width() {
+    let mut harness = EditorTestHarness::new(WIDTH, HEIGHT).unwrap();
+    let content = format!("{ZWJ_FAMILY}abc\n");
+    let _fixture = harness.load_buffer_from_text(&content).unwrap();
+    harness.render().unwrap();
+
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    let (home_x, home_y) = harness.screen_cursor_position();
+
+    // First Right: cursor crosses the whole ZWJ family cluster (a single
+    // grapheme of visual width 2), so the screen column must advance by
+    // exactly 2 — landing on the 'a'.
+    harness
+        .send_key(KeyCode::Right, KeyModifiers::NONE)
+        .unwrap();
+    let (after1_x, after1_y) = harness.screen_cursor_position();
+    assert_eq!(
+        after1_y, home_y,
+        "cursor must stay on the same screen row after one Right"
+    );
+    assert_eq!(
+        after1_x - home_x,
+        2,
+        "cursor should advance by 2 screen columns (the ZWJ family cluster's \
+         `UnicodeWidthStr::width`), not 8 (the codepoint-sum width that was \
+         being miscounted). home_x={home_x} after_x={after1_x}",
+    );
+
+    // The cell the cursor now sits on must be the 'a'.
+    let a_cell = harness.get_cell(after1_x, after1_y).unwrap_or_default();
+    assert_eq!(
+        a_cell, "a",
+        "after the first Right, the cursor cell should contain 'a'; got {a_cell:?}"
+    );
+
+    // Each subsequent Right through "bc" advances by one ASCII column.
+    harness
+        .send_key(KeyCode::Right, KeyModifiers::NONE)
+        .unwrap();
+    let (after2_x, _) = harness.screen_cursor_position();
+    assert_eq!(after2_x - after1_x, 1);
+    assert_eq!(
+        harness.get_cell(after2_x, after1_y).unwrap_or_default(),
+        "b"
+    );
+
+    harness
+        .send_key(KeyCode::Right, KeyModifiers::NONE)
+        .unwrap();
+    let (after3_x, _) = harness.screen_cursor_position();
+    assert_eq!(after3_x - after2_x, 1);
+    assert_eq!(
+        harness.get_cell(after3_x, after1_y).unwrap_or_default(),
+        "c"
+    );
+}
+
+#[test]
+fn test_issue_1577_zalgo_grapheme_navigation() {
+    let mut harness = EditorTestHarness::new(WIDTH, HEIGHT).unwrap();
+    let zalgo = zalgo_char();
+    assert!(
+        zalgo.len() > 32,
+        "zalgo grapheme must exceed the 32-byte lookahead"
+    );
+    let content = format!("{zalgo}Z\n");
+    let _fixture = harness.load_buffer_from_text(&content).unwrap();
+    harness.render().unwrap();
+
+    // Right arrow from start must skip the whole Zalgo cluster in one step,
+    // even though it exceeds the 32-byte lookahead window. Otherwise the
+    // cursor lands inside the grapheme and the next render breaks UTF-8
+    // assumptions downstream.
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    assert_eq!(harness.cursor_position(), 0);
+    harness
+        .send_key(KeyCode::Right, KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(
+        harness.cursor_position(),
+        zalgo.len(),
+        "Right from 0 must cross the whole Zalgo cluster in one step \
+         (cursor should land on byte {} just before the Z)",
+        zalgo.len()
+    );
+}
+
+/// Find the first (col, row) cell whose symbol equals `sym`. Works for
+/// multi-cell symbols where `find_text_on_screen` (which returns byte offset)
+/// does not.
+fn find_cell(harness: &mut EditorTestHarness, sym: &str) -> Option<(u16, u16)> {
+    let rows = HEIGHT;
+    for y in 0..rows {
+        for x in 0..WIDTH {
+            if let Some(c) = harness.get_cell(x, y) {
+                if c == sym {
+                    return Some((x, y));
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn test_issue_1577_zwj_family_single_grapheme() {
+    let mut harness = EditorTestHarness::new(WIDTH, HEIGHT).unwrap();
+    // Put the family emoji at the start of the line so End lands right after it.
+    let content = format!("{ZWJ_FAMILY}\n");
+    let _fixture = harness.load_buffer_from_text(&content).unwrap();
+    harness.render().unwrap();
+
+    // End should put the cursor past the whole ZWJ cluster (byte 25), not
+    // mid-sequence.
+    let line_bytes = ZWJ_FAMILY.len();
+    assert_eq!(line_bytes, 25, "sanity: family emoji is 25 UTF-8 bytes");
+
+    harness.send_key(KeyCode::End, KeyModifiers::NONE).unwrap();
+    let end_pos = harness.cursor_position();
+    assert_eq!(
+        end_pos, line_bytes,
+        "End on a ZWJ-family line should land past the whole cluster, not mid-sequence"
+    );
+
+    // A single Right arrow from position 0 should skip the entire ZWJ cluster.
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    harness.send_key(KeyCode::Home, KeyModifiers::NONE).unwrap();
+    assert_eq!(harness.cursor_position(), 0);
+    harness
+        .send_key(KeyCode::Right, KeyModifiers::NONE)
+        .unwrap();
+    assert_eq!(
+        harness.cursor_position(),
+        line_bytes,
+        "Right from 0 must cross the whole ZWJ cluster in one step"
+    );
+}
+
+#[test]
+fn test_issue_1577_rendered_cluster_matches_internal_width() {
+    // The critical invariant: whatever visual width the editor assigns to a
+    // grapheme cluster must match what ratatui reserves on screen. Otherwise
+    // characters after a ZWJ cluster get clobbered or vanish.
+    let mut harness = EditorTestHarness::new(WIDTH, HEIGHT).unwrap();
+    let content = format!("A{ZWJ_FAMILY}Z\n");
+    let _fixture = harness.load_buffer_from_text(&content).unwrap();
+    harness.render().unwrap();
+
+    // 'A' and 'Z' must both be visible on screen.
+    let a_pos = harness.find_text_on_screen("A").expect("A must be visible");
+    let z_pos = harness
+        .find_text_on_screen("Z")
+        .expect("Z after ZWJ family must still be visible (regression: it would be clobbered)");
+    assert_eq!(a_pos.1, z_pos.1, "A and Z should be on the same row");
+
+    // The gap between A and Z is exactly the width the editor decided to give
+    // to the ZWJ cluster. For a ZWJ-aware width function that should be 2
+    // (the width of the first visible sub-grapheme 👨), but at minimum it
+    // must be consistent with what ratatui placed in the buffer.
+    let distance = z_pos.0 - a_pos.0;
+    assert!(
+        distance >= 2,
+        "ZWJ family emoji should take at least 2 cells, got {distance}"
+    );
+
+    // Walk the cells between A and Z and reconstruct what is actually on
+    // screen. The Z must appear in exactly one cell, immediately after the
+    // cluster ends.
+    let row_text = harness.get_row_text(a_pos.1);
+    // Strip the gutter and trailing padding.
+    assert!(
+        row_text.contains('Z'),
+        "row text should contain Z after the ZWJ family emoji, got: {row_text:?}"
+    );
+    // The portion from A through Z, including the cluster cells.
+    let a_idx = row_text.find('A').unwrap();
+    let z_idx = row_text.find('Z').unwrap();
+    let between: String = row_text[a_idx + 'A'.len_utf8()..z_idx].chars().collect();
+    // `between` must contain at least one emoji codepoint from the family.
+    assert!(
+        between.chars().any(|c| c == '👨'),
+        "row must include the family emoji between A and Z, got {between:?}"
+    );
+}
+
+/// End-to-end regression for the rendering corruption the user reported
+/// at 137 cols with the exact mixed-width sample string.
+///
+/// This test runs the full editor render through ratatui + its
+/// `CrosstermBackend` writing into a captured `Vec<u8>` ANSI stream,
+/// which is then replayed through a `vt100` parser. That round-trip is
+/// what the user's tmux terminal does: both it and vt100 advance the
+/// cursor by the terminal's width understanding of each glyph (not by
+/// ratatui's cell index). If fresh's upstream column tracking
+/// (`view_pipeline.char_visual_cols`, `render_line.col_offset`,
+/// wrap-math) disagrees with `UnicodeWidthStr::width` at any stage,
+/// the downstream terminal state drifts out of sync with ratatui's
+/// frame buffer and the vt100 grid no longer contains the line text
+/// where it should.
+///
+/// The assertion is narrow and robust: after the editor renders the
+/// sample, each of the distinctive ASCII fragments of the line must
+/// appear exactly once on the vt100 screen. Duplicated fragments and
+/// disappearances are the garbled-rendering symptom from the ticket.
+#[test]
+fn test_issue_1577_full_ticket_sample_renders_consistently_at_137_cols_real_terminal() {
+    use ratatui::backend::CrosstermBackend;
+    use ratatui::layout::Rect;
+    use ratatui::{Terminal, TerminalOptions, Viewport};
+
+    const TICKET_WIDTH: u16 = 137;
+    const TICKET_HEIGHT: u16 = 30;
+
+    let mut harness = EditorTestHarness::new(TICKET_WIDTH, TICKET_HEIGHT).unwrap();
+    let sample = "A standard \"i\", a ＦＵＬＬＷＩＤＴＨ \"Ｗ\", a massive Arabic \
+                  ligature \"\u{FDFD}\", a ZWJ emoji sequence \
+                  \"\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}\u{200D}\u{1F466}\", \
+                  a Zalgo combining word \"t\u{337}e\u{337}x\u{337}t\u{337}\", \
+                  and an ancient cuneiform \"\u{12019}\".";
+    // Mirror the user's reproducer: start with a `[No Name]*` buffer
+    // (typed content, not an opened file) so incremental rendering runs
+    // through every keystroke. The bug in the ticket screenshot shows
+    // duplicated content fragments, which is a diff-rendering symptom
+    // — it only manifests after the buffer has been built up edit-by-
+    // edit on top of prior frames.
+    harness.type_text(sample).unwrap();
+    harness.render().unwrap();
+
+    // Now replay the same frame through a real CrosstermBackend →
+    // captured ANSI → vt100 pipeline. The real backend's cell-write
+    // sequencing (including wide-char continuation cells) matches
+    // what the user's tmux terminal sees in production.
+    let buffer_snapshot = harness.buffer().clone();
+    let area = Rect::new(0, 0, TICKET_WIDTH, TICKET_HEIGHT);
+    let mut captured = Vec::<u8>::new();
+    {
+        let backend = CrosstermBackend::new(&mut captured);
+        let mut real_term = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Fixed(area),
+            },
+        )
+        .unwrap();
+        real_term
+            .draw(|f| {
+                let buf = f.buffer_mut();
+                for y in 0..buffer_snapshot.area.height {
+                    for x in 0..buffer_snapshot.area.width {
+                        if let Some(src) =
+                            buffer_snapshot.content.get(buffer_snapshot.index_of(x, y))
+                        {
+                            buf[(x, y)] = src.clone();
+                        }
+                    }
+                }
+            })
+            .unwrap();
+    }
+
+    let mut parser = vt100::Parser::new(TICKET_HEIGHT, TICKET_WIDTH, 0);
+    parser.process(&captured);
+    let screen = parser.screen();
+    let mut vt100_text = String::new();
+    for row in 0..TICKET_HEIGHT {
+        for col in 0..TICKET_WIDTH {
+            if let Some(cell) = screen.cell(row, col) {
+                vt100_text.push_str(&cell.contents());
+            }
+        }
+        vt100_text.push('\n');
+    }
+
+    for needle in [
+        "A standard",
+        "Arabic ligature",
+        "ZWJ emoji sequence",
+        "Zalgo combining word",
+        "ancient cuneiform",
+    ] {
+        let count = vt100_text.matches(needle).count();
+        assert_eq!(
+            count, 1,
+            "after rendering through CrosstermBackend + vt100, {needle:?} appears {count} \
+             times on the virtual terminal (should be exactly 1 — duplicates / \
+             disappearances are the rendering corruption from the bug report)\n\nvt100:\n{vt100_text}",
+        );
+    }
+
+    for bad in ["combiningbword", "combiningword", "wordg wor"] {
+        assert!(
+            !vt100_text.contains(bad),
+            "rendering corruption fingerprint {bad:?} appeared on the vt100 screen\n\nvt100:\n{vt100_text}",
+        );
+    }
+}

@@ -36,7 +36,7 @@ pub trait TerminalLike {
 }
 
 // Implementation for our Terminal with any Backend that implements Write
-impl<B: Backend + Write> TerminalLike for Terminal<B> {
+impl<B: Backend<Error = io::Error> + Write> TerminalLike for Terminal<B> {
     type Writer = B;
 
     fn size(&self) -> io::Result<Size> {

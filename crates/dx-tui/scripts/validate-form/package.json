@@ -1,0 +1,13 @@
+{
+	"name": "validate-form",
+	"version": "1.0.0",
+	"type": "module",
+	"scripts": {
+		"validate": "node --experimental-strip-types main.ts"
+	},
+	"private": true,
+	"dependencies": {
+		"@actions/core": "^3.0.0",
+		"@actions/github": "^9.0.0"
+	}
+}

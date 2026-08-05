@@ -1213,6 +1213,7 @@ pub(crate) async fn run(
         user_config.as_ref(),
         managed_config.as_ref(),
     );
+    app.project_picker_disabled = hints.project_picker_disabled;
     // Per-tip contextual hints resolve from `[ui.contextual_hints]` (loaded into
     // `app.current_ui` further below) + the remote tier; the resolve + prompt
     // propagation happen after `current_ui` is hydrated.
@@ -1684,6 +1685,17 @@ pub(crate) async fn run(
                 git_ref: args.worktree_ref.clone(),
             })
         }
+        MaterializedStartup::NewAuto
+            if args.initial_prompt().is_none()
+                && std::env::var("GROK_OPEN_DASHBOARD_AT_STARTUP").as_deref() != Ok("1")
+                && std::env::var("GROK_OPEN_CONNECT_AT_STARTUP").as_deref() != Ok("1") =>
+        {
+            // The carousel Splash is the product home screen. Create the
+            // empty session immediately so its two-second Splash can render,
+            // then hand off to the Workspace/Chat screen automatically.
+            app.welcome_post_new_view = Some(crate::dx::DxView::Animation);
+            Some(Action::NewSession)
+        }
         MaterializedStartup::NewAuto => None,
     };
 
@@ -1746,6 +1758,18 @@ pub(crate) async fn run(
             // Defer to the `AuthComplete` handler (mirrors
             // the deferred session/prompt owner).
             app.deferred_startup.open_dashboard = true;
+        }
+    }
+
+    // `grok connect` startup: open the provider connect modal immediately.
+    if std::env::var("GROK_OPEN_CONNECT_AT_STARTUP").as_deref() == Ok("1") {
+        unsafe { std::env::remove_var("GROK_OPEN_CONNECT_AT_STARTUP") };
+        if app.session_startup_allowed() {
+            let effs = dispatch::dispatch(Action::OpenProviderConnect, &mut app);
+            if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
+                return Ok(make_run_result(&app));
+            }
+            presenter.request_presentation(&mut app, terminal, false);
         }
     }
 
@@ -2280,6 +2304,11 @@ pub(crate) async fn run(
 
             _ = animation_tick => {
                 animation_tick_at = None;
+                if app.take_dx_exit_ready() {
+                    let effs = dispatch::dispatch(Action::Quit, &mut app);
+                    let _ = process_effects(effs, &mut tasks, &mut app, &progress_tx);
+                    break;
+                }
                 // Lost-response recovery: finish any turn whose
                 // `prompt_complete` broadcast outlived the grace window
                 // without its `session/prompt` RPC response arriving
@@ -3177,6 +3206,20 @@ async fn drain_and_process(
             }
             _ => {}
         }
+        // An outro is intentionally skippable: once the confirmed quit has
+        // started it, another Ctrl+C exits immediately instead of replaying
+        // confirmation or waiting for the remaining animation duration.
+        if app.dx_exit_at.is_some()
+            && matches!(
+                ev,
+                Event::Key(key)
+                    if key.kind != crossterm::event::KeyEventKind::Release
+                        && key.code == crossterm::event::KeyCode::Char('c')
+                        && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL)
+            )
+        {
+            return true;
+        }
         // Voice capture chord (Ctrl+Space or F8), handled here before normal
         // routing so the release reaches us and the key never lands as text.
         // Hold-to-talk where releases are reported (press records, release
@@ -3225,6 +3268,15 @@ async fn drain_and_process(
             routed.paste_provenance,
         ) {
             InputOutcome::Action(action) => {
+                if matches!(action, Action::Quit)
+                    && app.appearance.animation.outro
+                    && app.dx_exit_at.is_none()
+                {
+                    app.begin_dx_exit_animation();
+                    needs_draw = true;
+                    had_non_resize_change = true;
+                    return false;
+                }
                 let effs = dispatch::dispatch(action, app);
                 if process_effects(effs, tasks, app, progress_tx) {
                     return true;

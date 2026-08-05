@@ -1,0 +1,23 @@
+[package]
+name = "fb-proxy"
+description            = "DX TUI file-browser event proxy"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-config = { path = "../config" }
+fb-macro = { path = "../macro" }
+fb-parser = { path = "../parser" }
+fb-shared = { path = "../shared" }
+fb-widgets = { path = "../widgets" }
+
+# External dependencies
+tokio = { workspace = true }

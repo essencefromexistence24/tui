@@ -53,7 +53,7 @@ struct PartialInfo {
     reason: &'static str,
 }
 
-pub(crate) async fn handle(
+pub async fn handle(
     agent: &MvpAgent,
     args: &acp::ExtRequest,
 ) -> Result<acp::ExtResponse, acp::Error> {

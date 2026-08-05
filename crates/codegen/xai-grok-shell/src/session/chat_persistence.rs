@@ -18,13 +18,13 @@ use super::persistence::PersistenceMsg;
 /// - `persist_working_directory_switch_and_ack` → `PersistenceMsg::AppendCwdSwitchAndAck`
 /// - `replace_history` → `PersistenceMsg::ReplaceChatHistory`
 /// - `flush` → `PersistenceMsg::Flush`
-pub(crate) struct ChannelChatPersistence {
+pub struct ChannelChatPersistence {
     tx: mpsc::UnboundedSender<PersistenceMsg>,
 }
 
 impl ChannelChatPersistence {
     /// Create a new `ChannelChatPersistence` wrapping the given persistence channel.
-    pub(crate) fn new(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
+    pub fn new(tx: mpsc::UnboundedSender<PersistenceMsg>) -> Self {
         Self { tx }
     }
 }

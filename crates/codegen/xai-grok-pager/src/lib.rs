@@ -1,4 +1,4 @@
-//! xai-grok-pager — Grok Build TUI.
+//! xai-grok-pager — Dx TUI.
 //!
 //! A clean-room implementation built on the v3 pager rendering engine.
 
@@ -12,7 +12,11 @@ pub mod diagnostics;
 pub mod diff;
 pub mod docs;
 pub mod doctor_cmd;
+pub mod dx;
+pub use dx::effects;
 pub mod export_cmd;
+#[path = "../../../dx-tui/src/font.rs"]
+pub mod font;
 pub mod git_info;
 pub mod headless;
 pub mod hyperlink_route;
@@ -42,8 +46,8 @@ pub mod notifications;
 #[allow(unused_imports, unused_macros)]
 pub mod obf;
 pub mod plugin_cmd;
+pub mod project_picker;
 pub mod pty_wrap;
-pub mod recent_dirs;
 pub mod scrollback;
 pub mod search;
 pub mod sessions_cmd;
@@ -70,6 +74,7 @@ pub use xai_grok_pager_render::{
 pub mod trace_cmd;
 pub mod tracing;
 pub mod unified_log;
+pub mod video_player;
 pub mod views;
 pub mod voice;
 pub mod worktree_cmd;

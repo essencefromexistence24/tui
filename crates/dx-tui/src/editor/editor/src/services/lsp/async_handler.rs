@@ -1,0 +1,5596 @@
+//! Async LSP Client using Tokio
+//!
+//! This module implements an asynchronous LSP client that:
+//! - Runs in a separate Tokio task
+//! - Uses tokio::process for async process I/O
+//! - Sends notifications to main loop via AsyncBridge
+//! - Handles LSP notifications asynchronously (diagnostics, etc.)
+//!
+//! Architecture:
+//! - LspTask: Async task that manages LSP process and I/O
+//! - LspHandle: Sync handle that can send commands to the task
+//! - Uses tokio channels for command/response communication
+
+use crate::services::async_bridge::{
+	AsyncBridge, AsyncMessage, LspMessageType, LspProgressValue, LspSemanticTokensResponse,
+	LspServerStatus,
+};
+use crate::services::process_limits::ProcessLimits;
+use lsp_types::{
+	ClientCapabilities, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+	DidOpenTextDocumentParams, DidSaveTextDocumentParams, InitializeParams, InitializeResult,
+	InitializedParams, PartialResultParams, Position, PublishDiagnosticsParams, Range,
+	SemanticTokenModifier, SemanticTokenType, SemanticTokensClientCapabilities,
+	SemanticTokensClientCapabilitiesRequests, SemanticTokensFullOptions, SemanticTokensParams,
+	SemanticTokensResult, SemanticTokensServerCapabilities, ServerCapabilities,
+	TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+	TextDocumentPositionParams, TokenFormat, Uri, VersionedTextDocumentIdentifier,
+	WindowClientCapabilities, WorkDoneProgressParams, WorkspaceFolder,
+	notification::{
+		DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, DidSaveTextDocument,
+		Initialized, Notification, PublishDiagnostics,
+	},
+	request::{Initialize, Request},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::{Arc, Mutex, mpsc as std_mpsc};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{ChildStdin, ChildStdout};
+use tokio::sync::{mpsc, oneshot};
+
+/// Maps an in-flight LSP request id to the request method and the channel
+/// awaiting its response. The method is retained so error responses can be
+/// classified per-method (see `log_response_error`).
+type PendingRequests = Arc<Mutex<HashMap<i64, (String, oneshot::Sender<Result<Value, String>>)>>>;
+
+/// Grace period after didOpen before sending didChange (in milliseconds)
+/// This gives the LSP server time to process didOpen before receiving changes
+const DID_OPEN_GRACE_PERIOD_MS: u64 = 200;
+
+/// Default per-request timeout. After this elapses with no response, the
+/// request is cancelled (`$/cancelRequest`), the pending oneshot is dropped,
+/// and an empty/error response is shipped to the editor. Prevents a
+/// misbehaving server (e.g. one that advertises a capability but never
+/// answers) from leaving features wedged in their loading state forever.
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
+
+/// LSP error codes that should not surface as user-visible warnings.
+///
+/// From [LSP 3.17 specification](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/):
+/// - ContentModified (-32801): "If clients receive a ContentModified error,
+///   it generally should not show it in the UI for the end-user."
+/// - ServerCancelled (-32802): Server cancelled the request (e.g. due to newer request).
+///
+/// These are expected during normal editing and all major editors (VS Code,
+/// Neovim) suppress them.
+///
+/// Other JSON-RPC errors — including MethodNotFound (-32601) — are NOT
+/// suppressed: we want genuine protocol mismatches to surface so they can
+/// be diagnosed. The correct way to avoid MethodNotFound is to check the
+/// server's advertised capabilities before sending the request.
+const LSP_ERROR_CONTENT_MODIFIED: i64 = -32801;
+const LSP_ERROR_SERVER_CANCELLED: i64 = -32802;
+
+/// RequestFailed (-32803): "A request failed but it was syntactically correct."
+/// The spec wants informational requests (hover, completion, ...) to answer
+/// "nothing here" with a `null` result, but several servers return this error
+/// instead — e.g. asm-lsp replies with `-32803 "No information available"` when
+/// hovering a label or macro that isn't a documented opcode/register
+/// (sinelaw/fresh#2296). For those read-only methods a failure just means "no
+/// info for this position", so it's logged at debug. For methods where a
+/// failure is actionable (formatting, rename, ...) it still warns.
+const LSP_ERROR_REQUEST_FAILED: i64 = -32803;
+
+/// Methods where "the server couldn't produce a result" is a normal, expected
+/// outcome rather than a bug — a `null` result or a soft `RequestFailed` simply
+/// means there is nothing to show at the requested position.
+fn is_informational_method(method: &str) -> bool {
+	matches!(
+		method,
+		"textDocument/hover"
+			| "textDocument/completion"
+			| "textDocument/signatureHelp"
+			| "textDocument/definition"
+			| "textDocument/declaration"
+			| "textDocument/typeDefinition"
+			| "textDocument/implementation"
+			| "textDocument/references"
+			| "textDocument/documentHighlight"
+			| "textDocument/documentSymbol"
+			| "textDocument/inlayHint"
+			| "textDocument/foldingRange"
+	)
+}
+
+/// Whether a JSON-RPC error response should be logged at debug rather than warn.
+/// See `LSP_ERROR_*` constants above for the rationale behind each suppressed code.
+fn is_suppressed_error_code(code: i64) -> bool {
+	code == LSP_ERROR_CONTENT_MODIFIED || code == LSP_ERROR_SERVER_CANCELLED
+}
+
+/// Whether an error response for `method` with `code` should be downgraded from
+/// warn to debug. Extends `is_suppressed_error_code` with a method-aware rule:
+/// a `RequestFailed` from an informational request (see `is_informational_method`)
+/// is a routine "no result here", not server misbehaviour.
+fn is_suppressed_response_error(code: i64, method: &str) -> bool {
+	is_suppressed_error_code(code)
+		|| (code == LSP_ERROR_REQUEST_FAILED && is_informational_method(method))
+}
+
+/// Log an LSP JSON-RPC error response at the appropriate level.
+///
+/// Suppressed errors (see `is_suppressed_response_error`) emit a debug record;
+/// every other error emits a warning so genuine server misbehaviour stays
+/// visible. `method` is the originating request method (e.g. `textDocument/hover`).
+fn log_response_error(code: i64, message: &str, server_name: &str, language: &str, method: &str) {
+	if is_suppressed_response_error(code, method) {
+		tracing::debug!(
+			"LSP response from '{}' ({}) for {}: {} (code {}), discarding",
+			server_name,
+			language,
+			method,
+			message,
+			code
+		);
+	} else {
+		tracing::warn!(
+			"LSP response error from '{}' ({}) for {}: {} (code {})",
+			server_name,
+			language,
+			method,
+			message,
+			code
+		);
+	}
+}
+
+/// Check if a document is already open and should skip didOpen.
+/// Returns true if the document is already open (should skip), false if it should proceed.
+fn should_skip_did_open(
+	document_versions: &Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+	path: &PathBuf,
+	language: &str,
+	uri: &Uri,
+) -> bool {
+	if document_versions.lock().unwrap().contains_key(path) {
+		tracing::debug!(
+			"LSP ({}): skipping didOpen - document already open: {}",
+			language,
+			uri.as_str()
+		);
+		true
+	} else {
+		false
+	}
+}
+
+/// A JSON-RPC message
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcMessage {
+	Request(JsonRpcRequest),
+	Response(JsonRpcResponse),
+	Notification(JsonRpcNotification),
+}
+
+/// A JSON-RPC request/response id.
+///
+/// The LSP base protocol types ids as `integer | string`, and that distinction
+/// is not academic: servers built on Eclipse LSP4J (jdtls, the Groovy/Kotlin
+/// language servers, lemminx, …) send *string* ids for the requests they
+/// initiate, such as `client/registerCapability`. Modelling the id as a plain
+/// `i64` made those requests fail to deserialize as `Request` and — because
+/// `JsonRpcMessage` is `#[serde(untagged)]` — silently fall through to
+/// `Notification`, which ignores the stray `id`. The dynamic-capability handler
+/// therefore never ran, jdtls's dynamically-registered `textDocument/completion`
+/// (and hover, etc.) stayed gated off, and the request was never even
+/// acknowledged (sinelaw/fresh#2340).
+///
+/// `Number` is listed first so numeric ids round-trip as integers; a JSON
+/// string id only matches `Str`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum JsonRpcId {
+	Number(i64),
+	Str(String),
+}
+
+impl JsonRpcId {
+	/// The id as an `i64`, when it is numeric. Dx only ever issues numeric
+	/// ids for its own outgoing requests, so response correlation keys on this;
+	/// a string id can only have come from a server-initiated request.
+	fn as_i64(&self) -> Option<i64> {
+		match self {
+			JsonRpcId::Number(n) => Some(*n),
+			JsonRpcId::Str(_) => None,
+		}
+	}
+}
+
+impl From<i64> for JsonRpcId {
+	fn from(n: i64) -> Self {
+		JsonRpcId::Number(n)
+	}
+}
+
+impl std::fmt::Display for JsonRpcId {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			JsonRpcId::Number(n) => write!(f, "{}", n),
+			JsonRpcId::Str(s) => write!(f, "{}", s),
+		}
+	}
+}
+
+/// A JSON-RPC request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcRequest {
+	pub jsonrpc: String,
+	pub id: JsonRpcId,
+	pub method: String,
+	pub params: Option<Value>,
+}
+
+/// A JSON-RPC response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcResponse {
+	pub jsonrpc: String,
+	pub id: JsonRpcId,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub result: Option<Value>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub error: Option<JsonRpcError>,
+}
+
+/// A JSON-RPC notification (no response expected)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcNotification {
+	pub jsonrpc: String,
+	pub method: String,
+	pub params: Option<Value>,
+}
+
+/// A JSON-RPC error
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcError {
+	pub code: i64,
+	pub message: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub data: Option<Value>,
+}
+
+/// LSP client state machine
+///
+/// Tracks the lifecycle of the LSP client connection with proper state transitions.
+/// This prevents invalid operations (e.g., can't initialize twice, can't send requests when stopped).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LspClientState {
+	/// Initial state before spawning
+	Initial,
+	/// Process spawning in progress
+	Starting,
+	/// Initialize request sent, waiting for response
+	Initializing,
+	/// Initialized and ready for requests
+	Running,
+	/// Shutdown in progress
+	Stopping,
+	/// Cleanly stopped
+	Stopped,
+	/// Failed or crashed
+	Error,
+}
+
+impl LspClientState {
+	/// Check if this state can transition to another state
+	pub fn can_transition_to(&self, next: LspClientState) -> bool {
+		use LspClientState::*;
+		match (self, next) {
+			// From Initial, can only start
+			(Initial, Starting) => true,
+			// From Starting, can initialize or error
+			(Starting, Initializing) | (Starting, Error) => true,
+			// From Initializing, can become running or error
+			(Initializing, Running) | (Initializing, Error) => true,
+			// From Running, can stop or error
+			(Running, Stopping) | (Running, Error) => true,
+			// From Stopping, can become stopped or error
+			(Stopping, Stopped) | (Stopping, Error) => true,
+			// From Stopped, can restart
+			(Stopped, Starting) => true,
+			// From Error, can be cleanly shut down or restarted.
+			// Shutdown from Error is reachable when initialization
+			// fails or the server crashes — see #1797.
+			(Error, Stopping) | (Error, Starting) => true,
+			// Any state can become error
+			(_, Error) => true,
+			// Same state is always valid (no-op)
+			(a, b) if *a == b => true,
+			// All other transitions are invalid
+			_ => false,
+		}
+	}
+
+	/// Transition to a new state, returning error if invalid
+	pub fn transition_to(&mut self, next: LspClientState) -> Result<(), String> {
+		if self.can_transition_to(next) {
+			*self = next;
+			Ok(())
+		} else {
+			Err(format!("Invalid state transition from {:?} to {:?}", self, next))
+		}
+	}
+
+	/// Check if the client is ready to send requests
+	pub fn can_send_requests(&self) -> bool {
+		matches!(self, Self::Running)
+	}
+
+	/// Check if the client can accept initialization
+	pub fn can_initialize(&self) -> bool {
+		matches!(self, Self::Initial | Self::Starting | Self::Stopped)
+	}
+
+	/// Convert to LspServerStatus for UI reporting
+	pub fn to_server_status(&self) -> LspServerStatus {
+		match self {
+			Self::Initial => LspServerStatus::Starting,
+			Self::Starting => LspServerStatus::Starting,
+			Self::Initializing => LspServerStatus::Initializing,
+			Self::Running => LspServerStatus::Running,
+			Self::Stopping => LspServerStatus::Shutdown,
+			Self::Stopped => LspServerStatus::Shutdown,
+			Self::Error => LspServerStatus::Error,
+		}
+	}
+}
+
+/// Create common LSP client capabilities with workDoneProgress support
+fn create_client_capabilities() -> ClientCapabilities {
+	use lsp_types::{
+		CodeActionClientCapabilities, CodeActionKindLiteralSupport, CodeActionLiteralSupport,
+		CompletionClientCapabilities, DiagnosticClientCapabilities, DiagnosticTag,
+		DiagnosticWorkspaceClientCapabilities, DocumentFormattingClientCapabilities,
+		DocumentHighlightClientCapabilities, DocumentRangeFormattingClientCapabilities,
+		DocumentSymbolClientCapabilities, DynamicRegistrationClientCapabilities,
+		FoldingRangeCapability, FoldingRangeClientCapabilities, FoldingRangeKind,
+		FoldingRangeKindCapability, GeneralClientCapabilities, GotoCapability, HoverClientCapabilities,
+		InlayHintClientCapabilities, InlayHintWorkspaceClientCapabilities, MarkupKind,
+		PublishDiagnosticsClientCapabilities, RenameClientCapabilities,
+		SemanticTokensWorkspaceClientCapabilities, SignatureHelpClientCapabilities, TagSupport,
+		TextDocumentClientCapabilities, TextDocumentSyncClientCapabilities,
+		WorkspaceClientCapabilities, WorkspaceEditClientCapabilities,
+		WorkspaceSymbolClientCapabilities,
+	};
+
+	ClientCapabilities {
+		window: Some(WindowClientCapabilities { work_done_progress: Some(true), ..Default::default() }),
+		workspace: Some(WorkspaceClientCapabilities {
+			apply_edit: Some(true),
+			workspace_edit: Some(WorkspaceEditClientCapabilities {
+				document_changes: Some(true),
+				..Default::default()
+			}),
+			workspace_folders: Some(true),
+			// Advertise support for server-initiated `workspace/configuration`
+			// pulls. Servers like pyright gate features on this: without it
+			// they never ask the client for settings and silently fall back
+			// to their defaults — e.g. pyright's inlay hints default OFF, so
+			// no type/parameter hints are ever produced. We answer these
+			// pulls in `resolve_workspace_configuration`, sourcing the
+			// requested section from each server's `initialization_options`.
+			configuration: Some(true),
+			// Accept dynamically-registered workspace-symbol providers. We
+			// apply `client/registerCapability` (see handler), so servers that
+			// register `workspace/symbol` after `initialize` get the feature.
+			symbol: Some(WorkspaceSymbolClientCapabilities {
+				dynamic_registration: Some(true),
+				..Default::default()
+			}),
+			// Accept server-driven diagnostic refreshes. We handle
+			// `workspace/diagnostic/refresh` (re-pulling diagnostics for all
+			// open docs), but servers only send it when the client advertises
+			// refresh support — e.g. rust-analyzer fires it once indexing
+			// finishes, which is when the first real diagnostics exist.
+			diagnostic: Some(DiagnosticWorkspaceClientCapabilities { refresh_support: Some(true) }),
+			// Accept server-driven inlay-hint and semantic-token refreshes.
+			// These fire when the server learns something later that changes a
+			// file the user never edited (e.g. cross-file type inference), so
+			// it isn't otherwise re-pulled. We handle them by re-pulling for
+			// all open docs of the language; servers only send them because we
+			// advertise refresh support here (sinelaw/fresh#2195 §2).
+			inlay_hint: Some(InlayHintWorkspaceClientCapabilities { refresh_support: Some(true) }),
+			semantic_tokens: Some(SemanticTokensWorkspaceClientCapabilities {
+				refresh_support: Some(true),
+			}),
+			..Default::default()
+		}),
+		text_document: Some(TextDocumentClientCapabilities {
+			synchronization: Some(TextDocumentSyncClientCapabilities {
+				did_save: Some(true),
+				..Default::default()
+			}),
+			// `dynamicRegistration: true` on every capability we actually
+			// honor: many servers advertise little statically in `initialize`
+			// and register providers afterwards via `client/registerCapability`
+			// (which we now apply). Without the flag a spec-compliant server is
+			// entitled to never register the provider. See sinelaw/fresh#2195.
+			completion: Some(CompletionClientCapabilities {
+				dynamic_registration: Some(true),
+				..Default::default()
+			}),
+			hover: Some(HoverClientCapabilities {
+				dynamic_registration: Some(true),
+				content_format: Some(vec![MarkupKind::Markdown, MarkupKind::PlainText]),
+			}),
+			signature_help: Some(SignatureHelpClientCapabilities {
+				dynamic_registration: Some(true),
+				..Default::default()
+			}),
+			definition: Some(GotoCapability {
+				dynamic_registration: Some(true),
+				link_support: Some(true),
+			}),
+			references: Some(DynamicRegistrationClientCapabilities { dynamic_registration: Some(true) }),
+			document_highlight: Some(DocumentHighlightClientCapabilities {
+				dynamic_registration: Some(true),
+			}),
+			document_symbol: Some(DocumentSymbolClientCapabilities {
+				dynamic_registration: Some(true),
+				..Default::default()
+			}),
+			formatting: Some(DocumentFormattingClientCapabilities { dynamic_registration: Some(true) }),
+			range_formatting: Some(DocumentRangeFormattingClientCapabilities {
+				dynamic_registration: Some(true),
+			}),
+			code_action: Some(CodeActionClientCapabilities {
+				dynamic_registration: Some(true),
+				// Without `codeActionLiteralSupport`, rust-analyzer (and
+				// servers that follow the same spec branch) returns `null`
+				// for `textDocument/codeAction` whenever the action would be
+				// a `WorkspaceEdit`-based assist — e.g. "Fill struct fields"
+				// — because it cannot represent it as the `Command`-only
+				// fallback the spec falls back to.  See sinelaw/fresh#1915.
+				code_action_literal_support: Some(CodeActionLiteralSupport {
+					code_action_kind: CodeActionKindLiteralSupport {
+						value_set: vec![
+							String::new(),
+							"quickfix".to_string(),
+							"refactor".to_string(),
+							"refactor.extract".to_string(),
+							"refactor.inline".to_string(),
+							"refactor.rewrite".to_string(),
+							"source".to_string(),
+							"source.organizeImports".to_string(),
+						],
+					},
+				}),
+				..Default::default()
+			}),
+			rename: Some(RenameClientCapabilities {
+				dynamic_registration: Some(true),
+				prepare_support: Some(true),
+				honors_change_annotations: Some(true),
+				..Default::default()
+			}),
+			publish_diagnostics: Some(PublishDiagnosticsClientCapabilities {
+				related_information: Some(true),
+				tag_support: Some(TagSupport {
+					value_set: vec![DiagnosticTag::UNNECESSARY, DiagnosticTag::DEPRECATED],
+				}),
+				version_support: Some(true),
+				code_description_support: Some(true),
+				data_support: Some(true),
+			}),
+			inlay_hint: Some(InlayHintClientCapabilities {
+				dynamic_registration: Some(true),
+				..Default::default()
+			}),
+			diagnostic: Some(DiagnosticClientCapabilities {
+				dynamic_registration: Some(true),
+				..Default::default()
+			}),
+			folding_range: Some(FoldingRangeClientCapabilities {
+				dynamic_registration: Some(true),
+				line_folding_only: Some(true),
+				folding_range_kind: Some(FoldingRangeKindCapability {
+					value_set: Some(vec![
+						FoldingRangeKind::Comment,
+						FoldingRangeKind::Imports,
+						FoldingRangeKind::Region,
+					]),
+				}),
+				folding_range: Some(FoldingRangeCapability { collapsed_text: Some(true) }),
+				..Default::default()
+			}),
+			semantic_tokens: Some(SemanticTokensClientCapabilities {
+				dynamic_registration: Some(true),
+				requests: SemanticTokensClientCapabilitiesRequests {
+					range: Some(true),
+					full: Some(SemanticTokensFullOptions::Delta { delta: Some(true) }),
+				},
+				token_types: vec![
+					SemanticTokenType::NAMESPACE,
+					SemanticTokenType::TYPE,
+					SemanticTokenType::CLASS,
+					SemanticTokenType::ENUM,
+					SemanticTokenType::INTERFACE,
+					SemanticTokenType::STRUCT,
+					SemanticTokenType::TYPE_PARAMETER,
+					SemanticTokenType::PARAMETER,
+					SemanticTokenType::VARIABLE,
+					SemanticTokenType::PROPERTY,
+					SemanticTokenType::ENUM_MEMBER,
+					SemanticTokenType::EVENT,
+					SemanticTokenType::FUNCTION,
+					SemanticTokenType::METHOD,
+					SemanticTokenType::MACRO,
+					SemanticTokenType::KEYWORD,
+					SemanticTokenType::MODIFIER,
+					SemanticTokenType::COMMENT,
+					SemanticTokenType::STRING,
+					SemanticTokenType::NUMBER,
+					SemanticTokenType::REGEXP,
+					SemanticTokenType::OPERATOR,
+					SemanticTokenType::DECORATOR,
+				],
+				token_modifiers: vec![
+					SemanticTokenModifier::DECLARATION,
+					SemanticTokenModifier::DEFINITION,
+					SemanticTokenModifier::READONLY,
+					SemanticTokenModifier::STATIC,
+					SemanticTokenModifier::DEPRECATED,
+					SemanticTokenModifier::ABSTRACT,
+					SemanticTokenModifier::ASYNC,
+					SemanticTokenModifier::MODIFICATION,
+					SemanticTokenModifier::DOCUMENTATION,
+					SemanticTokenModifier::DEFAULT_LIBRARY,
+				],
+				formats: vec![TokenFormat::RELATIVE],
+				overlapping_token_support: Some(true),
+				multiline_token_support: Some(true),
+				server_cancel_support: Some(true),
+				augments_syntax_tokens: Some(true),
+			}),
+			..Default::default()
+		}),
+		general: Some(GeneralClientCapabilities { ..Default::default() }),
+		// Enable rust-analyzer experimental features
+		experimental: Some(serde_json::json!({
+				"serverStatusNotification": true
+		})),
+		..Default::default()
+	}
+}
+
+use crate::services::lsp::manager::ServerCapabilitySummary;
+
+/// Extract a complete capability summary from the server's initialize response.
+///
+/// Follows the LSP 3.17 specification for each capability field:
+/// - `boolean | XxxOptions` → true if `true` or options present
+/// - Options-only fields (e.g. completionProvider) → true if present
+fn extract_capability_summary(caps: &ServerCapabilities) -> ServerCapabilitySummary {
+	let (sem_legend, sem_full, sem_full_delta, sem_range) = caps
+		.semantic_tokens_provider
+		.as_ref()
+		.map(|provider| {
+			let (legend, full_opt) = match provider {
+				SemanticTokensServerCapabilities::SemanticTokensOptions(o) => (o.legend.clone(), &o.full),
+				SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(o) => {
+					(o.semantic_tokens_options.legend.clone(), &o.semantic_tokens_options.full)
+				}
+			};
+			let range = match provider {
+				SemanticTokensServerCapabilities::SemanticTokensOptions(o) => o.range.unwrap_or(false),
+				SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(o) => {
+					o.semantic_tokens_options.range.unwrap_or(false)
+				}
+			};
+			let full = match full_opt {
+				Some(SemanticTokensFullOptions::Bool(v)) => *v,
+				Some(SemanticTokensFullOptions::Delta { .. }) => true,
+				None => false,
+			};
+			let delta = match full_opt {
+				Some(SemanticTokensFullOptions::Delta { delta }) => delta.unwrap_or(false),
+				_ => false,
+			};
+			(Some(legend), full, delta, range)
+		})
+		.unwrap_or((None, false, false, false));
+
+	ServerCapabilitySummary {
+		initialized: false, // set to true by set_server_capabilities
+		hover: bool_or_options(&caps.hover_provider, |p| match p {
+			lsp_types::HoverProviderCapability::Simple(v) => *v,
+			lsp_types::HoverProviderCapability::Options(_) => true,
+		}),
+		completion: caps.completion_provider.is_some(),
+		completion_resolve: caps
+			.completion_provider
+			.as_ref()
+			.and_then(|cp| cp.resolve_provider)
+			.unwrap_or(false),
+		completion_trigger_characters: caps
+			.completion_provider
+			.as_ref()
+			.and_then(|cp| cp.trigger_characters.clone())
+			.unwrap_or_default(),
+		definition: bool_or_options(&caps.definition_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		implementation: bool_or_options(&caps.implementation_provider, |p| match p {
+			lsp_types::ImplementationProviderCapability::Simple(v) => *v,
+			lsp_types::ImplementationProviderCapability::Options(_) => true,
+		}),
+		references: bool_or_options(&caps.references_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		document_formatting: bool_or_options(&caps.document_formatting_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		document_range_formatting: bool_or_options(
+			&caps.document_range_formatting_provider,
+			|p| match p {
+				lsp_types::OneOf::Left(v) => *v,
+				lsp_types::OneOf::Right(_) => true,
+			},
+		),
+		rename: bool_or_options(&caps.rename_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		signature_help: caps.signature_help_provider.is_some(),
+		inlay_hints: bool_or_options(&caps.inlay_hint_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		folding_ranges: bool_or_options(&caps.folding_range_provider, |p| match p {
+			lsp_types::FoldingRangeProviderCapability::Simple(v) => *v,
+			_ => true,
+		}),
+		semantic_tokens_full: sem_full,
+		semantic_tokens_full_delta: sem_full_delta,
+		semantic_tokens_range: sem_range,
+		semantic_tokens_legend: sem_legend,
+		document_highlight: bool_or_options(&caps.document_highlight_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		code_action: bool_or_options(&caps.code_action_provider, |p| match p {
+			lsp_types::CodeActionProviderCapability::Simple(v) => *v,
+			lsp_types::CodeActionProviderCapability::Options(_) => true,
+		}),
+		code_action_resolve: caps.code_action_provider.as_ref().is_some_and(|p| match p {
+			lsp_types::CodeActionProviderCapability::Options(opts) => {
+				opts.resolve_provider.unwrap_or(false)
+			}
+			_ => false,
+		}),
+		document_symbols: bool_or_options(&caps.document_symbol_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		workspace_symbols: bool_or_options(&caps.workspace_symbol_provider, |p| match p {
+			lsp_types::OneOf::Left(v) => *v,
+			lsp_types::OneOf::Right(_) => true,
+		}),
+		diagnostics: caps.diagnostic_provider.is_some(),
+	}
+}
+
+/// Helper: check an `Option<T>` capability field using a predicate.
+fn bool_or_options<T>(opt: &Option<T>, check: impl FnOnce(&T) -> bool) -> bool {
+	opt.as_ref().is_some_and(check)
+}
+
+/// Commands sent from the main loop to the LSP task
+#[derive(Debug)]
+enum LspCommand {
+	/// Initialize the server
+	Initialize {
+		root_uri: Option<Uri>,
+		initialization_options: Option<Value>,
+		response: oneshot::Sender<Result<InitializeResult, String>>,
+	},
+
+	/// Notify document opened
+	DidOpen { uri: Uri, text: String, language_id: String },
+
+	/// Notify document changed
+	DidChange { uri: Uri, content_changes: Vec<TextDocumentContentChangeEvent> },
+
+	/// Notify document closed
+	DidClose { uri: Uri },
+
+	/// Notify document saved
+	DidSave { uri: Uri, text: Option<String> },
+
+	/// Notify workspace folders changed
+	DidChangeWorkspaceFolders {
+		added: Vec<lsp_types::WorkspaceFolder>,
+		removed: Vec<lsp_types::WorkspaceFolder>,
+	},
+
+	/// Request completion at position
+	Completion { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Request go-to-definition
+	GotoDefinition { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Request go-to-implementation
+	Implementation { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Request rename
+	Rename { request_id: u64, uri: Uri, line: u32, character: u32, new_name: String },
+
+	/// Request hover documentation
+	Hover { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Request find references
+	References { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Request signature help
+	SignatureHelp { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Request code actions
+	CodeActions {
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		diagnostics: Vec<lsp_types::Diagnostic>,
+	},
+
+	/// Request document diagnostics (pull model)
+	DocumentDiagnostic {
+		request_id: u64,
+		uri: Uri,
+		/// Previous result_id for incremental updates (None for full refresh)
+		previous_result_id: Option<String>,
+	},
+
+	/// Request inlay hints for a range (LSP 3.17+)
+	InlayHints {
+		request_id: u64,
+		uri: Uri,
+		/// Range to get hints for (typically viewport)
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+	},
+
+	/// Request folding ranges for a document
+	FoldingRange { request_id: u64, uri: Uri },
+
+	/// Request semantic tokens for the entire document
+	SemanticTokensFull { request_id: u64, uri: Uri },
+
+	/// Request semantic tokens delta for the entire document
+	SemanticTokensFullDelta { request_id: u64, uri: Uri, previous_result_id: String },
+
+	/// Request semantic tokens for a range
+	SemanticTokensRange { request_id: u64, uri: Uri, range: lsp_types::Range },
+
+	/// Execute a command on the server (workspace/executeCommand)
+	ExecuteCommand { command: String, arguments: Option<Vec<Value>> },
+
+	/// Resolve a code action to get full edit/command details (codeAction/resolve)
+	CodeActionResolve { request_id: u64, action: Box<lsp_types::CodeAction> },
+
+	/// Resolve a completion item to get full details (completionItem/resolve)
+	CompletionResolve { request_id: u64, item: Box<lsp_types::CompletionItem> },
+
+	/// Format a document (textDocument/formatting)
+	DocumentFormatting { request_id: u64, uri: Uri, tab_size: u32, insert_spaces: bool },
+
+	/// Format a range in a document (textDocument/rangeFormatting)
+	DocumentRangeFormatting {
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		tab_size: u32,
+		insert_spaces: bool,
+	},
+
+	/// Prepare rename — validate rename at position (textDocument/prepareRename)
+	PrepareRename { request_id: u64, uri: Uri, line: u32, character: u32 },
+
+	/// Cancel a pending request
+	CancelRequest {
+		/// Editor's request ID to cancel
+		request_id: u64,
+	},
+
+	/// Custom request initiated by a plugin
+	PluginRequest { request_id: u64, method: String, params: Option<Value> },
+
+	/// Shutdown the server
+	Shutdown,
+}
+
+/// Mutable state for LSP command processing.
+///
+/// All mutable fields use interior mutability (Arc/atomics) so this struct
+/// is cheaply Cloneable and request handlers can be spawned onto independent
+/// tokio tasks. That way one stuck request to a server can't block other
+/// requests or notifications going to the same server (issue #1679).
+#[derive(Clone)]
+struct LspState {
+	/// Stdin for sending messages (shared with stdout reader for server responses)
+	stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+
+	/// Next request ID
+	next_id: Arc<AtomicI64>,
+
+	/// Server capabilities
+	capabilities: Arc<std::sync::Mutex<Option<ServerCapabilities>>>,
+
+	/// Document versions (shared with stdout reader for stale diagnostic filtering)
+	document_versions: Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+
+	/// Track when didOpen was sent for each document to avoid race with didChange
+	/// The LSP server needs time to process didOpen before it can handle didChange
+	pending_opens: Arc<std::sync::Mutex<HashMap<PathBuf, Instant>>>,
+
+	/// Whether initialized
+	initialized: Arc<AtomicBool>,
+
+	/// Sender for async messages to main loop
+	async_tx: std_mpsc::Sender<AsyncMessage>,
+
+	/// Language ID (for error reporting)
+	language: Arc<String>,
+
+	/// Server name (for multi-server status tracking)
+	server_name: Arc<String>,
+
+	/// Mapping from editor request_id to LSP JSON-RPC id for cancellation
+	/// Key: editor request_id, Value: LSP JSON-RPC id
+	active_requests: Arc<std::sync::Mutex<HashMap<u64, i64>>>,
+
+	/// Extension-to-languageId overrides for textDocument/didOpen
+	language_id_overrides: Arc<HashMap<String, String>>,
+}
+
+// Channel sends (`async_tx.send()`) throughout LspState are best-effort: if the receiver
+// (main editor loop) has been dropped, the editor is shutting down and there is nothing
+// to do with the error. Handler method results (`handle_*`) are similarly safe to discard
+// since errors are already logged within those methods. State transitions in error-handling
+// paths are secondary to the actual error being handled.
+#[allow(clippy::let_underscore_must_use)]
+impl LspState {
+	/// Replay pending commands that were queued before initialization
+	async fn replay_pending_commands(&self, commands: Vec<LspCommand>, pending: &PendingRequests) {
+		if commands.is_empty() {
+			return;
+		}
+		tracing::info!("Replaying {} pending commands after initialization", commands.len());
+		for cmd in commands {
+			match cmd {
+				LspCommand::DidOpen { uri, text, language_id } => {
+					tracing::info!("Replaying DidOpen for {}", uri.as_str());
+					let _ = self.handle_did_open_sequential(uri, text, language_id, pending).await;
+				}
+				LspCommand::DidChange { uri, content_changes } => {
+					tracing::info!("Replaying DidChange for {}", uri.as_str());
+					let _ = self.handle_did_change_sequential(uri, content_changes, pending).await;
+				}
+				LspCommand::DidClose { uri } => {
+					tracing::info!("Replaying DidClose for {}", uri.as_str());
+					let _ = self.handle_did_close(uri).await;
+				}
+				LspCommand::DidSave { uri, text } => {
+					tracing::info!("Replaying DidSave for {}", uri.as_str());
+					let _ = self.handle_did_save(uri, text).await;
+				}
+				LspCommand::DidChangeWorkspaceFolders { added, removed } => {
+					tracing::info!(
+						"Replaying DidChangeWorkspaceFolders: +{} -{}",
+						added.len(),
+						removed.len()
+					);
+					let _ = self
+						.send_notification::<lsp_types::notification::DidChangeWorkspaceFolders>(
+							lsp_types::DidChangeWorkspaceFoldersParams {
+								event: lsp_types::WorkspaceFoldersChangeEvent { added, removed },
+							},
+						)
+						.await;
+				}
+				LspCommand::SemanticTokensFull { request_id, uri } => {
+					tracing::info!("Replaying semantic tokens request for {}", uri.as_str());
+					let s = self.clone();
+					let p = pending.clone();
+					tokio::spawn(async move {
+						let _ = s.handle_semantic_tokens_full(request_id, uri, &p).await;
+					});
+				}
+				LspCommand::SemanticTokensFullDelta { request_id, uri, previous_result_id } => {
+					tracing::info!("Replaying semantic tokens delta request for {}", uri.as_str());
+					let s = self.clone();
+					let p = pending.clone();
+					tokio::spawn(async move {
+						let _ =
+							s.handle_semantic_tokens_full_delta(request_id, uri, previous_result_id, &p).await;
+					});
+				}
+				LspCommand::SemanticTokensRange { request_id, uri, range } => {
+					tracing::info!("Replaying semantic tokens range request for {}", uri.as_str());
+					let s = self.clone();
+					let p = pending.clone();
+					tokio::spawn(async move {
+						let _ = s.handle_semantic_tokens_range(request_id, uri, range, &p).await;
+					});
+				}
+				LspCommand::FoldingRange { request_id, uri } => {
+					tracing::info!("Replaying folding range request for {}", uri.as_str());
+					let s = self.clone();
+					let p = pending.clone();
+					tokio::spawn(async move {
+						let _ = s.handle_folding_ranges(request_id, uri, &p).await;
+					});
+				}
+				_ => {}
+			}
+		}
+	}
+
+	/// Write a message to stdin
+	async fn write_message<T: Serialize>(&self, message: &T) -> Result<(), String> {
+		let json = serde_json::to_string(message).map_err(|e| format!("Serialization error: {}", e))?;
+
+		let content = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+
+		tracing::trace!("Writing LSP message to stdin ({} bytes)", content.len());
+
+		let mut stdin = self.stdin.lock().await;
+		stdin
+			.write_all(content.as_bytes())
+			.await
+			.map_err(|e| format!("Failed to write to stdin: {}", e))?;
+
+		stdin.flush().await.map_err(|e| format!("Failed to flush stdin: {}", e))?;
+
+		tracing::trace!("Successfully sent LSP message");
+
+		Ok(())
+	}
+
+	/// Send a notification using lsp-types Notification trait (type-safe)
+	async fn send_notification<N>(&self, params: N::Params) -> Result<(), String>
+	where
+		N: Notification,
+	{
+		let notification = JsonRpcNotification {
+			jsonrpc: "2.0".to_string(),
+			method: N::METHOD.to_string(),
+			params: Some(
+				serde_json::to_value(params).map_err(|e| format!("Failed to serialize params: {}", e))?,
+			),
+		};
+
+		self.write_message(&notification).await
+	}
+
+	/// Send request using shared pending map (default per-request timeout).
+	async fn send_request_sequential<P: Serialize, R: for<'de> Deserialize<'de>>(
+		&self,
+		method: &str,
+		params: Option<P>,
+		pending: &PendingRequests,
+	) -> Result<R, String> {
+		self
+			.send_request_with_timeout(
+				method,
+				params,
+				pending,
+				None,
+				Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
+			)
+			.await
+	}
+
+	/// Send request using shared pending map with optional editor request tracking
+	async fn send_request_sequential_tracked<P: Serialize, R: for<'de> Deserialize<'de>>(
+		&self,
+		method: &str,
+		params: Option<P>,
+		pending: &PendingRequests,
+		editor_request_id: Option<u64>,
+	) -> Result<R, String> {
+		self
+			.send_request_with_timeout(
+				method,
+				params,
+				pending,
+				editor_request_id,
+				Duration::from_millis(DEFAULT_REQUEST_TIMEOUT_MS),
+			)
+			.await
+	}
+
+	/// Send a request, awaiting the response with a per-request timeout.
+	///
+	/// On timeout: drops the pending oneshot, sends `$/cancelRequest` to the
+	/// server, and returns Err — so misbehaving servers (advertising a
+	/// capability but never replying) don't wedge features forever.
+	async fn send_request_with_timeout<P: Serialize, R: for<'de> Deserialize<'de>>(
+		&self,
+		method: &str,
+		params: Option<P>,
+		pending: &PendingRequests,
+		editor_request_id: Option<u64>,
+		timeout: Duration,
+	) -> Result<R, String> {
+		let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+
+		// Track the mapping if editor_request_id is provided
+		if let Some(editor_id) = editor_request_id {
+			self.active_requests.lock().unwrap().insert(editor_id, id);
+			tracing::trace!("Tracking request: editor_id={}, lsp_id={}", editor_id, id);
+		}
+
+		let params_value = params
+			.map(|p| serde_json::to_value(p))
+			.transpose()
+			.map_err(|e| format!("Failed to serialize params: {}", e))?;
+		let request = JsonRpcRequest {
+			jsonrpc: "2.0".to_string(),
+			id: JsonRpcId::Number(id),
+			method: method.to_string(),
+			params: params_value,
+		};
+
+		let (tx, rx) = oneshot::channel();
+		pending.lock().unwrap().insert(id, (method.to_string(), tx));
+
+		if let Err(e) = self.write_message(&request).await {
+			pending.lock().unwrap().remove(&id);
+			if let Some(editor_id) = editor_request_id {
+				self.active_requests.lock().unwrap().remove(&editor_id);
+			}
+			return Err(e);
+		}
+
+		tracing::trace!(
+			"Sent LSP request id={} method={}, waiting up to {:?} for response",
+			id,
+			method,
+			timeout
+		);
+
+		let response_result = match tokio::time::timeout(timeout, rx).await {
+			Ok(Ok(inner)) => inner,
+			Ok(Err(_)) => Err("Response channel closed".to_string()),
+			Err(_) => {
+				// Timed out: forget the pending entry, ask the server to cancel.
+				pending.lock().unwrap().remove(&id);
+				tracing::warn!(
+					"LSP request '{}' (lsp_id={}) on '{}' ({}) timed out after {:?}; sending $/cancelRequest",
+					method,
+					id,
+					self.server_name.as_str(),
+					self.language.as_str(),
+					timeout
+				);
+				let _ = self.send_cancel_request(id).await;
+				Err(format!("Request '{}' timed out after {:?}", method, timeout))
+			}
+		};
+
+		if let Some(editor_id) = editor_request_id {
+			self.active_requests.lock().unwrap().remove(&editor_id);
+			tracing::trace!("Completed request: editor_id={}, lsp_id={}", editor_id, id);
+		}
+
+		let result = response_result?;
+		serde_json::from_value(result).map_err(|e| format!("Failed to deserialize response: {}", e))
+	}
+
+	/// Handle initialize command
+	async fn handle_initialize_sequential(
+		&self,
+		root_uri: Option<Uri>,
+		initialization_options: Option<Value>,
+		pending: &PendingRequests,
+	) -> Result<InitializeResult, String> {
+		tracing::info!(
+			"Initializing async LSP server with root_uri: {:?}, initialization_options: {:?}",
+			root_uri,
+			initialization_options
+		);
+
+		let workspace_folders = root_uri.as_ref().map(|uri| {
+			vec![WorkspaceFolder {
+				uri: uri.clone(),
+				name: uri.path().as_str().split('/').next_back().unwrap_or("workspace").to_string(),
+			}]
+		});
+
+		#[allow(deprecated)]
+		let params = InitializeParams {
+			process_id: Some(std::process::id()),
+			capabilities: create_client_capabilities(),
+			workspace_folders,
+			initialization_options,
+			// Set the deprecated root_uri field for compatibility with LSP servers
+			// like csharp-ls that still require it (see issue #366)
+			root_uri: root_uri.clone(),
+			..Default::default()
+		};
+
+		let result: InitializeResult =
+			self.send_request_sequential(Initialize::METHOD, Some(params), pending).await?;
+
+		tracing::info!(
+			"LSP initialize result: position_encoding={:?}",
+			result.capabilities.position_encoding
+		);
+		*self.capabilities.lock().unwrap() = Some(result.capabilities.clone());
+
+		// Send initialized notification
+		self.send_notification::<Initialized>(InitializedParams {}).await?;
+
+		self.initialized.store(true, Ordering::SeqCst);
+
+		let capabilities = extract_capability_summary(&result.capabilities);
+
+		// Notify main loop
+		let _ = self.async_tx.send(AsyncMessage::LspInitialized {
+			language: (*self.language).clone(),
+			server_name: (*self.server_name).clone(),
+			capabilities,
+		});
+
+		// Send running status
+		let _ = self.async_tx.send(AsyncMessage::LspStatusUpdate {
+			language: (*self.language).clone(),
+			server_name: (*self.server_name).clone(),
+			status: LspServerStatus::Running,
+			message: None,
+		});
+
+		tracing::info!("Async LSP server initialized successfully");
+
+		Ok(result)
+	}
+
+	/// Handle did_open command
+	async fn handle_did_open_sequential(
+		&self,
+		uri: Uri,
+		text: String,
+		language_id: String,
+		_pending: &PendingRequests,
+	) -> Result<(), String> {
+		let path = PathBuf::from(uri.path().as_str());
+
+		if should_skip_did_open(&self.document_versions, &path, self.language.as_str(), &uri) {
+			return Ok(());
+		}
+
+		tracing::trace!("LSP: did_open for {}", uri.as_str());
+
+		// Remap languageId based on file extension using configured overrides.
+		// For example, .tsx → "typescriptreact", .jsx → "javascriptreact"
+		let lsp_language_id = path
+			.extension()
+			.and_then(|e| e.to_str())
+			.and_then(|ext| self.language_id_overrides.get(ext))
+			.cloned()
+			.unwrap_or(language_id);
+
+		let params = DidOpenTextDocumentParams {
+			text_document: TextDocumentItem {
+				uri: uri.clone(),
+				language_id: lsp_language_id,
+				version: 0,
+				text,
+			},
+		};
+
+		self.document_versions.lock().unwrap().insert(path.clone(), 0);
+
+		// Record when we sent didOpen so didChange can wait if needed
+		self.pending_opens.lock().unwrap().insert(path, Instant::now());
+
+		self.send_notification::<DidOpenTextDocument>(params).await
+	}
+
+	/// Handle did_change command
+	async fn handle_did_change_sequential(
+		&self,
+		uri: Uri,
+		content_changes: Vec<TextDocumentContentChangeEvent>,
+		_pending: &PendingRequests,
+	) -> Result<(), String> {
+		tracing::trace!("LSP: did_change for {}", uri.as_str());
+
+		let path = PathBuf::from(uri.path().as_str());
+
+		// If the document hasn't been opened yet (not in document_versions),
+		// skip this change - the upcoming didOpen will have the current content
+		if !self.document_versions.lock().unwrap().contains_key(&path) {
+			tracing::debug!("LSP ({}): skipping didChange - document not yet opened", self.language);
+			return Ok(());
+		}
+
+		// Check if this document was recently opened and wait if needed
+		// This prevents race conditions where the server receives didChange
+		// before it has finished processing didOpen
+		let opened_at = self.pending_opens.lock().unwrap().get(&path).copied();
+		if let Some(opened_at) = opened_at {
+			let elapsed = opened_at.elapsed();
+			let grace_period = std::time::Duration::from_millis(DID_OPEN_GRACE_PERIOD_MS);
+			if elapsed < grace_period {
+				let wait_time = grace_period - elapsed;
+				tracing::debug!(
+					"LSP ({}): waiting {:?} for didOpen grace period before didChange",
+					self.language,
+					wait_time
+				);
+				tokio::time::sleep(wait_time).await;
+			}
+			// Remove from pending_opens after grace period has passed
+			self.pending_opens.lock().unwrap().remove(&path);
+		}
+
+		let new_version = {
+			let mut versions = self.document_versions.lock().unwrap();
+			let version = versions.entry(path).or_insert(0);
+			*version += 1;
+			*version
+		};
+
+		let params = DidChangeTextDocumentParams {
+			text_document: VersionedTextDocumentIdentifier {
+				uri: uri.clone(),
+				version: new_version as i32,
+			},
+			content_changes,
+		};
+
+		self.send_notification::<DidChangeTextDocument>(params).await
+	}
+
+	/// Handle did_save command
+	async fn handle_did_save(&self, uri: Uri, text: Option<String>) -> Result<(), String> {
+		tracing::trace!("LSP: did_save for {}", uri.as_str());
+
+		let params = DidSaveTextDocumentParams { text_document: TextDocumentIdentifier { uri }, text };
+
+		self.send_notification::<DidSaveTextDocument>(params).await
+	}
+
+	/// Handle did_close command
+	async fn handle_did_close(&self, uri: Uri) -> Result<(), String> {
+		let path = PathBuf::from(uri.path().as_str());
+
+		// Remove from document_versions so that a subsequent didOpen will be accepted
+		if self.document_versions.lock().unwrap().remove(&path).is_some() {
+			tracing::info!("LSP ({}): didClose for {}", self.language, uri.as_str());
+		} else {
+			tracing::debug!(
+				"LSP ({}): didClose for {} but document was not tracked",
+				self.language,
+				uri.as_str()
+			);
+		}
+
+		// Also remove from pending_opens
+		self.pending_opens.lock().unwrap().remove(&path);
+
+		let params = DidCloseTextDocumentParams { text_document: TextDocumentIdentifier { uri } };
+
+		self.send_notification::<DidCloseTextDocument>(params).await
+	}
+
+	/// Handle completion request
+	async fn handle_completion(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::CompletionParams;
+
+		tracing::trace!("LSP: completion request at {}:{}:{}", uri.as_str(), line, character);
+
+		let params = CompletionParams {
+			text_document_position: Self::text_document_position(uri, line, character),
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+			context: None,
+		};
+
+		// Send request and get response (tracked for cancellation)
+		match self
+			.send_request_sequential_tracked::<_, Value>(
+				"textDocument/completion",
+				Some(params),
+				pending,
+				Some(request_id),
+			)
+			.await
+		{
+			Ok(result) => {
+				// Parse the completion response
+				let items =
+					if let Ok(list) = serde_json::from_value::<lsp_types::CompletionList>(result.clone()) {
+						list.items
+					} else {
+						serde_json::from_value::<Vec<lsp_types::CompletionItem>>(result).unwrap_or_default()
+					};
+
+				// Send to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspCompletion { request_id, items });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Completion request failed: {}", e);
+				// Send empty completion on error
+				let _ = self.async_tx.send(AsyncMessage::LspCompletion { request_id, items: vec![] });
+				Err(e)
+			}
+		}
+	}
+
+	/// Build the `TextDocumentPositionParams` shared by every position-based
+	/// request (definition, implementation, rename, hover, references,
+	/// signature help, …). Centralizes the `uri`/`line`/`character` →
+	/// params construction that was otherwise repeated verbatim in each
+	/// handler.
+	fn text_document_position(uri: Uri, line: u32, character: u32) -> TextDocumentPositionParams {
+		TextDocumentPositionParams {
+			text_document: TextDocumentIdentifier { uri },
+			position: Position { line, character },
+		}
+	}
+
+	/// Parse a `textDocument/definition`-style response into a flat list of
+	/// locations. The LSP spec lets servers answer with a single `Location`,
+	/// an array of `Location`s, or an array of `LocationLink`s (whose target
+	/// lives in `target_uri` / `target_selection_range`). Definition and
+	/// implementation both accept all three shapes, so the decoding lives
+	/// here once instead of being copy-pasted into each handler.
+	fn locations_from_response(result: Value) -> Vec<lsp_types::Location> {
+		if let Ok(loc) = serde_json::from_value::<lsp_types::Location>(result.clone()) {
+			vec![loc]
+		} else if let Ok(locs) = serde_json::from_value::<Vec<lsp_types::Location>>(result.clone()) {
+			locs
+		} else if let Ok(links) = serde_json::from_value::<Vec<lsp_types::LocationLink>>(result) {
+			links
+				.into_iter()
+				.map(|link| lsp_types::Location {
+					uri: link.target_uri,
+					range: link.target_selection_range,
+				})
+				.collect()
+		} else {
+			vec![]
+		}
+	}
+
+	/// Handle go-to-definition request
+	async fn handle_goto_definition(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::GotoDefinitionParams;
+
+		tracing::trace!("LSP: go-to-definition request at {}:{}:{}", uri.as_str(), line, character);
+
+		let params = GotoDefinitionParams {
+			text_document_position_params: Self::text_document_position(uri, line, character),
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/definition", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the definition response (can be Location, Vec<Location>, or LocationLink)
+				let locations = Self::locations_from_response(result);
+
+				// Send to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspGotoDefinition { request_id, locations });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Go-to-definition request failed: {}", e);
+				// Send empty locations on error
+				let _ =
+					self.async_tx.send(AsyncMessage::LspGotoDefinition { request_id, locations: vec![] });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle go-to-implementation request
+	async fn handle_implementation(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::request::GotoImplementationParams;
+
+		tracing::trace!("LSP: go-to-implementation request at {}:{}:{}", uri.as_str(), line, character);
+
+		let params = GotoImplementationParams {
+			text_document_position_params: Self::text_document_position(uri, line, character),
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/implementation", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the response (can be Location, Vec<Location>, or LocationLink)
+				let locations = Self::locations_from_response(result);
+
+				// Send to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspImplementation { request_id, locations });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Go-to-implementation request failed: {}", e);
+				// Send empty locations on error
+				let _ =
+					self.async_tx.send(AsyncMessage::LspImplementation { request_id, locations: vec![] });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle rename request
+	async fn handle_rename(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		new_name: String,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::RenameParams;
+
+		tracing::trace!(
+			"LSP: rename request at {}:{}:{} to '{}'",
+			uri.as_str(),
+			line,
+			character,
+			new_name
+		);
+
+		let params = RenameParams {
+			text_document_position: Self::text_document_position(uri, line, character),
+			new_name,
+			work_done_progress_params: WorkDoneProgressParams::default(),
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/rename", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the workspace edit response
+				match serde_json::from_value::<lsp_types::WorkspaceEdit>(result) {
+					Ok(workspace_edit) => {
+						// Send to main loop
+						let _ = self
+							.async_tx
+							.send(AsyncMessage::LspRename { request_id, result: Ok(workspace_edit) });
+						Ok(())
+					}
+					Err(e) => {
+						tracing::error!("Failed to parse rename response: {}", e);
+						let _ = self.async_tx.send(AsyncMessage::LspRename {
+							request_id,
+							result: Err(format!("Failed to parse rename response: {}", e)),
+						});
+						Err(format!("Failed to parse rename response: {}", e))
+					}
+				}
+			}
+			Err(e) => {
+				tracing::debug!("Rename request failed: {}", e);
+				// Send error to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspRename { request_id, result: Err(e.clone()) });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle hover documentation request
+	async fn handle_hover(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::HoverParams;
+
+		tracing::trace!("LSP: hover request at {}:{}:{}", uri.as_str(), line, character);
+
+		let params = HoverParams {
+			text_document_position_params: Self::text_document_position(uri, line, character),
+			work_done_progress_params: WorkDoneProgressParams::default(),
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/hover", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				tracing::debug!("Raw LSP hover response: {:?}", result);
+				let (contents, is_markdown, range) = Self::parse_hover_response(result);
+
+				// Send to main loop
+				let _ =
+					self.async_tx.send(AsyncMessage::LspHover { request_id, contents, is_markdown, range });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Hover request failed: {}", e);
+				// Send empty result on error (no hover available)
+				let _ = self.async_tx.send(AsyncMessage::LspHover {
+					request_id,
+					contents: String::new(),
+					is_markdown: false,
+					range: None,
+				});
+				Err(e)
+			}
+		}
+	}
+
+	/// Decode a `textDocument/hover` response `Value` into the
+	/// `(contents, is_markdown, range)` triple the editor consumes.
+	///
+	/// The LSP spec says a server with no hover info should answer
+	/// `null`, but some servers instead return an empty object `{}` — or,
+	/// more generally, an object with no `contents` field. slangd is one:
+	/// hovering a keyword or an attribute like `[numthreads]` yields `{}`
+	/// (sinelaw/fresh). `contents` is a required field on
+	/// `lsp_types::Hover`, so feeding `{}` straight to `from_value`
+	/// produces `missing field \`contents\``. Treating a missing
+	/// `contents` as "nothing to show here" — exactly like `null` — keeps
+	/// that routine outcome from surfacing as an ERROR-level parse
+	/// failure. An empty `contents` string means the same and is reported
+	/// as no-hover.
+	#[allow(clippy::type_complexity)]
+	fn parse_hover_response(result: Value) -> (String, bool, Option<((u32, u32), (u32, u32))>) {
+		let no_contents = result.as_object().is_some_and(|obj| !obj.contains_key("contents"));
+		if result.is_null() || no_contents {
+			return (String::new(), false, None);
+		}
+		match serde_json::from_value::<lsp_types::Hover>(result) {
+			Ok(hover) => {
+				let (contents, is_markdown) = Self::extract_hover_contents(&hover.contents);
+				// The range tells us which symbol was hovered.
+				let range =
+					hover.range.map(|r| ((r.start.line, r.start.character), (r.end.line, r.end.character)));
+				(contents, is_markdown, range)
+			}
+			Err(e) => {
+				// `contents` is present but the payload is still malformed —
+				// a genuine protocol violation, not the routine "nothing to
+				// show" that a missing `contents` represents. Surface it as a
+				// warning so the mismatch stays diagnosable, then fall back to
+				// no-hover so the editor keeps working.
+				tracing::warn!("Failed to parse hover response: {}", e);
+				(String::new(), false, None)
+			}
+		}
+	}
+
+	/// Extract text from hover contents (handles both MarkedString and MarkupContent)
+	/// Returns (content_string, is_markdown)
+	fn extract_hover_contents(contents: &lsp_types::HoverContents) -> (String, bool) {
+		use lsp_types::{HoverContents, MarkedString, MarkupContent, MarkupKind};
+
+		match contents {
+			HoverContents::Scalar(marked) => match marked {
+				MarkedString::String(s) => (s.clone(), false),
+				MarkedString::LanguageString(ls) => {
+					// Language strings are formatted as markdown code blocks
+					(format!("```{}\n{}\n```", ls.language, ls.value), true)
+				}
+			},
+			HoverContents::Array(arr) => {
+				// Array of marked strings - format as markdown
+				let content = arr
+					.iter()
+					.map(|marked| match marked {
+						MarkedString::String(s) => s.clone(),
+						MarkedString::LanguageString(ls) => {
+							format!("```{}\n{}\n```", ls.language, ls.value)
+						}
+					})
+					.collect::<Vec<_>>()
+					.join("\n\n");
+				(content, true)
+			}
+			HoverContents::Markup(MarkupContent { kind, value }) => {
+				// Check if it's markdown or plaintext
+				let is_markdown = matches!(kind, MarkupKind::Markdown);
+				(value.clone(), is_markdown)
+			}
+		}
+	}
+
+	/// Handle find references request
+	async fn handle_references(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::{ReferenceContext, ReferenceParams};
+
+		tracing::trace!("LSP: find references request at {}:{}:{}", uri.as_str(), line, character);
+
+		let params = ReferenceParams {
+			text_document_position: Self::text_document_position(uri, line, character),
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+			context: ReferenceContext { include_declaration: true },
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/references", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the references response (Vec<Location> or null)
+				let locations = if result.is_null() {
+					Vec::new()
+				} else {
+					serde_json::from_value::<Vec<lsp_types::Location>>(result).unwrap_or_default()
+				};
+
+				tracing::trace!("LSP: found {} references", locations.len());
+
+				// Send to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspReferences { request_id, locations });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Find references request failed: {}", e);
+				// Send empty result on error
+				let _ =
+					self.async_tx.send(AsyncMessage::LspReferences { request_id, locations: Vec::new() });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle signature help request
+	async fn handle_signature_help(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::SignatureHelpParams;
+
+		tracing::trace!("LSP: signature help request at {}:{}:{}", uri.as_str(), line, character);
+
+		let params = SignatureHelpParams {
+			text_document_position_params: Self::text_document_position(uri, line, character),
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			context: None, // We can add context later for re-triggers
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/signatureHelp", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the signature help response (SignatureHelp or null)
+				let signature_help = if result.is_null() {
+					None
+				} else {
+					serde_json::from_value::<lsp_types::SignatureHelp>(result).ok()
+				};
+
+				tracing::trace!(
+					"LSP: signature help received: {} signatures",
+					signature_help.as_ref().map(|h| h.signatures.len()).unwrap_or(0)
+				);
+
+				// Send to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspSignatureHelp { request_id, signature_help });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Signature help request failed: {}", e);
+				// Send empty result on error
+				let _ =
+					self.async_tx.send(AsyncMessage::LspSignatureHelp { request_id, signature_help: None });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle code actions request
+	#[allow(clippy::too_many_arguments)]
+	async fn handle_code_actions(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		diagnostics: Vec<lsp_types::Diagnostic>,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::{CodeActionContext, CodeActionParams};
+
+		tracing::trace!(
+			"LSP: code actions request at {}:{}:{}-{}:{}",
+			uri.as_str(),
+			start_line,
+			start_char,
+			end_line,
+			end_char
+		);
+
+		let params = CodeActionParams {
+			text_document: TextDocumentIdentifier { uri },
+			range: Range {
+				start: Position { line: start_line, character: start_char },
+				end: Position { line: end_line, character: end_char },
+			},
+			context: CodeActionContext { diagnostics, only: None, trigger_kind: None },
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/codeAction", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the code actions response (Vec<CodeActionOrCommand> or null)
+				let actions = if result.is_null() {
+					Vec::new()
+				} else {
+					serde_json::from_value::<Vec<lsp_types::CodeActionOrCommand>>(result).unwrap_or_default()
+				};
+
+				tracing::trace!("LSP: received {} code actions", actions.len());
+
+				// Send to main loop
+				let _ = self.async_tx.send(AsyncMessage::LspCodeActions { request_id, actions });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Code actions request failed: {}", e);
+				// Send empty result on error
+				let _ =
+					self.async_tx.send(AsyncMessage::LspCodeActions { request_id, actions: Vec::new() });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle workspace/executeCommand request
+	async fn handle_execute_command(
+		&self,
+		command: String,
+		arguments: Option<Vec<Value>>,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		let params = lsp_types::ExecuteCommandParams {
+			command: command.clone(),
+			arguments: arguments.unwrap_or_default(),
+			work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+		};
+
+		match self
+			.send_request_sequential::<_, Value>("workspace/executeCommand", Some(params), pending)
+			.await
+		{
+			Ok(_) => {
+				tracing::info!("ExecuteCommand '{}' completed", command);
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("ExecuteCommand '{}' failed: {}", command, e);
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle codeAction/resolve request
+	async fn handle_code_action_resolve(
+		&self,
+		request_id: u64,
+		action: lsp_types::CodeAction,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		match self
+			.send_request_sequential::<_, Value>("codeAction/resolve", Some(action), pending)
+			.await
+		{
+			Ok(result) => {
+				let resolved = serde_json::from_value::<lsp_types::CodeAction>(result)
+					.map_err(|e| format!("Failed to parse codeAction/resolve response: {}", e));
+				let _ =
+					self.async_tx.send(AsyncMessage::LspCodeActionResolved { request_id, action: resolved });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("codeAction/resolve failed: {}", e);
+				let _ = self
+					.async_tx
+					.send(AsyncMessage::LspCodeActionResolved { request_id, action: Err(e.clone()) });
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle completionItem/resolve request
+	async fn handle_completion_resolve(
+		&self,
+		request_id: u64,
+		item: lsp_types::CompletionItem,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		match self
+			.send_request_sequential::<_, Value>("completionItem/resolve", Some(item), pending)
+			.await
+		{
+			Ok(result) => {
+				let resolved = serde_json::from_value::<lsp_types::CompletionItem>(result)
+					.map_err(|e| format!("Failed to parse completionItem/resolve response: {}", e));
+				let _ =
+					self.async_tx.send(AsyncMessage::LspCompletionResolved { request_id, item: resolved });
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("completionItem/resolve failed: {}", e);
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle textDocument/formatting request
+	async fn handle_document_formatting(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		tab_size: u32,
+		insert_spaces: bool,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::{DocumentFormattingParams, FormattingOptions};
+
+		let params = DocumentFormattingParams {
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			options: FormattingOptions { tab_size, insert_spaces, ..Default::default() },
+			work_done_progress_params: WorkDoneProgressParams::default(),
+		};
+
+		match self
+			.send_request_sequential::<_, Value>("textDocument/formatting", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				let edits = if result.is_null() {
+					Vec::new()
+				} else {
+					serde_json::from_value::<Vec<lsp_types::TextEdit>>(result).unwrap_or_default()
+				};
+				let _ = self.async_tx.send(AsyncMessage::LspFormatting {
+					request_id,
+					uri: uri.as_str().to_string(),
+					edits,
+				});
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("textDocument/formatting failed: {}", e);
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle textDocument/rangeFormatting request
+	#[allow(clippy::too_many_arguments)]
+	async fn handle_document_range_formatting(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		tab_size: u32,
+		insert_spaces: bool,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::{DocumentRangeFormattingParams, FormattingOptions};
+
+		let params = DocumentRangeFormattingParams {
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			range: Range {
+				start: Position::new(start_line, start_char),
+				end: Position::new(end_line, end_char),
+			},
+			options: FormattingOptions { tab_size, insert_spaces, ..Default::default() },
+			work_done_progress_params: WorkDoneProgressParams::default(),
+		};
+
+		match self
+			.send_request_sequential::<_, Value>("textDocument/rangeFormatting", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				let edits = if result.is_null() {
+					Vec::new()
+				} else {
+					serde_json::from_value::<Vec<lsp_types::TextEdit>>(result).unwrap_or_default()
+				};
+				let _ = self.async_tx.send(AsyncMessage::LspFormatting {
+					request_id,
+					uri: uri.as_str().to_string(),
+					edits,
+				});
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("textDocument/rangeFormatting failed: {}", e);
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle textDocument/prepareRename request
+	async fn handle_prepare_rename(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		let params = TextDocumentPositionParams {
+			text_document: TextDocumentIdentifier { uri },
+			position: Position::new(line, character),
+		};
+
+		match self
+			.send_request_sequential::<_, Value>("textDocument/prepareRename", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				let _ =
+					self.async_tx.send(AsyncMessage::LspPrepareRename { request_id, result: Ok(result) });
+				Ok(())
+			}
+			Err(e) => {
+				let _ =
+					self.async_tx.send(AsyncMessage::LspPrepareRename { request_id, result: Err(e.clone()) });
+				Err(e)
+			}
+		}
+	}
+
+	async fn handle_document_diagnostic(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		previous_result_id: Option<String>,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::DocumentDiagnosticParams;
+
+		// Check if server supports pull diagnostics (diagnosticProvider capability).
+		// This raw `ServerCapabilities` snapshot is kept in sync with dynamic
+		// `client/registerCapability` updates (sinelaw/fresh#2195) by the stdout
+		// reader, so a server like pyright that registers `diagnosticProvider`
+		// dynamically rather than statically is honored here too.
+		let supports_pull = self
+			.capabilities
+			.lock()
+			.unwrap()
+			.as_ref()
+			.and_then(|c| c.diagnostic_provider.as_ref())
+			.is_some();
+		if !supports_pull {
+			tracing::trace!(
+				"LSP: server does not support pull diagnostics, skipping request for {}",
+				uri.as_str()
+			);
+			return Ok(());
+		}
+
+		tracing::trace!(
+			"LSP: document diagnostic request for {} (previous_result_id: {:?})",
+			uri.as_str(),
+			previous_result_id
+		);
+
+		let params = DocumentDiagnosticParams {
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			identifier: None,
+			previous_result_id,
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+		};
+
+		// Send request and get response
+		match self
+			.send_request_sequential::<_, Value>("textDocument/diagnostic", Some(params), pending)
+			.await
+		{
+			Ok(result) => {
+				// Parse the diagnostic report result
+				// Can be RelatedFullDocumentDiagnosticReport or RelatedUnchangedDocumentDiagnosticReport
+				let uri_string = uri.as_str().to_string();
+
+				// Try to parse as full report first
+				if let Ok(full_report) =
+					serde_json::from_value::<lsp_types::RelatedFullDocumentDiagnosticReport>(result.clone())
+				{
+					let diagnostics = full_report.full_document_diagnostic_report.items;
+					let result_id = full_report.full_document_diagnostic_report.result_id;
+
+					tracing::trace!(
+						"LSP: received {} diagnostics for {} (result_id: {:?})",
+						diagnostics.len(),
+						uri_string,
+						result_id
+					);
+
+					let _ = self.async_tx.send(AsyncMessage::LspPulledDiagnostics {
+						request_id,
+						uri: uri_string,
+						result_id,
+						diagnostics,
+						unchanged: false,
+					});
+				} else if let Ok(unchanged_report) = serde_json::from_value::<
+					lsp_types::RelatedUnchangedDocumentDiagnosticReport,
+				>(result.clone())
+				{
+					let result_id = unchanged_report.unchanged_document_diagnostic_report.result_id;
+
+					tracing::trace!(
+						"LSP: diagnostics unchanged for {} (result_id: {:?})",
+						uri_string,
+						result_id
+					);
+
+					let _ = self.async_tx.send(AsyncMessage::LspPulledDiagnostics {
+						request_id,
+						uri: uri_string,
+						result_id: Some(result_id),
+						diagnostics: Vec::new(),
+						unchanged: true,
+					});
+				} else {
+					// Fallback: try to parse as DocumentDiagnosticReportResult
+					tracing::warn!("LSP: could not parse diagnostic report, sending empty: {}", result);
+					let _ = self.async_tx.send(AsyncMessage::LspPulledDiagnostics {
+						request_id,
+						uri: uri_string,
+						result_id: None,
+						diagnostics: Vec::new(),
+						unchanged: false,
+					});
+				}
+
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Document diagnostic request failed: {}", e);
+				// Send empty result on error
+				let _ = self.async_tx.send(AsyncMessage::LspPulledDiagnostics {
+					request_id,
+					uri: uri.as_str().to_string(),
+					result_id: None,
+					diagnostics: Vec::new(),
+					unchanged: false,
+				});
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle inlay hints request (LSP 3.17+)
+	#[allow(clippy::too_many_arguments)]
+	async fn handle_inlay_hints(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::InlayHintParams;
+
+		tracing::trace!(
+			"LSP: inlay hints request for {} ({}:{} - {}:{})",
+			uri.as_str(),
+			start_line,
+			start_char,
+			end_line,
+			end_char
+		);
+
+		let params = InlayHintParams {
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			range: Range {
+				start: Position { line: start_line, character: start_char },
+				end: Position { line: end_line, character: end_char },
+			},
+			work_done_progress_params: WorkDoneProgressParams::default(),
+		};
+
+		match self
+			.send_request_sequential::<_, Option<Vec<lsp_types::InlayHint>>>(
+				"textDocument/inlayHint",
+				Some(params),
+				pending,
+			)
+			.await
+		{
+			Ok(hints) => {
+				let hints = hints.unwrap_or_default();
+				let uri_string = uri.as_str().to_string();
+
+				tracing::trace!("LSP: received {} inlay hints for {}", hints.len(), uri_string);
+
+				let _ =
+					self.async_tx.send(AsyncMessage::LspInlayHints { request_id, uri: uri_string, hints });
+
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Inlay hints request failed: {}", e);
+				// Send empty result on error
+				let _ = self.async_tx.send(AsyncMessage::LspInlayHints {
+					request_id,
+					uri: uri.as_str().to_string(),
+					hints: Vec::new(),
+				});
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle folding range request
+	async fn handle_folding_ranges(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::FoldingRangeParams;
+
+		tracing::trace!("LSP: folding range request for {}", uri.as_str());
+
+		let params = FoldingRangeParams {
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+		};
+
+		match self
+			.send_request_sequential::<_, Option<Vec<lsp_types::FoldingRange>>>(
+				"textDocument/foldingRange",
+				Some(params),
+				pending,
+			)
+			.await
+		{
+			Ok(ranges) => {
+				let ranges = ranges.unwrap_or_default();
+				let uri_string = uri.as_str().to_string();
+
+				tracing::trace!("LSP: received {} folding ranges for {}", ranges.len(), uri_string);
+
+				let _ = self.async_tx.send(AsyncMessage::LspFoldingRanges {
+					request_id,
+					uri: uri_string,
+					ranges,
+				});
+
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Folding range request failed: {}", e);
+				let _ = self.async_tx.send(AsyncMessage::LspFoldingRanges {
+					request_id,
+					uri: uri.as_str().to_string(),
+					ranges: Vec::new(),
+				});
+				Err(e)
+			}
+		}
+	}
+
+	async fn handle_semantic_tokens_full(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::request::SemanticTokensFullRequest;
+
+		tracing::trace!("LSP: semanticTokens/full request for {}", uri.as_str());
+
+		let params = SemanticTokensParams {
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+		};
+
+		match self
+			.send_request_sequential_tracked::<_, Option<SemanticTokensResult>>(
+				SemanticTokensFullRequest::METHOD,
+				Some(params),
+				pending,
+				Some(request_id),
+			)
+			.await
+		{
+			Ok(result) => {
+				let _ = self.async_tx.send(AsyncMessage::LspSemanticTokens {
+					request_id,
+					uri: uri.as_str().to_string(),
+					response: LspSemanticTokensResponse::Full(Ok(result)),
+				});
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Semantic tokens request failed: {}", e);
+				let _ = self.async_tx.send(AsyncMessage::LspSemanticTokens {
+					request_id,
+					uri: uri.as_str().to_string(),
+					response: LspSemanticTokensResponse::Full(Err(e.clone())),
+				});
+				Err(e)
+			}
+		}
+	}
+
+	async fn handle_semantic_tokens_full_delta(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		previous_result_id: String,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::{
+			SemanticTokensDeltaParams, SemanticTokensFullDeltaResult,
+			request::SemanticTokensFullDeltaRequest,
+		};
+
+		tracing::trace!("LSP: semanticTokens/full/delta request for {}", uri.as_str());
+
+		let params = SemanticTokensDeltaParams {
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			previous_result_id,
+		};
+
+		match self
+			.send_request_sequential_tracked::<_, Option<SemanticTokensFullDeltaResult>>(
+				SemanticTokensFullDeltaRequest::METHOD,
+				Some(params),
+				pending,
+				Some(request_id),
+			)
+			.await
+		{
+			Ok(result) => {
+				let _ = self.async_tx.send(AsyncMessage::LspSemanticTokens {
+					request_id,
+					uri: uri.as_str().to_string(),
+					response: LspSemanticTokensResponse::FullDelta(Ok(result)),
+				});
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Semantic tokens delta request failed: {}", e);
+				let _ = self.async_tx.send(AsyncMessage::LspSemanticTokens {
+					request_id,
+					uri: uri.as_str().to_string(),
+					response: LspSemanticTokensResponse::FullDelta(Err(e.clone())),
+				});
+				Err(e)
+			}
+		}
+	}
+
+	async fn handle_semantic_tokens_range(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		range: lsp_types::Range,
+		pending: &PendingRequests,
+	) -> Result<(), String> {
+		use lsp_types::{SemanticTokensRangeParams, request::SemanticTokensRangeRequest};
+
+		tracing::trace!("LSP: semanticTokens/range request for {}", uri.as_str());
+
+		let params = SemanticTokensRangeParams {
+			work_done_progress_params: WorkDoneProgressParams::default(),
+			partial_result_params: PartialResultParams::default(),
+			text_document: TextDocumentIdentifier { uri: uri.clone() },
+			range,
+		};
+
+		match self
+			.send_request_sequential_tracked::<_, Option<lsp_types::SemanticTokensRangeResult>>(
+				SemanticTokensRangeRequest::METHOD,
+				Some(params),
+				pending,
+				Some(request_id),
+			)
+			.await
+		{
+			Ok(result) => {
+				let _ = self.async_tx.send(AsyncMessage::LspSemanticTokens {
+					request_id,
+					uri: uri.as_str().to_string(),
+					response: LspSemanticTokensResponse::Range(Ok(result)),
+				});
+				Ok(())
+			}
+			Err(e) => {
+				tracing::debug!("Semantic tokens range request failed: {}", e);
+				let _ = self.async_tx.send(AsyncMessage::LspSemanticTokens {
+					request_id,
+					uri: uri.as_str().to_string(),
+					response: LspSemanticTokensResponse::Range(Err(e.clone())),
+				});
+				Err(e)
+			}
+		}
+	}
+
+	/// Handle a plugin-initiated request by forwarding it to the server
+	async fn handle_plugin_request(
+		&self,
+		request_id: u64,
+		method: String,
+		params: Option<Value>,
+		pending: &PendingRequests,
+	) {
+		tracing::trace!("Plugin request {} => method={} params={:?}", request_id, method, params);
+		let result = self
+			.send_request_sequential_tracked::<Value, Value>(&method, params, pending, Some(request_id))
+			.await;
+
+		tracing::trace!("Plugin request {} completed with result {:?}", request_id, &result);
+		let _ = self.async_tx.send(AsyncMessage::PluginLspResponse {
+			language: (*self.language).clone(),
+			request_id,
+			result,
+		});
+	}
+
+	/// Handle shutdown command
+	async fn handle_shutdown(&self) -> Result<(), String> {
+		tracing::info!("Shutting down async LSP server");
+
+		let notification = JsonRpcNotification {
+			jsonrpc: "2.0".to_string(),
+			method: "shutdown".to_string(),
+			params: None,
+		};
+
+		self.write_message(&notification).await?;
+
+		let exit =
+			JsonRpcNotification { jsonrpc: "2.0".to_string(), method: "exit".to_string(), params: None };
+
+		self.write_message(&exit).await
+	}
+
+	/// Send a cancel request notification to the server
+	async fn send_cancel_request(&self, lsp_id: i64) -> Result<(), String> {
+		tracing::trace!("Sending $/cancelRequest for LSP id {}", lsp_id);
+
+		let notification = JsonRpcNotification {
+			jsonrpc: "2.0".to_string(),
+			method: "$/cancelRequest".to_string(),
+			params: Some(serde_json::json!({ "id": lsp_id })),
+		};
+
+		self.write_message(&notification).await
+	}
+
+	/// Cancel a request by editor request_id
+	async fn handle_cancel_request(&self, request_id: u64) -> Result<(), String> {
+		let lsp_id = self.active_requests.lock().unwrap().remove(&request_id);
+		if let Some(lsp_id) = lsp_id {
+			tracing::info!("Cancelling request: editor_id={}, lsp_id={}", request_id, lsp_id);
+			self.send_cancel_request(lsp_id).await
+		} else {
+			tracing::trace!("Cancel request ignored: no active LSP request for editor_id={}", request_id);
+			Ok(())
+		}
+	}
+}
+
+/// Async LSP task that handles all I/O
+struct LspTask {
+	/// Process handle — kept alive for lifetime management
+	/// (`kill_on_drop` set on the underlying tokio child).
+	_process: crate::services::remote::StdioChild,
+
+	/// Stdin for sending messages
+	stdin: ChildStdin,
+
+	/// Stdout for receiving messages
+	stdout: BufReader<ChildStdout>,
+
+	/// Next request ID
+	next_id: i64,
+
+	/// Pending requests waiting for response, keyed by request id. The stored
+	/// `String` is the request method (see `PendingRequests`).
+	pending: HashMap<i64, (String, oneshot::Sender<Result<Value, String>>)>,
+
+	/// Server capabilities
+	capabilities: Option<ServerCapabilities>,
+
+	/// Document versions (shared with stdout reader for stale diagnostic filtering)
+	document_versions: Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+
+	/// Track when didOpen was sent for each document to avoid race with didChange
+	/// The LSP server needs time to process didOpen before it can handle didChange
+	pending_opens: HashMap<PathBuf, Instant>,
+
+	/// Whether initialized
+	initialized: bool,
+
+	/// Sender for async messages to main loop
+	async_tx: std_mpsc::Sender<AsyncMessage>,
+
+	/// Language ID (for error reporting)
+	language: String,
+
+	/// Display name for this server (for diagnostics attribution)
+	server_name: String,
+
+	/// Server command (for plugin identification)
+	server_command: String,
+
+	/// Path to stderr log file
+	stderr_log_path: std::path::PathBuf,
+
+	/// Extension-to-languageId overrides for textDocument/didOpen
+	language_id_overrides: HashMap<String, String>,
+}
+
+impl LspTask {
+	/// Create a new LSP task.
+	///
+	/// Spawning is routed through the authority's
+	/// [`LongRunningSpawner`] so container authorities run the server
+	/// inside the container via `docker exec -i`. See
+	/// `AUTHORITY_DESIGN.md` principle 2 — no branch on backend kind
+	/// anywhere in this file. The host-only `process_limits` block is
+	/// passed along; the spawner implementation decides whether to
+	/// honour it (Local does, Docker logs and skips).
+	#[allow(clippy::too_many_arguments)]
+	async fn spawn(
+		command: &str,
+		args: &[String],
+		env: &std::collections::HashMap<String, String>,
+		language: String,
+		server_name: String,
+		async_tx: std_mpsc::Sender<AsyncMessage>,
+		process_limits: &ProcessLimits,
+		stderr_log_path: std::path::PathBuf,
+		language_id_overrides: HashMap<String, String>,
+		document_versions: Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+		long_running_spawner: Arc<dyn crate::services::remote::LongRunningSpawner>,
+	) -> Result<Self, String> {
+		tracing::info!("Spawning async LSP server: {} {:?}", command, args);
+		tracing::info!("Process limits: {:?}", process_limits);
+		tracing::info!("LSP stderr will be logged to: {:?}", stderr_log_path);
+
+		// Check if the command exists before trying to spawn.
+		// Routes through the authority's spawner so a container
+		// probe looks inside the container — matches the one the
+		// real `spawn_stdio` is about to do.
+		if !long_running_spawner.command_exists(command).await {
+			return Err(format!(
+				"LSP server executable '{}' not found in the active authority's PATH. \
+                 Please install it or check your configuration.",
+				command
+			));
+		}
+
+		// Drive spawn through the authority. Env is handed over as a
+		// `(String, String)` vec so the trait stays ordering-explicit
+		// (HashMap ordering would leak into docker `-e` argument
+		// positions).
+		let env_pairs: Vec<(String, String)> =
+			env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+		let mut stdio_child = long_running_spawner
+			.spawn_stdio(command, args, env_pairs, None, Some(process_limits))
+			.await
+			.map_err(|e| format!("Failed to spawn LSP server '{}': {}", command, e))?;
+
+		let stdin = stdio_child.take_stdin().ok_or_else(|| "Failed to get stdin".to_string())?;
+
+		let stdout_stream =
+			stdio_child.take_stdout().ok_or_else(|| "Failed to get stdout".to_string())?;
+		let stdout = BufReader::new(stdout_stream);
+
+		// Stderr is now piped (was redirected via fd to a file pre-
+		// refactor; we can't fd-redirect across `docker exec`). Spawn
+		// a reader task that copies lines into the log file so
+		// `View Log` still works. Failures are logged and dropped —
+		// the LSP itself is already running.
+		if let Some(stderr_stream) = stdio_child.take_stderr() {
+			let log_path = stderr_log_path.clone();
+			tokio::spawn(async move {
+				use tokio::fs::File;
+				use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBufReader};
+				let mut file = match File::create(&log_path).await {
+					Ok(f) => f,
+					Err(e) => {
+						tracing::warn!("Could not create LSP stderr log {:?}: {}", log_path, e);
+						return;
+					}
+				};
+				let mut reader = TokioBufReader::new(stderr_stream);
+				let mut buf = String::new();
+				loop {
+					buf.clear();
+					match reader.read_line(&mut buf).await {
+						Ok(0) => break,
+						Ok(_) => {
+							if let Err(e) = file.write_all(buf.as_bytes()).await {
+								tracing::warn!("Write to LSP stderr log {:?} failed: {}", log_path, e);
+								return;
+							}
+						}
+						Err(e) => {
+							tracing::debug!("LSP stderr stream closed for {:?}: {}", log_path, e);
+							return;
+						}
+					}
+				}
+			});
+		}
+
+		Ok(Self {
+			_process: stdio_child,
+			stdin,
+			stdout,
+			next_id: 0,
+			pending: HashMap::new(),
+			capabilities: None,
+			document_versions,
+			pending_opens: HashMap::new(),
+			initialized: false,
+			async_tx,
+			language,
+			server_name,
+			server_command: command.to_string(),
+			stderr_log_path,
+			language_id_overrides,
+		})
+	}
+
+	/// Spawn the stdout reader task that continuously reads and dispatches LSP messages
+	#[allow(clippy::too_many_arguments)]
+	#[allow(clippy::let_underscore_must_use)] // async_tx.send() is best-effort; receiver drop means editor shutdown
+	fn spawn_stdout_reader(
+		mut stdout: BufReader<ChildStdout>,
+		pending: PendingRequests,
+		async_tx: std_mpsc::Sender<AsyncMessage>,
+		language: String,
+		server_name: String,
+		server_command: String,
+		stdin_writer: Arc<tokio::sync::Mutex<ChildStdin>>,
+		stderr_log_path: std::path::PathBuf,
+		shutting_down: Arc<AtomicBool>,
+		document_versions: Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+		config_options: Arc<std::sync::Mutex<Option<Value>>>,
+		capabilities: Arc<std::sync::Mutex<Option<ServerCapabilities>>>,
+	) {
+		tokio::spawn(async move {
+			tracing::info!("LSP stdout reader task started for {}", language);
+			loop {
+				match read_message_from_stdout(&mut stdout).await {
+					Ok(message) => {
+						tracing::trace!("Read message from LSP server: {:?}", message);
+						if let Err(e) = handle_message_dispatch(
+							message,
+							&pending,
+							&async_tx,
+							&language,
+							&server_name,
+							&server_command,
+							&stdin_writer,
+							&document_versions,
+							&config_options,
+							&capabilities,
+						)
+						.await
+						{
+							tracing::error!("Error handling LSP message: {}", e);
+						}
+					}
+					Err(e) => {
+						// Only report error if this wasn't an intentional shutdown
+						if shutting_down.load(Ordering::SeqCst) {
+							tracing::info!("LSP stdout reader exiting due to graceful shutdown for {}", language);
+						} else {
+							tracing::error!("Error reading from LSP server: {}", e);
+							let _ = async_tx.send(AsyncMessage::LspStatusUpdate {
+								language: language.clone(),
+								server_name: server_name.clone(),
+								status: LspServerStatus::Error,
+								message: None,
+							});
+							let _ = async_tx.send(AsyncMessage::LspError {
+								language: language.clone(),
+								error: format!("Read error: {}", e),
+								stderr_log_path: Some(stderr_log_path.clone()),
+							});
+						}
+						break;
+					}
+				}
+			}
+			// Drain all pending requests so the command loop doesn't block
+			// forever waiting for responses that will never arrive.
+			{
+				let mut pending_guard = pending.lock().unwrap();
+				let count = pending_guard.len();
+				if count > 0 {
+					tracing::info!("LSP stdout reader: draining {} pending requests for {}", count, language);
+					for (id, (_method, tx)) in pending_guard.drain() {
+						tracing::debug!(
+							"LSP stdout reader: failing pending request id={} for {}",
+							id,
+							language
+						);
+						let _ =
+							tx.send(Err("LSP server connection closed while awaiting response".to_string()));
+					}
+				}
+			}
+
+			tracing::info!("LSP stdout reader task exiting for {}", language);
+		});
+	}
+
+	/// Run the task (processes commands and reads from stdout)
+	// Channel sends and handler results are best-effort: errors are already logged
+	// within handler methods, and channel send failures mean the editor is shutting down.
+	#[allow(clippy::let_underscore_must_use)]
+	async fn run(self, mut command_rx: mpsc::Receiver<LspCommand>) {
+		tracing::info!("LspTask::run() started for language: {}", self.language);
+
+		// Create shared stdin writer so both command processing and stdout reader can write
+		let stdin_writer = Arc::new(tokio::sync::Mutex::new(self.stdin));
+
+		// Create state struct for command processing
+		let state = LspState {
+			stdin: stdin_writer.clone(),
+			next_id: Arc::new(AtomicI64::new(self.next_id)),
+			capabilities: Arc::new(Mutex::new(self.capabilities)),
+			document_versions: self.document_versions.clone(),
+			pending_opens: Arc::new(Mutex::new(self.pending_opens)),
+			initialized: Arc::new(AtomicBool::new(self.initialized)),
+			async_tx: self.async_tx.clone(),
+			language: Arc::new(self.language.clone()),
+			server_name: Arc::new(self.server_name.clone()),
+			active_requests: Arc::new(Mutex::new(HashMap::new())),
+			language_id_overrides: Arc::new(self.language_id_overrides.clone()),
+		};
+
+		let pending = Arc::new(Mutex::new(self.pending));
+		let async_tx = state.async_tx.clone();
+		let language_clone: String = (*state.language).clone();
+		let server_name: String = (*state.server_name).clone();
+
+		// Initialization options for this server, shared with the stdout reader
+		// so it can answer `workspace/configuration` pulls. Populated when the
+		// Initialize command is processed below (before the server can ask).
+		let config_options: Arc<std::sync::Mutex<Option<Value>>> =
+			Arc::new(std::sync::Mutex::new(None));
+
+		// Flag to indicate intentional shutdown (prevents spurious error messages)
+		let shutting_down = Arc::new(AtomicBool::new(false));
+
+		// Spawn stdout reader task (shares stdin_writer for responding to server requests)
+		Self::spawn_stdout_reader(
+			self.stdout,
+			pending.clone(),
+			async_tx.clone(),
+			language_clone.clone(),
+			self.server_name.clone(),
+			self.server_command.clone(),
+			stdin_writer.clone(),
+			self.stderr_log_path,
+			shutting_down.clone(),
+			self.document_versions.clone(),
+			config_options.clone(),
+			state.capabilities.clone(),
+		);
+
+		// Sequential command dispatch loop.
+		//
+		// Notifications (didOpen, didChange, didSave, didClose, $/cancelRequest,
+		// workspace folder events) are written inline — they don't await a
+		// response and must reach the server promptly even when a prior
+		// request is still in flight.
+		//
+		// Request handlers (completion, hover, semantic tokens, …) are
+		// spawned onto independent tokio tasks: each task writes its own
+		// JSON-RPC frame, awaits the matching oneshot response (or a
+		// timeout / cancel), and ships the result back via async_tx. The
+		// main loop therefore returns immediately after dispatching, so a
+		// server that never replies to one request can't wedge any other
+		// request or notification on the same server. Regression for
+		// sinelaw/fresh#1679 (R languageserver advertising semanticTokens
+		// but never answering, blocking every later command).
+		//
+		// Initialize stays inline: subsequent commands key off
+		// `state.initialized` and the existing `pending_commands` replay
+		// depends on it being set before any other request runs.
+		//
+		// Server-to-client requests (workspace/configuration etc.) are
+		// written directly by the stdout reader task using the shared
+		// stdin_writer, so they don't go through this loop.
+
+		/// Await the initialize handler while draining commands that arrive
+		/// on `command_rx` into `buf`. The commands are NOT processed here
+		/// (because `state` is borrowed by the future); they are replayed
+		/// from `buf` in subsequent iterations of the main loop.
+		macro_rules! await_draining {
+			($fut:expr, $command_rx:expr, $buf:expr) => {{
+				let fut = $fut;
+				tokio::pin!(fut);
+				loop {
+					tokio::select! {
+							biased;  // prefer completing the handler
+							result = &mut fut => break result,
+							Some(cmd) = $command_rx.recv() => {
+									$buf.push_back(cmd);
+							}
+					}
+				}
+			}};
+		}
+
+		/// Spawn an async request handler and forget the JoinHandle.
+		macro_rules! spawn_request {
+			($state:expr, $pending:expr, |$s:ident, $p:ident| $body:expr) => {{
+				let $s = $state.clone();
+				let $p = $pending.clone();
+				tokio::spawn(async move {
+					let _ = $body;
+				});
+			}};
+		}
+
+		let mut pending_commands = Vec::new();
+		let mut draining_buffer: std::collections::VecDeque<LspCommand> =
+			std::collections::VecDeque::new();
+		loop {
+			// Drain buffered commands (from a previous handler's await)
+			// before polling the channel for new ones.
+			let cmd = if let Some(cmd) = draining_buffer.pop_front() {
+				cmd
+			} else {
+				match command_rx.recv().await {
+					Some(cmd) => cmd,
+					None => {
+						tracing::info!("Command channel closed");
+						break;
+					}
+				}
+			};
+
+			tracing::trace!("LspTask received command: {:?}", cmd);
+			let initialized = state.initialized.load(Ordering::SeqCst);
+			match cmd {
+				LspCommand::Initialize { root_uri, initialization_options, response } => {
+					// Send initializing status
+					let _ = async_tx.send(AsyncMessage::LspStatusUpdate {
+						language: language_clone.clone(),
+						server_name: server_name.clone(),
+						status: LspServerStatus::Initializing,
+						message: None,
+					});
+					tracing::info!("Processing Initialize command");
+					// Publish the options before initializing so the stdout
+					// reader can answer the server's `workspace/configuration`
+					// pull (which arrives only after `initialize`).
+					*config_options.lock().unwrap() = initialization_options.clone();
+					let result = await_draining!(
+						state.handle_initialize_sequential(root_uri, initialization_options, &pending),
+						command_rx,
+						draining_buffer
+					);
+					let success = result.is_ok();
+					let _ = response.send(result);
+
+					// After successful initialization, replay pending commands
+					if success {
+						let queued = std::mem::take(&mut pending_commands);
+						await_draining!(
+							state.replay_pending_commands(queued, &pending),
+							command_rx,
+							draining_buffer
+						);
+					}
+				}
+				LspCommand::DidOpen { uri, text, language_id } => {
+					if initialized {
+						tracing::info!("Processing DidOpen for {}", uri.as_str());
+						let _ = state.handle_did_open_sequential(uri, text, language_id, &pending).await;
+					} else {
+						tracing::trace!("Queueing DidOpen for {} until initialization completes", uri.as_str());
+						pending_commands.push(LspCommand::DidOpen { uri, text, language_id });
+					}
+				}
+				LspCommand::DidChange { uri, content_changes } => {
+					if initialized {
+						tracing::trace!("Processing DidChange for {}", uri.as_str());
+						// Notification: write inline so it reaches the server
+						// even while earlier requests are still in flight.
+						let _ = state.handle_did_change_sequential(uri, content_changes, &pending).await;
+					} else {
+						tracing::trace!(
+							"Queueing DidChange for {} until initialization completes",
+							uri.as_str()
+						);
+						pending_commands.push(LspCommand::DidChange { uri, content_changes });
+					}
+				}
+				LspCommand::DidClose { uri } => {
+					if initialized {
+						tracing::info!("Processing DidClose for {}", uri.as_str());
+						let _ = state.handle_did_close(uri).await;
+					} else {
+						tracing::trace!(
+							"Queueing DidClose for {} until initialization completes",
+							uri.as_str()
+						);
+						pending_commands.push(LspCommand::DidClose { uri });
+					}
+				}
+				LspCommand::DidSave { uri, text } => {
+					if initialized {
+						tracing::info!("Processing DidSave for {}", uri.as_str());
+						let _ = state.handle_did_save(uri, text).await;
+					} else {
+						tracing::trace!("Queueing DidSave for {} until initialization completes", uri.as_str());
+						pending_commands.push(LspCommand::DidSave { uri, text });
+					}
+				}
+				LspCommand::DidChangeWorkspaceFolders { added, removed } => {
+					if initialized {
+						tracing::info!(
+							"Processing DidChangeWorkspaceFolders: +{} -{}",
+							added.len(),
+							removed.len()
+						);
+						let _ = state
+							.send_notification::<lsp_types::notification::DidChangeWorkspaceFolders>(
+								lsp_types::DidChangeWorkspaceFoldersParams {
+									event: lsp_types::WorkspaceFoldersChangeEvent { added, removed },
+								},
+							)
+							.await;
+					} else {
+						tracing::trace!("Queueing DidChangeWorkspaceFolders until initialization completes");
+						pending_commands.push(LspCommand::DidChangeWorkspaceFolders { added, removed });
+					}
+				}
+				LspCommand::Completion { request_id, uri, line, character } => {
+					if initialized {
+						tracing::info!("Processing Completion request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_completion(request_id, uri, line, character, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, sending empty completion");
+						let _ = state.async_tx.send(AsyncMessage::LspCompletion { request_id, items: vec![] });
+					}
+				}
+				LspCommand::GotoDefinition { request_id, uri, line, character } => {
+					if initialized {
+						tracing::info!("Processing GotoDefinition request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_goto_definition(request_id, uri, line, character, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, sending empty locations");
+						let _ = state
+							.async_tx
+							.send(AsyncMessage::LspGotoDefinition { request_id, locations: vec![] });
+					}
+				}
+				LspCommand::Implementation { request_id, uri, line, character } => {
+					if initialized {
+						tracing::info!("Processing Implementation request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_implementation(request_id, uri, line, character, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, sending empty locations");
+						let _ = state
+							.async_tx
+							.send(AsyncMessage::LspImplementation { request_id, locations: vec![] });
+					}
+				}
+				LspCommand::Rename { request_id, uri, line, character, new_name } => {
+					if initialized {
+						tracing::info!("Processing Rename request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_rename(request_id, uri, line, character, new_name, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot rename");
+						let _ = state.async_tx.send(AsyncMessage::LspRename {
+							request_id,
+							result: Err("LSP not initialized".to_string()),
+						});
+					}
+				}
+				LspCommand::Hover { request_id, uri, line, character } => {
+					if initialized {
+						tracing::info!("Processing Hover request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_hover(request_id, uri, line, character, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get hover");
+						let _ = state.async_tx.send(AsyncMessage::LspHover {
+							request_id,
+							contents: String::new(),
+							is_markdown: false,
+							range: None,
+						});
+					}
+				}
+				LspCommand::References { request_id, uri, line, character } => {
+					if initialized {
+						tracing::info!("Processing References request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_references(request_id, uri, line, character, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get references");
+						let _ = state
+							.async_tx
+							.send(AsyncMessage::LspReferences { request_id, locations: Vec::new() });
+					}
+				}
+				LspCommand::SignatureHelp { request_id, uri, line, character } => {
+					if initialized {
+						tracing::info!("Processing SignatureHelp request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_signature_help(request_id, uri, line, character, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get signature help");
+						let _ = state
+							.async_tx
+							.send(AsyncMessage::LspSignatureHelp { request_id, signature_help: None });
+					}
+				}
+				LspCommand::CodeActions {
+					request_id,
+					uri,
+					start_line,
+					start_char,
+					end_line,
+					end_char,
+					diagnostics,
+				} => {
+					if initialized {
+						tracing::info!("Processing CodeActions request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_code_actions(
+								request_id,
+								uri,
+								start_line,
+								start_char,
+								end_line,
+								end_char,
+								diagnostics,
+								&p,
+							)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get code actions");
+						let _ =
+							state.async_tx.send(AsyncMessage::LspCodeActions { request_id, actions: Vec::new() });
+					}
+				}
+				LspCommand::DocumentDiagnostic { request_id, uri, previous_result_id } => {
+					if initialized {
+						tracing::info!("Processing DocumentDiagnostic request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_document_diagnostic(request_id, uri, previous_result_id, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get document diagnostics");
+						let _ = state.async_tx.send(AsyncMessage::LspPulledDiagnostics {
+							request_id,
+							uri: uri.as_str().to_string(),
+							result_id: None,
+							diagnostics: Vec::new(),
+							unchanged: false,
+						});
+					}
+				}
+				LspCommand::InlayHints { request_id, uri, start_line, start_char, end_line, end_char } => {
+					if initialized {
+						tracing::info!("Processing InlayHints request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_inlay_hints(request_id, uri, start_line, start_char, end_line, end_char, &p,)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get inlay hints");
+						let _ = state.async_tx.send(AsyncMessage::LspInlayHints {
+							request_id,
+							uri: uri.as_str().to_string(),
+							hints: Vec::new(),
+						});
+					}
+				}
+				LspCommand::FoldingRange { request_id, uri } => {
+					if initialized {
+						tracing::info!("Processing FoldingRange request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_folding_ranges(request_id, uri, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get folding ranges");
+						let _ = state.async_tx.send(AsyncMessage::LspFoldingRanges {
+							request_id,
+							uri: uri.as_str().to_string(),
+							ranges: Vec::new(),
+						});
+					}
+				}
+				LspCommand::SemanticTokensFull { request_id, uri } => {
+					if initialized {
+						tracing::info!("Processing SemanticTokens request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_semantic_tokens_full(request_id, uri, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get semantic tokens");
+						let _ = state.async_tx.send(AsyncMessage::LspSemanticTokens {
+							request_id,
+							uri: uri.as_str().to_string(),
+							response: LspSemanticTokensResponse::Full(Err("LSP not initialized".to_string())),
+						});
+					}
+				}
+				LspCommand::SemanticTokensFullDelta { request_id, uri, previous_result_id } => {
+					if initialized {
+						tracing::info!("Processing SemanticTokens delta request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_semantic_tokens_full_delta(request_id, uri, previous_result_id, &p,)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get semantic tokens");
+						let _ = state.async_tx.send(AsyncMessage::LspSemanticTokens {
+							request_id,
+							uri: uri.as_str().to_string(),
+							response: LspSemanticTokensResponse::FullDelta(Err(
+								"LSP not initialized".to_string(),
+							)),
+						});
+					}
+				}
+				LspCommand::SemanticTokensRange { request_id, uri, range } => {
+					if initialized {
+						tracing::info!("Processing SemanticTokens range request for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_semantic_tokens_range(request_id, uri, range, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot get semantic tokens");
+						let _ = state.async_tx.send(AsyncMessage::LspSemanticTokens {
+							request_id,
+							uri: uri.as_str().to_string(),
+							response: LspSemanticTokensResponse::Range(Err("LSP not initialized".to_string())),
+						});
+					}
+				}
+				LspCommand::ExecuteCommand { command, arguments } => {
+					if initialized {
+						tracing::info!("Processing ExecuteCommand: {}", command);
+						spawn_request!(state, pending, |s, p| s
+							.handle_execute_command(command, arguments, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot execute command");
+					}
+				}
+				LspCommand::CodeActionResolve { request_id, action } => {
+					if initialized {
+						tracing::info!("Processing CodeActionResolve (request_id={})", request_id);
+						spawn_request!(state, pending, |s, p| s
+							.handle_code_action_resolve(request_id, *action, &p)
+							.await);
+					} else {
+						tracing::trace!("LSP not initialized, cannot resolve code action");
+						let _ = state.async_tx.send(AsyncMessage::LspCodeActionResolved {
+							request_id,
+							action: Err("LSP not initialized".to_string()),
+						});
+					}
+				}
+				LspCommand::CompletionResolve { request_id, item } => {
+					if initialized {
+						spawn_request!(state, pending, |s, p| s
+							.handle_completion_resolve(request_id, *item, &p)
+							.await);
+					}
+				}
+				LspCommand::DocumentFormatting { request_id, uri, tab_size, insert_spaces } => {
+					if initialized {
+						tracing::info!("Processing DocumentFormatting for {}", uri.as_str());
+						spawn_request!(state, pending, |s, p| s
+							.handle_document_formatting(request_id, uri, tab_size, insert_spaces, &p,)
+							.await);
+					}
+				}
+				LspCommand::DocumentRangeFormatting {
+					request_id,
+					uri,
+					start_line,
+					start_char,
+					end_line,
+					end_char,
+					tab_size,
+					insert_spaces,
+				} => {
+					if initialized {
+						spawn_request!(state, pending, |s, p| s
+							.handle_document_range_formatting(
+								request_id,
+								uri,
+								start_line,
+								start_char,
+								end_line,
+								end_char,
+								tab_size,
+								insert_spaces,
+								&p,
+							)
+							.await);
+					}
+				}
+				LspCommand::PrepareRename { request_id, uri, line, character } => {
+					if initialized {
+						spawn_request!(state, pending, |s, p| s
+							.handle_prepare_rename(request_id, uri, line, character, &p)
+							.await);
+					}
+				}
+				LspCommand::CancelRequest { request_id } => {
+					tracing::info!("Processing CancelRequest for editor_id={}", request_id);
+					// Notification: inline so cancels reach the server promptly.
+					let _ = state.handle_cancel_request(request_id).await;
+				}
+				LspCommand::PluginRequest { request_id, method, params } => {
+					if initialized {
+						tracing::trace!("Processing plugin request {} ({})", request_id, method);
+						spawn_request!(state, pending, |s, p| s
+							.handle_plugin_request(request_id, method, params, &p)
+							.await);
+					} else {
+						tracing::trace!("Plugin LSP request {} received before initialization", request_id);
+						let _ = state.async_tx.send(AsyncMessage::PluginLspResponse {
+							language: language_clone.clone(),
+							request_id,
+							result: Err("LSP not initialized".to_string()),
+						});
+					}
+				}
+				LspCommand::Shutdown => {
+					tracing::info!("Processing Shutdown command");
+					// Set flag before shutdown to prevent spurious error messages
+					shutting_down.store(true, Ordering::SeqCst);
+					let _ = state.handle_shutdown().await;
+					break;
+				}
+			}
+		}
+
+		tracing::info!("LSP task exiting for language: {}", self.language);
+	}
+}
+
+/// Standalone function to read a message from stdout (for reader task)
+async fn read_message_from_stdout(
+	stdout: &mut BufReader<ChildStdout>,
+) -> Result<JsonRpcMessage, String> {
+	// Read headers
+	let mut content_length: Option<usize> = None;
+
+	loop {
+		let mut line = String::new();
+		let bytes_read = stdout
+			.read_line(&mut line)
+			.await
+			.map_err(|e| format!("Failed to read from stdout: {}", e))?;
+
+		// EOF detected - LSP server closed stdout
+		if bytes_read == 0 {
+			return Err("LSP server closed stdout (EOF)".to_string());
+		}
+
+		if line == "\r\n" {
+			break;
+		}
+
+		if let Some(len_str) = line.strip_prefix("Content-Length: ") {
+			content_length =
+				Some(len_str.trim().parse().map_err(|e| format!("Invalid Content-Length: {}", e))?);
+		}
+	}
+
+	let content_length = content_length.ok_or_else(|| "Missing Content-Length header".to_string())?;
+
+	// Read content
+	let mut content = vec![0u8; content_length];
+	stdout.read_exact(&mut content).await.map_err(|e| format!("Failed to read content: {}", e))?;
+
+	let json = String::from_utf8(content).map_err(|e| format!("Invalid UTF-8: {}", e))?;
+
+	tracing::trace!("Received LSP message: {}", json);
+
+	serde_json::from_str(&json).map_err(|e| format!("Failed to deserialize message: {}", e))
+}
+
+/// Parse the `registrations` out of a `client/registerCapability` request's
+/// params into `(method, register_options)` pairs. Malformed params yield an
+/// empty list (we still ack the request).
+fn registrations_from_params(params: Option<&Value>) -> Vec<(String, Option<Value>)> {
+	params
+		.and_then(|p| serde_json::from_value::<lsp_types::RegistrationParams>(p.clone()).ok())
+		.map(|rp| rp.registrations.into_iter().map(|r| (r.method, r.register_options)).collect())
+		.unwrap_or_default()
+}
+
+/// Parse the unregistered method names out of a `client/unregisterCapability`
+/// request's params. Malformed params yield an empty list.
+fn unregistrations_from_params(params: Option<&Value>) -> Vec<String> {
+	params
+		.and_then(|p| serde_json::from_value::<lsp_types::UnregistrationParams>(p.clone()).ok())
+		.map(|up| up.unregisterations.into_iter().map(|u| u.method).collect())
+		.unwrap_or_default()
+}
+
+/// Reflect dynamic capability (un)registrations into the raw `ServerCapabilities`
+/// snapshot held by the LSP task.
+///
+/// The main-loop `ServerCapabilitySummary` is the primary gate for whether a
+/// request is sent, and it is updated from the same registrations. But a few
+/// task-side send checks read this raw snapshot instead — currently only
+/// `handle_document_diagnostic` (pull diagnostics) — so the diagnostic provider
+/// must be mirrored here or those requests are silently skipped for servers
+/// (e.g. pyright) that register `diagnosticProvider` dynamically rather than
+/// statically. Other features gate solely on the summary; extend this if a new
+/// task-side gate is added (sinelaw/fresh#2195).
+fn sync_raw_capabilities(
+	capabilities: &Arc<std::sync::Mutex<Option<ServerCapabilities>>>,
+	registrations: &[(String, Option<Value>)],
+	register: bool,
+) {
+	use lsp_types::{DiagnosticOptions, DiagnosticServerCapabilities};
+
+	if !registrations.iter().any(|(method, _)| method == "textDocument/diagnostic") {
+		return;
+	}
+
+	let mut guard = capabilities.lock().unwrap();
+	let caps = guard.get_or_insert_with(ServerCapabilities::default);
+	for (method, options) in registrations {
+		if method == "textDocument/diagnostic" {
+			caps.diagnostic_provider = register.then(|| {
+				let opts = options
+					.as_ref()
+					.and_then(|o| serde_json::from_value::<DiagnosticOptions>(o.clone()).ok())
+					.unwrap_or_default();
+				DiagnosticServerCapabilities::Options(opts)
+			});
+		}
+	}
+}
+
+/// Build the response to a `workspace/configuration` request.
+///
+/// LSP servers pull their settings by asking the client for named
+/// configuration sections. We answer each requested item from this server's
+/// configured `initialization_options` (the same object sent in the
+/// `initialize` request): the section name selects into that object, so e.g.
+/// harper-ls — which requests the `harper-ls` section — is configured via
+/// `{"harper-ls": { ... }}` and receives the inner object. `null` is a valid
+/// "use your defaults" answer for a section we have no configuration for.
+fn resolve_workspace_configuration(
+	items: &[Value],
+	init_options: Option<&Value>,
+	server_command: &str,
+) -> Vec<Value> {
+	if items.is_empty() {
+		return vec![resolve_configuration_section(None, init_options, server_command)];
+	}
+	items
+		.iter()
+		.map(|item| {
+			let section = item.get("section").and_then(Value::as_str).filter(|s| !s.is_empty());
+			resolve_configuration_section(section, init_options, server_command)
+		})
+		.collect()
+}
+
+/// Resolve a single requested configuration `section` (a possibly dotted path
+/// such as `rust-analyzer.inlayHints`) against the configured init options,
+/// falling back to a built-in default when nothing is configured.
+fn resolve_configuration_section(
+	section: Option<&str>,
+	init_options: Option<&Value>,
+	server_command: &str,
+) -> Value {
+	if let Some(options) = init_options {
+		match section {
+			Some(section) => {
+				let mut current = options;
+				let mut resolved = true;
+				for part in section.split('.') {
+					match current.get(part) {
+						Some(next) => current = next,
+						None => {
+							resolved = false;
+							break;
+						}
+					}
+				}
+				if resolved {
+					return current.clone();
+				}
+			}
+			// No section requested: hand back the whole configured object.
+			None => return options.clone(),
+		}
+	}
+	default_configuration_section(server_command)
+}
+
+/// Built-in configuration returned when a requested section has no configured
+/// value. rust-analyzer ships no default init options yet relies on the client
+/// enabling inlay hints through this pull, so it keeps that default; every
+/// other server gets `null` (use its own defaults).
+fn default_configuration_section(server_command: &str) -> Value {
+	if server_command_is_rust_analyzer(server_command) {
+		serde_json::json!({
+				"inlayHints": {
+						"typeHints": { "enable": true },
+						"parameterHints": { "enable": true },
+						"chainingHints": { "enable": true },
+						"closureReturnTypeHints": { "enable": "always" }
+				}
+		})
+	} else {
+		Value::Null
+	}
+}
+
+fn server_command_is_rust_analyzer(server_command: &str) -> bool {
+	std::path::Path::new(server_command)
+		.file_name()
+		.and_then(|name| name.to_str())
+		.unwrap_or(server_command)
+		.contains("rust-analyzer")
+}
+
+/// Build a null-result JSON-RPC response for `id`.
+fn null_response(id: JsonRpcId) -> JsonRpcResponse {
+	JsonRpcResponse { jsonrpc: "2.0".to_string(), id, result: Some(Value::Null), error: None }
+}
+
+/// Parse the `{type, message}` body common to `window/showMessage` and
+/// `window/logMessage`. Returns `None` for malformed params.
+fn parse_window_message(
+	params: Option<Value>,
+	default_type: i64,
+) -> Option<(LspMessageType, String)> {
+	let msg = serde_json::from_value::<serde_json::Map<String, Value>>(params?).ok()?;
+	let type_num = msg.get("type").and_then(|v| v.as_i64()).unwrap_or(default_type);
+	let message = msg.get("message").and_then(|v| v.as_str()).unwrap_or("(no message)").to_string();
+	let message_type = match type_num {
+		1 => LspMessageType::Error,
+		2 => LspMessageType::Warning,
+		3 => LspMessageType::Info,
+		_ => LspMessageType::Log,
+	};
+	Some((message_type, message))
+}
+
+/// Emit a tracing record for an LSP window message at the level matching
+/// `message_type`.
+fn log_lsp_message(message_type: LspMessageType, language: &str, message: &str) {
+	match message_type {
+		LspMessageType::Error => tracing::error!("LSP ({}): {}", language, message),
+		LspMessageType::Warning => tracing::warn!("LSP ({}): {}", language, message),
+		LspMessageType::Info => tracing::info!("LSP ({}): {}", language, message),
+		LspMessageType::Log => tracing::trace!("LSP ({}): {}", language, message),
+	}
+}
+
+/// Parse a `$/progress` notification into `(token, LspProgressValue)`.
+/// Returns `None` for unknown kinds or malformed params.
+fn parse_progress_notification(
+	params: Option<Value>,
+	language: &str,
+) -> Option<(String, LspProgressValue)> {
+	let progress = serde_json::from_value::<serde_json::Map<String, Value>>(params?).ok()?;
+	let token = progress
+		.get("token")
+		.and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_i64().map(|n| n.to_string())))
+		.unwrap_or_else(|| "unknown".to_string());
+	let value_obj = progress.get("value").and_then(|v| v.as_object())?;
+	let kind = value_obj.get("kind").and_then(|v| v.as_str());
+	let value = match kind {
+		Some("begin") => {
+			let title =
+				value_obj.get("title").and_then(|v| v.as_str()).unwrap_or("Working...").to_string();
+			let message = value_obj.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+			let percentage = value_obj.get("percentage").and_then(|v| v.as_u64()).map(|p| p as u32);
+			tracing::info!("LSP ({}) progress begin: {} {:?} {:?}", language, title, message, percentage);
+			LspProgressValue::Begin { title, message, percentage }
+		}
+		Some("report") => {
+			let message = value_obj.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+			let percentage = value_obj.get("percentage").and_then(|v| v.as_u64()).map(|p| p as u32);
+			tracing::trace!("LSP ({}) progress report: {:?} {:?}", language, message, percentage);
+			LspProgressValue::Report { message, percentage }
+		}
+		Some("end") => {
+			let message = value_obj.get("message").and_then(|v| v.as_str()).map(|s| s.to_string());
+			tracing::info!("LSP ({}) progress end: {:?}", language, message);
+			LspProgressValue::End { message }
+		}
+		_ => return None,
+	};
+	Some((token, value))
+}
+
+/// Standalone function to handle and dispatch messages (for reader task)
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::let_underscore_must_use)] // oneshot/mpsc send results are best-effort; receiver drop is not actionable
+async fn handle_message_dispatch(
+	message: JsonRpcMessage,
+	pending: &PendingRequests,
+	async_tx: &std_mpsc::Sender<AsyncMessage>,
+	language: &str,
+	server_name: &str,
+	server_command: &str,
+	stdin_writer: &Arc<tokio::sync::Mutex<ChildStdin>>,
+	document_versions: &Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+	config_options: &Arc<std::sync::Mutex<Option<Value>>>,
+	capabilities: &Arc<std::sync::Mutex<Option<ServerCapabilities>>>,
+) -> Result<(), String> {
+	match message {
+		JsonRpcMessage::Response(response) => {
+			tracing::trace!("Received LSP response for request id={}", response.id);
+			// Dx only issues numeric ids, so a response that correlates to one
+			// of our pending requests must carry a numeric id. A string id here
+			// can only be a stray/echoed server id we never tracked — drop it
+			// rather than letting it look like an unknown request.
+			let pending_id = response.id.as_i64();
+			if let Some((method, tx)) = pending_id.and_then(|id| pending.lock().unwrap().remove(&id)) {
+				let result = if let Some(error) = response.error {
+					log_response_error(error.code, &error.message, server_name, language, &method);
+					Err(format!(
+						"LSP error from '{}' ({}): {} (code {})",
+						server_name, language, error.message, error.code
+					))
+				} else {
+					tracing::trace!(
+						"LSP response success from '{}' ({}) for request id={}",
+						server_name,
+						language,
+						response.id
+					);
+					// null is a valid result for many LSP methods (e.g., inlay hints with no hints)
+					Ok(response.result.unwrap_or(serde_json::Value::Null))
+				};
+				let _ = tx.send(result);
+			} else {
+				tracing::warn!(
+					"Received LSP response from '{}' ({}) for unknown request id={}",
+					server_name,
+					language,
+					response.id
+				);
+			}
+		}
+		JsonRpcMessage::Notification(notification) => {
+			tracing::trace!("Received LSP notification: {}", notification.method);
+			handle_notification_dispatch(
+				notification,
+				async_tx,
+				language,
+				server_name,
+				document_versions,
+			)
+			.await?;
+		}
+		JsonRpcMessage::Request(request) => {
+			// Handle server-to-client requests - MUST respond to avoid timeouts
+			tracing::trace!("Received request from server: {}", request.method);
+			let response = match request.method.as_str() {
+				"window/workDoneProgress/create" => {
+					// Server wants to create a progress token - acknowledge it
+					tracing::trace!("Acknowledging workDoneProgress/create (id={})", request.id);
+					null_response(request.id)
+				}
+				"workspace/configuration" => {
+					// The server is pulling configuration for one or more named
+					// sections (e.g. harper-ls asks for the "harper-ls" section).
+					// Resolve each requested section against this server's own
+					// configured initialization options so pull-config servers can
+					// actually be customized, instead of handing every server the
+					// same rust-analyzer blob (sinelaw/fresh#2144).
+					tracing::trace!("Responding to workspace/configuration for {}", server_command);
+
+					let empty = Vec::new();
+					let items = request
+						.params
+						.as_ref()
+						.and_then(|p| p.get("items"))
+						.and_then(|items| items.as_array())
+						.unwrap_or(&empty);
+
+					let stored = config_options.lock().unwrap().clone();
+					let configs = resolve_workspace_configuration(items, stored.as_ref(), server_command);
+
+					JsonRpcResponse {
+						jsonrpc: "2.0".to_string(),
+						id: request.id,
+						result: Some(Value::Array(configs)),
+						error: None,
+					}
+				}
+				"client/registerCapability" => {
+					// Many servers advertise little or nothing statically in
+					// their `initialize` result and register providers
+					// dynamically here instead. Parse the registrations and
+					// forward them so the stored `ServerCapabilities` is updated
+					// — otherwise the feature stays gated off for the whole
+					// session (sinelaw/fresh#2195). Still ack with `null`.
+					let registrations = registrations_from_params(request.params.as_ref());
+					tracing::debug!(
+						"client/registerCapability (id={}) registering {} method(s): {:?}",
+						request.id,
+						registrations.len(),
+						registrations.iter().map(|(m, _)| m).collect::<Vec<_>>()
+					);
+					if !registrations.is_empty() {
+						// Keep the task-side raw capability snapshot in sync for
+						// the few send gates that read it (pull diagnostics).
+						sync_raw_capabilities(capabilities, &registrations, true);
+						let _ = async_tx.send(AsyncMessage::LspDynamicCapabilities {
+							language: language.to_string(),
+							server_name: server_name.to_string(),
+							register: true,
+							registrations,
+						});
+					}
+					null_response(request.id)
+				}
+				"client/unregisterCapability" => {
+					// Mirror of registerCapability: the server is withdrawing a
+					// dynamically-registered provider, so clear the matching
+					// capability flag.
+					let methods = unregistrations_from_params(request.params.as_ref());
+					tracing::debug!(
+						"client/unregisterCapability (id={}) unregistering {} method(s): {:?}",
+						request.id,
+						methods.len(),
+						methods
+					);
+					if !methods.is_empty() {
+						let registrations: Vec<(String, Option<Value>)> =
+							methods.into_iter().map(|m| (m, None)).collect();
+						sync_raw_capabilities(capabilities, &registrations, false);
+						let _ = async_tx.send(AsyncMessage::LspDynamicCapabilities {
+							language: language.to_string(),
+							server_name: server_name.to_string(),
+							register: false,
+							registrations,
+						});
+					}
+					null_response(request.id)
+				}
+				"workspace/diagnostic/refresh" => {
+					// Server wants us to re-pull diagnostics for all open documents
+					// This typically happens after the project finishes loading
+					tracing::info!(
+						"LSP ({}) requested diagnostic refresh (workspace/diagnostic/refresh)",
+						language
+					);
+					let _ =
+						async_tx.send(AsyncMessage::LspDiagnosticRefresh { language: language.to_string() });
+					null_response(request.id)
+				}
+				"workspace/inlayHint/refresh" => {
+					// Server learned more (e.g. a cross-file type change) and
+					// wants cached inlay hints re-pulled for all open documents.
+					// Servers only send this because we advertise
+					// `workspace.inlayHint.refreshSupport` (sinelaw/fresh#2195 §2).
+					tracing::info!(
+						"LSP ({}) requested inlay-hint refresh (workspace/inlayHint/refresh)",
+						language
+					);
+					let _ =
+						async_tx.send(AsyncMessage::LspInlayHintRefresh { language: language.to_string() });
+					null_response(request.id)
+				}
+				"workspace/semanticTokens/refresh" => {
+					// Same idea as inlayHint/refresh, for semantic highlighting.
+					tracing::info!(
+						"LSP ({}) requested semantic-tokens refresh (workspace/semanticTokens/refresh)",
+						language
+					);
+					let _ = async_tx
+						.send(AsyncMessage::LspSemanticTokensRefresh { language: language.to_string() });
+					null_response(request.id)
+				}
+				"workspace/applyEdit" => {
+					// Server asks client to apply a workspace edit (e.g. during executeCommand)
+					tracing::info!("LSP ({}) received workspace/applyEdit request", language);
+					let applied = if let Some(params) = &request.params {
+						match serde_json::from_value::<lsp_types::ApplyWorkspaceEditParams>(params.clone()) {
+							Ok(apply_params) => {
+								let label = apply_params.label.clone();
+								let _ =
+									async_tx.send(AsyncMessage::LspApplyEdit { edit: apply_params.edit, label });
+								true
+							}
+							Err(e) => {
+								tracing::error!("Failed to parse workspace/applyEdit params: {}", e);
+								false
+							}
+						}
+					} else {
+						false
+					};
+					JsonRpcResponse {
+						jsonrpc: "2.0".to_string(),
+						id: request.id,
+						result: Some(serde_json::json!({ "applied": applied })),
+						error: None,
+					}
+				}
+				_ => {
+					// For unknown methods, notify plugins and return null to acknowledge receipt
+					tracing::debug!("Server request for plugins: {}", request.method);
+					let _ = async_tx.send(AsyncMessage::LspServerRequest {
+						language: language.to_string(),
+						server_command: server_command.to_string(),
+						method: request.method.clone(),
+						params: request.params.clone(),
+					});
+					null_response(request.id)
+				}
+			};
+
+			// Write response directly to stdin (avoids deadlock when main loop is waiting for LSP response)
+			let json = serde_json::to_string(&response)
+				.map_err(|e| format!("Failed to serialize response: {}", e))?;
+			let message = format!("Content-Length: {}\r\n\r\n{}", json.len(), json);
+
+			let mut stdin = stdin_writer.lock().await;
+			use tokio::io::AsyncWriteExt;
+			if let Err(e) = stdin.write_all(message.as_bytes()).await {
+				tracing::error!("Failed to write server response: {}", e);
+			}
+			if let Err(e) = stdin.flush().await {
+				tracing::error!("Failed to flush server response: {}", e);
+			}
+			tracing::trace!("Sent response to server request id={}", response.id);
+		}
+	}
+	Ok(())
+}
+
+/// Standalone function to handle notifications (for reader task)
+#[allow(clippy::let_underscore_must_use)] // async_tx.send() is best-effort; receiver drop means editor shutdown
+async fn handle_notification_dispatch(
+	notification: JsonRpcNotification,
+	async_tx: &std_mpsc::Sender<AsyncMessage>,
+	language: &str,
+	server_name: &str,
+	document_versions: &Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+) -> Result<(), String> {
+	match notification.method.as_str() {
+		PublishDiagnostics::METHOD => {
+			if let Some(params) = notification.params {
+				let params: PublishDiagnosticsParams = serde_json::from_value(params)
+					.map_err(|e| format!("Failed to deserialize diagnostics: {}", e))?;
+
+				// Drop stale diagnostics: if the server reports a version older than
+				// the document version we last sent via didOpen/didChange, the diagnostics
+				// are for an outdated snapshot and should be discarded.
+				if let Some(diag_version) = params.version {
+					let path = PathBuf::from(params.uri.path().as_str());
+					let current_version = document_versions.lock().unwrap().get(&path).copied();
+					if let Some(current) = current_version {
+						if (diag_version as i64) < current {
+							tracing::debug!(
+								"LSP ({}): dropping stale diagnostics for {} (diag version {} < current {})",
+								language,
+								params.uri.as_str(),
+								diag_version,
+								current
+							);
+							return Ok(());
+						}
+					}
+				}
+
+				tracing::trace!(
+					"Received {} diagnostics for {}",
+					params.diagnostics.len(),
+					params.uri.as_str()
+				);
+
+				// Send to main loop
+				let _ = async_tx.send(AsyncMessage::LspDiagnostics {
+					uri: params.uri.to_string(),
+					diagnostics: params.diagnostics,
+					server_name: server_name.to_string(),
+				});
+			}
+		}
+		"window/showMessage" => {
+			if let Some((message_type, message)) = parse_window_message(notification.params, 3) {
+				log_lsp_message(message_type, language, &message);
+				let _ = async_tx.send(AsyncMessage::LspWindowMessage {
+					language: language.to_string(),
+					message_type,
+					message,
+				});
+			}
+		}
+		"window/logMessage" => {
+			if let Some((message_type, message)) = parse_window_message(notification.params, 4) {
+				log_lsp_message(message_type, language, &message);
+				let _ = async_tx.send(AsyncMessage::LspLogMessage {
+					language: language.to_string(),
+					message_type,
+					message,
+				});
+			}
+		}
+		"$/progress" => {
+			if let Some((token, value)) = parse_progress_notification(notification.params, language) {
+				let _ =
+					async_tx.send(AsyncMessage::LspProgress { language: language.to_string(), token, value });
+			}
+		}
+		"experimental/serverStatus" => {
+			// rust-analyzer specific: server status notification
+			// When quiescent is true, the project is fully loaded
+			if let Some(params) = notification.params {
+				if let Ok(status) = serde_json::from_value::<serde_json::Map<String, Value>>(params) {
+					let quiescent = status.get("quiescent").and_then(|v| v.as_bool()).unwrap_or(false);
+
+					tracing::info!("LSP ({}) server status: quiescent={}", language, quiescent);
+
+					if quiescent {
+						// Project is fully loaded - notify editor to re-request inlay hints
+						let _ =
+							async_tx.send(AsyncMessage::LspServerQuiescent { language: language.to_string() });
+					}
+				}
+			}
+		}
+		_ => {
+			tracing::debug!("Unhandled notification: {}", notification.method);
+		}
+	}
+
+	Ok(())
+}
+
+/// Counter for generating unique LSP handle IDs
+static NEXT_HANDLE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Synchronous handle to an async LSP task
+pub struct LspHandle {
+	/// Unique identifier for this handle instance
+	id: u64,
+
+	/// Which languages this handle serves.
+	scope: crate::services::lsp::manager::LanguageScope,
+
+	/// Channel for sending commands to the task
+	command_tx: mpsc::Sender<LspCommand>,
+
+	/// Client state
+	state: Arc<Mutex<LspClientState>>,
+
+	/// Runtime handle for blocking operations
+	runtime: tokio::runtime::Handle,
+
+	/// Document version tracking (shared with the async LSP task).
+	/// Used to check document versions in workspace/applyEdit.
+	document_versions: Arc<std::sync::Mutex<HashMap<PathBuf, i64>>>,
+}
+
+// Channel sends and state transitions in LspHandle are best-effort: async_tx.send()
+// failures mean the editor is shutting down, state transition errors in error-handling
+// paths are secondary, and try_send in Drop is inherently best-effort cleanup.
+#[allow(clippy::let_underscore_must_use)]
+impl LspHandle {
+	/// Spawn a new LSP server in an async task.
+	///
+	/// `long_running_spawner` is the active authority's stdio-process
+	/// spawner (see `AUTHORITY_DESIGN.md`). Container authorities wire
+	/// a `docker exec -i`-routed variant here so the LSP server runs
+	/// inside the container. `process_limits` is forwarded as-is; the
+	/// spawner decides whether host-side enforcement makes sense
+	/// (Local honors it, Docker logs and skips).
+	#[allow(clippy::too_many_arguments)]
+	pub fn spawn(
+		runtime: &tokio::runtime::Handle,
+		command: &str,
+		args: &[String],
+		env: std::collections::HashMap<String, String>,
+		scope: crate::services::lsp::manager::LanguageScope,
+		server_name: String,
+		async_bridge: &AsyncBridge,
+		process_limits: ProcessLimits,
+		language_id_overrides: std::collections::HashMap<String, String>,
+		long_running_spawner: Arc<dyn crate::services::remote::LongRunningSpawner>,
+	) -> Result<Self, String> {
+		let (command_tx, command_rx) = mpsc::channel(100); // Buffer up to 100 commands
+		let async_tx = async_bridge.sender();
+		let language_label = scope.label().to_string();
+		let language_clone = language_label.clone();
+		let server_name_clone = server_name.clone();
+		let command = command.to_string();
+		let args = args.to_vec();
+		let state = Arc::new(Mutex::new(LspClientState::Starting));
+
+		// Create stderr log path in XDG state directory
+		let stderr_log_path = crate::services::log_dirs::lsp_log_path(&language_label);
+
+		// Send starting status
+		let _ = async_tx.send(AsyncMessage::LspStatusUpdate {
+			language: language_label.clone(),
+			server_name: server_name_clone.clone(),
+			status: LspServerStatus::Starting,
+			message: None,
+		});
+
+		// Create shared document version tracking — shared between
+		// the async LSP task and the LspHandle so the editor can check
+		// versions when applying workspace edits from the server.
+		let document_versions: Arc<std::sync::Mutex<HashMap<PathBuf, i64>>> =
+			Arc::new(std::sync::Mutex::new(HashMap::new()));
+		let document_versions_for_task = document_versions.clone();
+
+		let state_clone = state.clone();
+		let stderr_log_path_clone = stderr_log_path.clone();
+		runtime.spawn(async move {
+			match LspTask::spawn(
+				&command,
+				&args,
+				&env,
+				language_clone.clone(),
+				server_name_clone.clone(),
+				async_tx.clone(),
+				&process_limits,
+				stderr_log_path_clone.clone(),
+				language_id_overrides,
+				document_versions_for_task,
+				long_running_spawner,
+			)
+			.await
+			{
+				Ok(task) => {
+					task.run(command_rx).await;
+				}
+				Err(e) => {
+					tracing::error!("Failed to spawn LSP task: {}", e);
+
+					// Bug from interactive walkthrough (Critical 3):
+					// when an LSP fails to spawn (binary missing,
+					// permission error, etc.), the per-language log
+					// file at `lsp_log_path(language)` is never
+					// created — so the LSP popup's "View Log" item
+					// takes the `disabled()` branch and clicking it
+					// does nothing. Write a stub log here in the
+					// failure path with the configured command + the
+					// spawn error, so the popup item registers as
+					// enabled and opens something readable.
+					//
+					// The stub gets overwritten the moment a later
+					// successful spawn opens its own log at the same
+					// path, so it doesn't linger past recovery.
+					let stub = format!(
+						"[fresh] LSP server '{}' for {} failed to spawn:\n  {}\n\n\
+                         Configured command: {} {}\n",
+						server_name_clone,
+						language_clone,
+						e,
+						command,
+						args.join(" "),
+					);
+					if let Err(write_err) = std::fs::write(&stderr_log_path_clone, stub.as_bytes()) {
+						tracing::warn!(
+							"Failed to write LSP failure-stub log for {}: {}",
+							language_clone,
+							write_err,
+						);
+					}
+
+					// Transition to error state
+					if let Ok(mut s) = state_clone.lock() {
+						let _ = s.transition_to(LspClientState::Error);
+					}
+
+					let _ = async_tx.send(AsyncMessage::LspStatusUpdate {
+						language: language_clone.clone(),
+						server_name: server_name_clone.clone(),
+						status: LspServerStatus::Error,
+						message: None,
+					});
+					let _ = async_tx.send(AsyncMessage::LspError {
+						language: language_clone,
+						error: e,
+						stderr_log_path: Some(stderr_log_path_clone),
+					});
+				}
+			}
+		});
+
+		let id = NEXT_HANDLE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+		Ok(Self { id, scope, command_tx, state, runtime: runtime.clone(), document_versions })
+	}
+
+	/// Get the unique ID for this handle instance
+	pub fn id(&self) -> u64 {
+		self.id
+	}
+
+	/// Get the language scope this handle serves.
+	pub fn scope(&self) -> &crate::services::lsp::manager::LanguageScope {
+		&self.scope
+	}
+
+	/// Get the document version for a file path, as last sent via didOpen/didChange.
+	/// Returns None if the document hasn't been opened with this server.
+	pub fn document_version(&self, path: &std::path::Path) -> Option<i64> {
+		self.document_versions.lock().ok().and_then(|versions| versions.get(path).copied())
+	}
+
+	/// Initialize the server (non-blocking)
+	///
+	/// This sends the initialize request asynchronously. The server will be ready
+	/// when `is_initialized()` returns true. Other methods that require initialization
+	/// will fail gracefully until then.
+	///
+	/// The `initialization_options` are passed to the server during initialization.
+	/// Some servers like Deno require specific options (e.g., `{"enable": true}`).
+	pub fn initialize(
+		&self,
+		root_uri: Option<Uri>,
+		initialization_options: Option<Value>,
+	) -> Result<(), String> {
+		// Validate state transition
+		{
+			let mut state = self.state.lock().unwrap();
+			if !state.can_initialize() {
+				return Err(format!("Cannot initialize: client is in state {:?}", *state));
+			}
+			// Transition to Initializing
+			state.transition_to(LspClientState::Initializing)?;
+		}
+
+		let state = self.state.clone();
+
+		// Create a channel for the response, but don't wait for it
+		let (tx, rx) = oneshot::channel();
+
+		self
+			.command_tx
+			.try_send(LspCommand::Initialize { root_uri, initialization_options, response: tx })
+			.map_err(|_| "Failed to send initialize command".to_string())?;
+
+		// Spawn a task to wait for the response and update the state
+		let runtime = self.runtime.clone();
+		runtime.spawn(async move {
+			match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+				Ok(Ok(Ok(_))) => {
+					// Successfully initialized
+					if let Ok(mut s) = state.lock() {
+						let _ = s.transition_to(LspClientState::Running);
+					}
+					tracing::info!("LSP initialization completed successfully");
+				}
+				Ok(Ok(Err(e))) => {
+					tracing::error!("LSP initialization failed: {}", e);
+					if let Ok(mut s) = state.lock() {
+						let _ = s.transition_to(LspClientState::Error);
+					}
+				}
+				Ok(Err(_)) => {
+					tracing::error!("LSP initialization response channel closed");
+					if let Ok(mut s) = state.lock() {
+						let _ = s.transition_to(LspClientState::Error);
+					}
+				}
+				Err(_) => {
+					tracing::error!("LSP initialization timed out after 60 seconds");
+					if let Ok(mut s) = state.lock() {
+						let _ = s.transition_to(LspClientState::Error);
+					}
+				}
+			}
+		});
+
+		Ok(())
+	}
+
+	/// Check if the server is initialized
+	pub fn is_initialized(&self) -> bool {
+		self.state.lock().unwrap().can_send_requests()
+	}
+
+	/// Get the current client state
+	pub fn state(&self) -> LspClientState {
+		*self.state.lock().unwrap()
+	}
+
+	/// Notify document opened
+	///
+	/// The `language_id` should match this handle's language. If it doesn't,
+	/// a warning is logged but the notification is still sent (the server
+	/// will receive it with the specified language_id).
+	pub fn did_open(&self, uri: Uri, text: String, language_id: String) -> Result<(), String> {
+		// Verify the document language is accepted by this handle.
+		if !self.scope.accepts(&language_id) {
+			tracing::warn!(
+				"did_open: document language '{}' not accepted by LSP handle (serves {:?}) for {}",
+				language_id,
+				self.scope,
+				uri.as_str()
+			);
+			return Err(format!(
+				"Language mismatch: document is '{}' but LSP serves {:?}",
+				language_id, self.scope
+			));
+		}
+
+		// Send command to LspTask which will queue it if not initialized yet
+		self
+			.command_tx
+			.try_send(LspCommand::DidOpen { uri, text, language_id })
+			.map_err(|_| "Failed to send did_open command".to_string())
+	}
+
+	/// Notify document changed
+	pub fn did_change(
+		&self,
+		uri: Uri,
+		content_changes: Vec<TextDocumentContentChangeEvent>,
+	) -> Result<(), String> {
+		// Send command to LspTask which will queue it if not initialized yet
+		self
+			.command_tx
+			.try_send(LspCommand::DidChange { uri, content_changes })
+			.map_err(|_| "Failed to send did_change command".to_string())
+	}
+
+	/// Send didClose notification
+	pub fn did_close(&self, uri: Uri) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::DidClose { uri })
+			.map_err(|_| "Failed to send did_close command".to_string())
+	}
+
+	/// Send didSave notification
+	pub fn did_save(&self, uri: Uri, text: Option<String>) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::DidSave { uri, text })
+			.map_err(|_| "Failed to send did_save command".to_string())
+	}
+
+	/// Add a workspace folder to the running LSP server
+	pub fn add_workspace_folder(&self, uri: lsp_types::Uri, name: String) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::DidChangeWorkspaceFolders {
+				added: vec![lsp_types::WorkspaceFolder { uri, name }],
+				removed: vec![],
+			})
+			.map_err(|_| "Failed to send workspace folder change".to_string())
+	}
+
+	/// Request completion at position
+	pub fn completion(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::Completion { request_id, uri, line, character })
+			.map_err(|_| "Failed to send completion command".to_string())
+	}
+
+	/// Request go-to-definition
+	pub fn goto_definition(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::GotoDefinition { request_id, uri, line, character })
+			.map_err(|_| "Failed to send goto_definition command".to_string())
+	}
+
+	/// Request go-to-implementation
+	pub fn implementation(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::Implementation { request_id, uri, line, character })
+			.map_err(|_| "Failed to send implementation command".to_string())
+	}
+
+	/// Request rename
+	pub fn rename(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+		new_name: String,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::Rename { request_id, uri, line, character, new_name })
+			.map_err(|_| "Failed to send rename command".to_string())
+	}
+
+	/// Request hover documentation
+	pub fn hover(&self, request_id: u64, uri: Uri, line: u32, character: u32) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::Hover { request_id, uri, line, character })
+			.map_err(|_| "Failed to send hover command".to_string())
+	}
+
+	/// Request find references
+	pub fn references(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::References { request_id, uri, line, character })
+			.map_err(|_| "Failed to send references command".to_string())
+	}
+
+	/// Request signature help
+	pub fn signature_help(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::SignatureHelp { request_id, uri, line, character })
+			.map_err(|_| "Failed to send signature_help command".to_string())
+	}
+
+	/// Request code actions
+	#[allow(clippy::too_many_arguments)]
+	pub fn code_actions(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		diagnostics: Vec<lsp_types::Diagnostic>,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::CodeActions {
+				request_id,
+				uri,
+				start_line,
+				start_char,
+				end_line,
+				end_char,
+				diagnostics,
+			})
+			.map_err(|_| "Failed to send code_actions command".to_string())
+	}
+
+	/// Execute a command on the server (workspace/executeCommand)
+	///
+	/// The response is usually null — the real effect comes via workspace/applyEdit
+	/// requests sent by the server during command execution.
+	pub fn execute_command(
+		&self,
+		command: String,
+		arguments: Option<Vec<Value>>,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::ExecuteCommand { command, arguments })
+			.map_err(|_| "Failed to send execute_command command".to_string())
+	}
+
+	/// Resolve a code action to get full edit/command details (codeAction/resolve)
+	///
+	/// Only call this when the action has no `edit` and no `command` but has `data`,
+	/// and the server supports resolveProvider.
+	pub fn code_action_resolve(
+		&self,
+		request_id: u64,
+		action: lsp_types::CodeAction,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::CodeActionResolve { request_id, action: Box::new(action) })
+			.map_err(|_| "Failed to send code_action_resolve command".to_string())
+	}
+
+	/// Resolve a completion item to get full details (completionItem/resolve)
+	pub fn completion_resolve(
+		&self,
+		request_id: u64,
+		item: lsp_types::CompletionItem,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::CompletionResolve { request_id, item: Box::new(item) })
+			.map_err(|_| "Failed to send completion_resolve command".to_string())
+	}
+
+	/// Format a document (textDocument/formatting)
+	pub fn document_formatting(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		tab_size: u32,
+		insert_spaces: bool,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::DocumentFormatting { request_id, uri, tab_size, insert_spaces })
+			.map_err(|_| "Failed to send document_formatting command".to_string())
+	}
+
+	/// Format a range in a document (textDocument/rangeFormatting)
+	#[allow(clippy::too_many_arguments)]
+	pub fn document_range_formatting(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+		tab_size: u32,
+		insert_spaces: bool,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::DocumentRangeFormatting {
+				request_id,
+				uri,
+				start_line,
+				start_char,
+				end_line,
+				end_char,
+				tab_size,
+				insert_spaces,
+			})
+			.map_err(|_| "Failed to send document_range_formatting command".to_string())
+	}
+
+	/// Validate rename at position (textDocument/prepareRename)
+	pub fn prepare_rename(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		line: u32,
+		character: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::PrepareRename { request_id, uri, line, character })
+			.map_err(|_| "Failed to send prepare_rename command".to_string())
+	}
+
+	/// Request document diagnostics (pull model)
+	///
+	/// This sends a textDocument/diagnostic request to fetch diagnostics on demand.
+	/// Use `previous_result_id` for incremental updates (server may return unchanged).
+	pub fn document_diagnostic(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		previous_result_id: Option<String>,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::DocumentDiagnostic { request_id, uri, previous_result_id })
+			.map_err(|_| "Failed to send document_diagnostic command".to_string())
+	}
+
+	/// Request inlay hints for a range (LSP 3.17+)
+	///
+	/// Inlay hints are virtual text annotations displayed inline (e.g., type hints, parameter names).
+	pub fn inlay_hints(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		start_line: u32,
+		start_char: u32,
+		end_line: u32,
+		end_char: u32,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::InlayHints {
+				request_id,
+				uri,
+				start_line,
+				start_char,
+				end_line,
+				end_char,
+			})
+			.map_err(|_| "Failed to send inlay_hints command".to_string())
+	}
+
+	/// Request folding ranges for a document
+	pub fn folding_ranges(&self, request_id: u64, uri: Uri) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::FoldingRange { request_id, uri })
+			.map_err(|_| "Failed to send folding_range command".to_string())
+	}
+
+	/// Request semantic tokens for an entire document
+	pub fn semantic_tokens_full(&self, request_id: u64, uri: Uri) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::SemanticTokensFull { request_id, uri })
+			.map_err(|_| "Failed to send semantic_tokens command".to_string())
+	}
+
+	/// Request semantic tokens delta for an entire document
+	pub fn semantic_tokens_full_delta(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		previous_result_id: String,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::SemanticTokensFullDelta { request_id, uri, previous_result_id })
+			.map_err(|_| "Failed to send semantic_tokens delta command".to_string())
+	}
+
+	/// Request semantic tokens for a range
+	pub fn semantic_tokens_range(
+		&self,
+		request_id: u64,
+		uri: Uri,
+		range: lsp_types::Range,
+	) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::SemanticTokensRange { request_id, uri, range })
+			.map_err(|_| "Failed to send semantic_tokens_range command".to_string())
+	}
+
+	/// Cancel a pending request by its editor request_id
+	///
+	/// This sends a $/cancelRequest notification to the LSP server.
+	/// If the request has already completed or doesn't exist, this is a no-op.
+	pub fn cancel_request(&self, request_id: u64) -> Result<(), String> {
+		self
+			.command_tx
+			.try_send(LspCommand::CancelRequest { request_id })
+			.map_err(|_| "Failed to send cancel_request command".to_string())
+	}
+
+	/// Send a custom LSP request initiated by a plugin
+	pub fn send_plugin_request(
+		&self,
+		request_id: u64,
+		method: String,
+		params: Option<Value>,
+	) -> Result<(), String> {
+		tracing::trace!("LspHandle sending plugin request {}: method={}", request_id, method);
+		match self.command_tx.try_send(LspCommand::PluginRequest { request_id, method, params }) {
+			Ok(()) => {
+				tracing::trace!("LspHandle enqueued plugin request {} successfully", request_id);
+				Ok(())
+			}
+			Err(e) => {
+				tracing::error!("Failed to enqueue plugin request {}: {}", request_id, e);
+				Err("Failed to send plugin LSP request".to_string())
+			}
+		}
+	}
+
+	/// Shutdown the server
+	pub fn shutdown(&self) -> Result<(), String> {
+		// Transition to Stopping state
+		{
+			let mut state = self.state.lock().unwrap();
+			if let Err(e) = state.transition_to(LspClientState::Stopping) {
+				tracing::warn!("State transition warning during shutdown: {}", e);
+				// Don't fail shutdown due to state transition errors
+			}
+		}
+
+		self
+			.command_tx
+			.try_send(LspCommand::Shutdown)
+			.map_err(|_| "Failed to send shutdown command".to_string())?;
+
+		// Transition to Stopped state
+		// Note: This happens optimistically. The actual shutdown might take time.
+		{
+			let mut state = self.state.lock().unwrap();
+			let _ = state.transition_to(LspClientState::Stopped);
+		}
+
+		Ok(())
+	}
+}
+
+#[allow(clippy::let_underscore_must_use)] // Best-effort cleanup in Drop; failures are not actionable
+impl Drop for LspHandle {
+	fn drop(&mut self) {
+		// Best-effort shutdown on drop
+		// Use try_send instead of blocking_send to avoid panicking if:
+		// 1. The tokio runtime is shut down
+		// 2. The channel is full or closed
+		// 3. We're dropping during a panic
+		let _ = self.command_tx.try_send(LspCommand::Shutdown);
+
+		// Update state to Stopped
+		if let Ok(mut state) = self.state.lock() {
+			let _ = state.transition_to(LspClientState::Stopped);
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::services::lsp::manager::LanguageScope;
+	use crate::services::remote::LocalLongRunningSpawner;
+
+	/// A `workspace/configuration` request item asking for `section`.
+	fn config_item(section: &str) -> Value {
+		serde_json::json!({ "section": section })
+	}
+
+	#[test]
+	fn workspace_configuration_resolves_section_from_init_options() {
+		// harper-ls pulls the "harper-ls" section; it must receive the inner
+		// object from its configured init options, not a rust-analyzer blob.
+		let opts = serde_json::json!({
+				"harper-ls": { "linters": { "SpellCheck": false } }
+		});
+		let configs =
+			resolve_workspace_configuration(&[config_item("harper-ls")], Some(&opts), "harper-ls");
+		assert_eq!(configs, vec![serde_json::json!({ "linters": { "SpellCheck": false } })]);
+	}
+
+	#[test]
+	fn workspace_configuration_resolves_dotted_section() {
+		let opts = serde_json::json!({ "a": { "b": { "c": 1 } } });
+		let configs = resolve_workspace_configuration(&[config_item("a.b")], Some(&opts), "some-ls");
+		assert_eq!(configs, vec![serde_json::json!({ "c": 1 })]);
+	}
+
+	#[test]
+	fn workspace_configuration_unknown_section_is_null_for_non_rust() {
+		// A section we have no configuration for yields null ("use defaults"),
+		// never another server's config.
+		let opts = serde_json::json!({ "harper-ls": { "linters": {} } });
+		let configs =
+			resolve_workspace_configuration(&[config_item("marksman")], Some(&opts), "marksman");
+		assert_eq!(configs, vec![Value::Null]);
+	}
+
+	#[test]
+	fn workspace_configuration_rust_analyzer_default_enables_inlay_hints() {
+		// rust-analyzer ships no init options yet still needs inlay hints on.
+		for command in ["rust-analyzer", "/usr/local/bin/rust-analyzer", "custom-rust-analyzer"] {
+			let configs = resolve_workspace_configuration(&[config_item("rust-analyzer")], None, command);
+			assert_eq!(configs.len(), 1);
+			assert_eq!(configs[0]["inlayHints"]["typeHints"]["enable"], true, "{command}");
+		}
+	}
+
+	#[test]
+	fn workspace_configuration_non_rust_without_options_is_null() {
+		let configs = resolve_workspace_configuration(&[config_item("harper-ls")], None, "harper-ls");
+		assert_eq!(configs, vec![Value::Null]);
+	}
+
+	#[test]
+	fn workspace_configuration_one_response_per_item() {
+		let opts = serde_json::json!({ "a": 1, "b": 2 });
+		let configs = resolve_workspace_configuration(
+			&[config_item("a"), config_item("b"), config_item("missing")],
+			Some(&opts),
+			"some-ls",
+		);
+		assert_eq!(configs, vec![serde_json::json!(1), serde_json::json!(2), Value::Null]);
+	}
+
+	#[test]
+	fn workspace_configuration_no_items_returns_whole_object() {
+		// A request with no items (section unset) gets the whole config object.
+		let opts = serde_json::json!({ "linters": { "SpellCheck": false } });
+		let configs = resolve_workspace_configuration(&[], Some(&opts), "harper-ls");
+		assert_eq!(configs, vec![opts]);
+	}
+
+	/// Shared spawner used by every LspHandle::spawn test so individual
+	/// call sites stay legible. Host-local, no limits applied.
+	fn local_spawner() -> Arc<dyn crate::services::remote::LongRunningSpawner> {
+		Arc::new(LocalLongRunningSpawner::new(
+			Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			Arc::new(crate::services::workspace_trust::WorkspaceTrust::permissive()),
+		))
+	}
+
+	#[test]
+	fn test_json_rpc_request_serialization() {
+		let request = JsonRpcRequest {
+			jsonrpc: "2.0".to_string(),
+			id: JsonRpcId::Number(1),
+			method: "initialize".to_string(),
+			params: Some(serde_json::json!({"rootUri": "file:///test"})),
+		};
+
+		let json = serde_json::to_string(&request).unwrap();
+		assert!(json.contains("\"jsonrpc\":\"2.0\""));
+		assert!(json.contains("\"id\":1"));
+		assert!(json.contains("\"method\":\"initialize\""));
+		assert!(json.contains("\"rootUri\":\"file:///test\""));
+	}
+
+	#[test]
+	fn test_json_rpc_response_serialization() {
+		let response = JsonRpcResponse {
+			jsonrpc: "2.0".to_string(),
+			id: JsonRpcId::Number(1),
+			result: Some(serde_json::json!({"success": true})),
+			error: None,
+		};
+
+		let json = serde_json::to_string(&response).unwrap();
+		assert!(json.contains("\"jsonrpc\":\"2.0\""));
+		assert!(json.contains("\"id\":1"));
+		assert!(json.contains("\"success\":true"));
+		assert!(!json.contains("\"error\""));
+	}
+
+	/// rust-analyzer (and other LSP servers that mirror its behaviour) returns
+	/// `null` for `textDocument/codeAction` when the client did not advertise
+	/// `codeActionLiteralSupport` at initialize, because they cannot represent
+	/// `WorkspaceEdit`-based assists like "Fill struct fields" as the
+	/// `Command`-only fallback the spec falls back to.  Without this capability
+	/// users see "No code actions available" for every Rust quickfix
+	/// (sinelaw/fresh#1915).
+	#[test]
+	fn code_action_capability_advertises_literal_support() {
+		let caps = create_client_capabilities();
+		let code_action = caps
+			.text_document
+			.as_ref()
+			.and_then(|td| td.code_action.as_ref())
+			.expect("code_action capability must be set");
+
+		let literal = code_action
+			.code_action_literal_support
+			.as_ref()
+			.expect("codeActionLiteralSupport must be advertised");
+
+		let kinds = &literal.code_action_kind.value_set;
+		for required in [
+			"",
+			"quickfix",
+			"refactor",
+			"refactor.extract",
+			"refactor.inline",
+			"refactor.rewrite",
+			"source",
+			"source.organizeImports",
+		] {
+			assert!(
+				kinds.iter().any(|k| k == required),
+				"expected codeActionKind value_set to include {required:?}, got {kinds:?}",
+			);
+		}
+	}
+
+	#[test]
+	fn advertises_dynamic_registration_on_honored_capabilities() {
+		// Servers that register providers dynamically only do so when the
+		// client advertised `dynamicRegistration` for that capability
+		// (sinelaw/fresh#2195 §1). Spot-check the ones most commonly registered
+		// dynamically.
+		let caps = create_client_capabilities();
+		let td = caps.text_document.as_ref().expect("text_document capabilities must be set");
+
+		assert_eq!(
+			td.inlay_hint.as_ref().and_then(|c| c.dynamic_registration),
+			Some(true),
+			"inlay_hint must advertise dynamicRegistration"
+		);
+		assert_eq!(
+			td.completion.as_ref().and_then(|c| c.dynamic_registration),
+			Some(true),
+			"completion must advertise dynamicRegistration"
+		);
+		assert_eq!(
+			td.formatting.as_ref().and_then(|c| c.dynamic_registration),
+			Some(true),
+			"formatting must advertise dynamicRegistration"
+		);
+		assert_eq!(
+			td.document_symbol.as_ref().and_then(|c| c.dynamic_registration),
+			Some(true),
+			"document_symbol must advertise dynamicRegistration"
+		);
+		assert_eq!(
+			caps.workspace.as_ref().and_then(|w| w.symbol.as_ref()).and_then(|s| s.dynamic_registration),
+			Some(true),
+			"workspace.symbol must advertise dynamicRegistration"
+		);
+	}
+
+	#[test]
+	fn advertises_inlay_hint_and_semantic_tokens_refresh_support() {
+		// A server only sends `workspace/inlayHint/refresh` (and the semantic
+		// tokens equivalent) when the client advertised refresh support; we now
+		// handle both, so both must be advertised (sinelaw/fresh#2195 §2).
+		let caps = create_client_capabilities();
+		let workspace = caps.workspace.as_ref().expect("workspace caps must be set");
+
+		assert_eq!(
+			workspace.inlay_hint.as_ref().and_then(|c| c.refresh_support),
+			Some(true),
+			"workspace.inlayHint.refreshSupport must be advertised"
+		);
+		assert_eq!(
+			workspace.semantic_tokens.as_ref().and_then(|c| c.refresh_support),
+			Some(true),
+			"workspace.semanticTokens.refreshSupport must be advertised"
+		);
+	}
+
+	#[test]
+	fn sync_raw_capabilities_mirrors_dynamic_diagnostic_provider() {
+		// The task-side raw `ServerCapabilities` snapshot gates pull diagnostics
+		// (`handle_document_diagnostic`). A server like pyright registers
+		// `diagnosticProvider` dynamically, not statically, so without mirroring
+		// it here the pull is silently skipped (sinelaw/fresh#2195).
+		let caps: Arc<std::sync::Mutex<Option<ServerCapabilities>>> =
+			Arc::new(std::sync::Mutex::new(Some(ServerCapabilities::default())));
+		assert!(caps.lock().unwrap().as_ref().unwrap().diagnostic_provider.is_none());
+
+		sync_raw_capabilities(&caps, &[("textDocument/diagnostic".to_string(), None)], true);
+		assert!(
+			caps.lock().unwrap().as_ref().unwrap().diagnostic_provider.is_some(),
+			"dynamic diagnostic registration must set diagnostic_provider so pulls aren't skipped"
+		);
+
+		sync_raw_capabilities(&caps, &[("textDocument/diagnostic".to_string(), None)], false);
+		assert!(
+			caps.lock().unwrap().as_ref().unwrap().diagnostic_provider.is_none(),
+			"unregister must clear diagnostic_provider"
+		);
+	}
+
+	#[test]
+	fn sync_raw_capabilities_ignores_non_diagnostic_methods() {
+		// Only the diagnostic provider is gated task-side; other methods must
+		// not disturb the raw snapshot (they gate on the main-loop summary).
+		let caps: Arc<std::sync::Mutex<Option<ServerCapabilities>>> =
+			Arc::new(std::sync::Mutex::new(None));
+		sync_raw_capabilities(&caps, &[("textDocument/hover".to_string(), None)], true);
+		assert!(
+			caps.lock().unwrap().is_none(),
+			"a non-diagnostic registration must not materialize the raw snapshot"
+		);
+	}
+
+	#[test]
+	fn parses_register_and_unregister_capability_params() {
+		let register = serde_json::json!({
+				"registrations": [
+						{ "id": "1", "method": "textDocument/inlayHint" },
+						{
+								"id": "2",
+								"method": "textDocument/completion",
+								"registerOptions": { "triggerCharacters": ["."] }
+						}
+				]
+		});
+		let parsed = registrations_from_params(Some(&register));
+		assert_eq!(parsed.len(), 2);
+		assert_eq!(parsed[0].0, "textDocument/inlayHint");
+		assert!(parsed[0].1.is_none());
+		assert_eq!(parsed[1].0, "textDocument/completion");
+		assert!(parsed[1].1.is_some());
+
+		let unregister = serde_json::json!({
+				"unregisterations": [
+						{ "id": "1", "method": "textDocument/inlayHint" }
+				]
+		});
+		let methods = unregistrations_from_params(Some(&unregister));
+		assert_eq!(methods, vec!["textDocument/inlayHint".to_string()]);
+
+		// Malformed params must not panic and yield empty lists.
+		assert!(registrations_from_params(Some(&serde_json::json!({ "bogus": 1 }))).is_empty());
+		assert!(unregistrations_from_params(None).is_empty());
+	}
+
+	#[test]
+	fn test_json_rpc_error_response() {
+		let response = JsonRpcResponse {
+			jsonrpc: "2.0".to_string(),
+			id: JsonRpcId::Number(1),
+			result: None,
+			error: Some(JsonRpcError {
+				code: -32600,
+				message: "Invalid request".to_string(),
+				data: None,
+			}),
+		};
+
+		let json = serde_json::to_string(&response).unwrap();
+		assert!(json.contains("\"error\""));
+		assert!(json.contains("\"code\":-32600"));
+		assert!(json.contains("\"message\":\"Invalid request\""));
+	}
+
+	#[test]
+	fn test_suppressed_error_codes() {
+		// ContentModified and ServerCancelled are normal during editing.
+		assert!(is_suppressed_error_code(LSP_ERROR_CONTENT_MODIFIED));
+		assert!(is_suppressed_error_code(LSP_ERROR_SERVER_CANCELLED));
+
+		// Every other JSON-RPC / LSP error must still surface so genuine
+		// protocol mismatches stay debuggable — including MethodNotFound
+		// (-32601), which signals "we sent a request the server doesn't
+		// handle" and should be fixed with a capability check, not a filter.
+		assert!(!is_suppressed_error_code(-32600)); // Invalid request
+		assert!(!is_suppressed_error_code(-32601)); // Method not found
+		assert!(!is_suppressed_error_code(-32602)); // Invalid params
+		assert!(!is_suppressed_error_code(-32603)); // Internal error
+		assert!(!is_suppressed_error_code(-32700)); // Parse error
+		assert!(!is_suppressed_error_code(0));
+
+		// RequestFailed is NOT a blanket-suppressed code: on its own it still
+		// warns. It is only downgraded for informational methods (below).
+		assert!(!is_suppressed_error_code(LSP_ERROR_REQUEST_FAILED));
+	}
+
+	#[test]
+	fn test_request_failed_suppressed_only_for_informational_methods() {
+		// asm-lsp answers a hover over a non-opcode token with
+		// `-32803 "No information available"` instead of a null result
+		// (sinelaw/fresh#2296). That's a routine "nothing here", so an
+		// informational method must not warn...
+		assert!(is_suppressed_response_error(LSP_ERROR_REQUEST_FAILED, "textDocument/hover"));
+		assert!(is_suppressed_response_error(LSP_ERROR_REQUEST_FAILED, "textDocument/completion"));
+
+		// ...but a RequestFailed from a mutating/actionable method is a real
+		// problem the user should be able to see.
+		assert!(!is_suppressed_response_error(LSP_ERROR_REQUEST_FAILED, "textDocument/formatting"));
+		assert!(!is_suppressed_response_error(LSP_ERROR_REQUEST_FAILED, "textDocument/rename"));
+
+		// The method gate only applies to RequestFailed; other errors on an
+		// informational method still surface.
+		assert!(!is_suppressed_response_error(-32603, "textDocument/hover"));
+	}
+
+	#[test]
+	fn test_request_failed_on_hover_is_not_logged_as_warn() {
+		// The exact scenario from the bug report: a hover RequestFailed must
+		// stay at debug so a normal "no docs here" hover doesn't spam warnings.
+		let (emitted, contents) = capture_warn_logs(|| {
+			log_response_error(
+				LSP_ERROR_REQUEST_FAILED,
+				"No information available",
+				"asm-lsp",
+				"asm",
+				"textDocument/hover",
+			);
+		});
+		assert!(
+			!emitted,
+			"hover RequestFailed must not notify the WARN channel; got log:\n{}",
+			contents
+		);
+	}
+
+	#[test]
+	fn test_request_failed_on_formatting_still_warns() {
+		let (emitted, _contents) = capture_warn_logs(|| {
+			log_response_error(
+				LSP_ERROR_REQUEST_FAILED,
+				"formatting failed",
+				"some-server",
+				"rust",
+				"textDocument/formatting",
+			);
+		});
+		assert!(emitted, "RequestFailed on an actionable method should still WARN");
+	}
+
+	/// Scope a `WarningLogLayer` to the current thread and run `body`. Returns
+	/// whether the layer observed a WARN/ERROR record, plus the captured log
+	/// file contents for assertion on the formatted message.
+	fn capture_warn_logs(body: impl FnOnce()) -> (bool, String) {
+		use std::time::Duration;
+		use tempfile::NamedTempFile;
+		use tracing_subscriber::prelude::*;
+
+		let log_file = NamedTempFile::new().unwrap();
+		let log_path = log_file.into_temp_path();
+		let (layer, handle) =
+			crate::services::warning_log::create_with_path(log_path.to_path_buf()).unwrap();
+		let subscriber = tracing_subscriber::registry().with(layer);
+
+		tracing::subscriber::with_default(subscriber, body);
+
+		let emitted = handle.receiver.recv_timeout(Duration::from_millis(100)).is_ok();
+		let contents = std::fs::read_to_string(&log_path).unwrap_or_default();
+		(emitted, contents)
+	}
+
+	#[test]
+	fn test_content_modified_and_server_cancelled_are_not_logged_as_warn() {
+		for code in [LSP_ERROR_CONTENT_MODIFIED, LSP_ERROR_SERVER_CANCELLED] {
+			let (emitted, contents) = capture_warn_logs(|| {
+				log_response_error(
+					code,
+					"expected during editing",
+					"rust-analyzer",
+					"rust",
+					"textDocument/completion",
+				);
+			});
+			assert!(!emitted, "code {} must not notify the WARN channel; got log:\n{}", code, contents);
+		}
+	}
+
+	#[test]
+	fn test_method_not_found_still_surfaces_as_warn() {
+		// MethodNotFound must WARN so we notice when we're sending requests a
+		// server doesn't support. The fix for that class of bug belongs in the
+		// caller (check capabilities first), not in the error filter.
+		let (emitted, contents) = capture_warn_logs(|| {
+			log_response_error(
+				-32601,
+				"Unhandled method textDocument/inlayHint",
+				"vscode-json-language-server",
+				"json",
+				"textDocument/inlayHint",
+			);
+		});
+		assert!(emitted, "MethodNotFound should notify the WARN channel so the mismatch is visible");
+		assert!(
+			contents.contains("code -32601"),
+			"WARN log should record the error code; got:\n{}",
+			contents
+		);
+	}
+
+	#[test]
+	fn test_non_suppressed_errors_still_warn() {
+		// InternalError (-32603) and other unexpected codes must continue
+		// to surface so genuine server misbehaviour stays visible.
+		let (emitted, contents) = capture_warn_logs(|| {
+			log_response_error(-32603, "internal error", "rust-analyzer", "rust", "textDocument/hover");
+		});
+		assert!(emitted, "non-suppressed error codes should notify the WARN channel");
+		assert!(
+			contents.contains("code -32603"),
+			"WARN log should record the error code; got:\n{}",
+			contents
+		);
+		assert!(
+			contents.contains("rust-analyzer"),
+			"WARN log should record the server name; got:\n{}",
+			contents
+		);
+	}
+
+	#[test]
+	fn test_json_rpc_notification_serialization() {
+		let notification = JsonRpcNotification {
+			jsonrpc: "2.0".to_string(),
+			method: "textDocument/didOpen".to_string(),
+			params: Some(serde_json::json!({"uri": "file:///test.rs"})),
+		};
+
+		let json = serde_json::to_string(&notification).unwrap();
+		assert!(json.contains("\"jsonrpc\":\"2.0\""));
+		assert!(json.contains("\"method\":\"textDocument/didOpen\""));
+		assert!(json.contains("\"uri\":\"file:///test.rs\""));
+		assert!(!json.contains("\"id\"")); // Notifications have no ID
+	}
+
+	#[test]
+	fn test_json_rpc_message_deserialization_request() {
+		let json =
+			r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///test"}}"#;
+		let message: JsonRpcMessage = serde_json::from_str(json).unwrap();
+
+		match message {
+			JsonRpcMessage::Request(request) => {
+				assert_eq!(request.jsonrpc, "2.0");
+				assert_eq!(request.id, JsonRpcId::Number(1));
+				assert_eq!(request.method, "initialize");
+				assert!(request.params.is_some());
+			}
+			_ => panic!("Expected Request"),
+		}
+	}
+
+	/// Eclipse LSP4J servers (jdtls, the Groovy/Kotlin servers, lemminx, …)
+	/// send the requests they initiate — notably `client/registerCapability` —
+	/// with a **string** JSON-RPC id. Such a message must still deserialize as
+	/// a `Request` so it reaches the request handler (which records the
+	/// dynamically-registered capability and acks the request).
+	///
+	/// Before the id type accepted strings this parsed as a `Notification`
+	/// (the untagged enum fell through and the stray `id` was dropped), so
+	/// jdtls's dynamically-registered completion never turned on
+	/// (sinelaw/fresh#2340).
+	#[test]
+	fn string_id_request_deserializes_as_request_not_notification() {
+		let json = r#"{"jsonrpc":"2.0","id":"dyn-reg-1","method":"client/registerCapability","params":{"registrations":[{"id":"completion-reg","method":"textDocument/completion"}]}}"#;
+		let message: JsonRpcMessage = serde_json::from_str(json).unwrap();
+
+		match message {
+			JsonRpcMessage::Request(request) => {
+				assert_eq!(request.id, JsonRpcId::Str("dyn-reg-1".to_string()));
+				assert_eq!(request.method, "client/registerCapability");
+			}
+			other => panic!("expected Request for a string-id message, got {other:?}"),
+		}
+	}
+
+	/// The string id must round-trip on the way back out, so the `null` ack we
+	/// send for a server-initiated request correlates on the server side.
+	#[test]
+	fn null_response_preserves_string_id() {
+		let json = serde_json::to_string(&null_response(JsonRpcId::Str("dyn-reg-1".to_string())))
+			.expect("serialize null response");
+		assert!(json.contains(r#""id":"dyn-reg-1""#), "string id must be echoed verbatim, got: {json}");
+	}
+
+	#[test]
+	fn test_json_rpc_message_deserialization_response() {
+		let json = r#"{"jsonrpc":"2.0","id":1,"result":{"success":true}}"#;
+		let message: JsonRpcMessage = serde_json::from_str(json).unwrap();
+
+		match message {
+			JsonRpcMessage::Response(response) => {
+				assert_eq!(response.jsonrpc, "2.0");
+				assert_eq!(response.id, JsonRpcId::Number(1));
+				assert!(response.result.is_some());
+				assert!(response.error.is_none());
+			}
+			_ => panic!("Expected Response"),
+		}
+	}
+
+	#[test]
+	fn test_json_rpc_message_deserialization_notification() {
+		let json =
+			r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"uri":"file:///test.rs"}}"#;
+		let message: JsonRpcMessage = serde_json::from_str(json).unwrap();
+
+		match message {
+			JsonRpcMessage::Notification(notification) => {
+				assert_eq!(notification.jsonrpc, "2.0");
+				assert_eq!(notification.method, "textDocument/didOpen");
+				assert!(notification.params.is_some());
+			}
+			_ => panic!("Expected Notification"),
+		}
+	}
+
+	#[test]
+	fn test_json_rpc_error_deserialization() {
+		let json = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
+		let message: JsonRpcMessage = serde_json::from_str(json).unwrap();
+
+		match message {
+			JsonRpcMessage::Response(response) => {
+				assert_eq!(response.jsonrpc, "2.0");
+				assert_eq!(response.id, JsonRpcId::Number(1));
+				assert!(response.result.is_none());
+				assert!(response.error.is_some());
+				let error = response.error.unwrap();
+				assert_eq!(error.code, -32600);
+				assert_eq!(error.message, "Invalid request");
+			}
+			_ => panic!("Expected Response with error"),
+		}
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_spawn_and_drop() {
+		// This test spawns a mock LSP server (cat command that echoes input)
+		// and tests the spawn/drop lifecycle
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		// Use 'cat' as a mock LSP server (it will just echo stdin to stdout)
+		// This will fail to initialize but allows us to test the spawn mechanism
+		let result = LspHandle::spawn(
+			&runtime,
+			"cat",
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		);
+
+		// Should succeed in spawning
+		assert!(result.is_ok());
+
+		let handle = result.unwrap();
+
+		// Let handle drop (which calls shutdown via Drop impl)
+		drop(handle);
+
+		// Give task time to receive shutdown and exit
+		tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_did_open_queues_before_initialization() {
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		let handle = LspHandle::spawn(
+			&runtime,
+			"cat",
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		)
+		.unwrap();
+
+		// did_open now succeeds and queues the command for when server is initialized
+		let result = handle.did_open(
+			"file:///test.txt".parse().unwrap(),
+			"fn main() {}".to_string(),
+			"test".to_string(),
+		);
+
+		// Should succeed (command is queued)
+		assert!(result.is_ok());
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_did_change_queues_before_initialization() {
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		let handle = LspHandle::spawn(
+			&runtime,
+			"cat",
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		)
+		.unwrap();
+
+		// Test incremental sync: insert "fn main() {}" at position (0, 0)
+		let result = handle.did_change(
+			"file:///test.rs".parse().unwrap(),
+			vec![TextDocumentContentChangeEvent {
+				range: Some(lsp_types::Range::new(
+					lsp_types::Position::new(0, 0),
+					lsp_types::Position::new(0, 0),
+				)),
+				range_length: None,
+				text: "fn main() {}".to_string(),
+			}],
+		);
+
+		// Should succeed (command is queued)
+		assert!(result.is_ok());
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_incremental_change_with_range() {
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		let handle = LspHandle::spawn(
+			&runtime,
+			"cat",
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		)
+		.unwrap();
+
+		// Test incremental delete: remove text from (0, 3) to (0, 7)
+		let result = handle.did_change(
+			"file:///test.rs".parse().unwrap(),
+			vec![TextDocumentContentChangeEvent {
+				range: Some(lsp_types::Range::new(
+					lsp_types::Position::new(0, 3),
+					lsp_types::Position::new(0, 7),
+				)),
+				range_length: None,
+				text: String::new(), // Empty string for deletion
+			}],
+		);
+
+		// Should succeed (command is queued)
+		assert!(result.is_ok());
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_spawn_invalid_command() {
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		// Try to spawn with an invalid command
+		let result = LspHandle::spawn(
+			&runtime,
+			"this-command-does-not-exist-12345",
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		);
+
+		// Should succeed in creating handle (error happens asynchronously)
+		// The error will be sent to async_bridge
+		assert!(result.is_ok());
+
+		// Give the task time to fail
+		tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+		// Check that we received an error message
+		let messages = async_bridge.try_recv_all();
+		assert!(!messages.is_empty());
+
+		let has_error = messages.iter().any(|msg| matches!(msg, AsyncMessage::LspError { .. }));
+		assert!(has_error, "Expected LspError message");
+	}
+
+	#[test]
+	fn test_lsp_handle_shutdown_from_sync_context() {
+		// Test shutdown from a synchronous context (requires spawning a separate thread)
+		// This simulates how shutdown is called from the main editor loop
+		std::thread::spawn(|| {
+			// Create a tokio runtime for this thread
+			let rt = tokio::runtime::Runtime::new().unwrap();
+			let async_bridge = AsyncBridge::new();
+
+			let handle = rt.block_on(async {
+				let runtime = tokio::runtime::Handle::current();
+				LspHandle::spawn(
+					&runtime,
+					"cat",
+					&[],
+					Default::default(),
+					LanguageScope::single("test"),
+					"test-server".to_string(),
+					&async_bridge,
+					ProcessLimits::unlimited(),
+					Default::default(),
+					local_spawner(),
+				)
+				.unwrap()
+			});
+
+			// This should succeed from a non-async context
+			assert!(handle.shutdown().is_ok());
+
+			// Give task time to exit
+			std::thread::sleep(std::time::Duration::from_millis(50));
+		})
+		.join()
+		.unwrap();
+	}
+
+	#[test]
+	fn test_lsp_command_debug_format() {
+		// Test that LspCommand has Debug implementation
+		let cmd = LspCommand::Shutdown;
+		let debug_str = format!("{:?}", cmd);
+		assert!(debug_str.contains("Shutdown"));
+	}
+
+	#[test]
+	fn test_lsp_client_state_can_initialize_from_starting() {
+		// This test verifies that the state machine allows initialization from the Starting state.
+		// This is critical because LspHandle::spawn() sets state to Starting, and then
+		// get_or_spawn() immediately calls handle.initialize(). Without this fix,
+		// initialization would fail with "Cannot initialize: client is in state Starting".
+
+		let state = LspClientState::Starting;
+
+		// The fix: Starting state should allow initialization
+		assert!(
+			state.can_initialize(),
+			"Starting state must allow initialization to avoid race condition"
+		);
+
+		// Verify the full initialization flow works
+		let mut state = LspClientState::Starting;
+
+		// Should be able to transition to Initializing
+		assert!(state.can_transition_to(LspClientState::Initializing));
+		assert!(state.transition_to(LspClientState::Initializing).is_ok());
+
+		// And then to Running
+		assert!(state.can_transition_to(LspClientState::Running));
+		assert!(state.transition_to(LspClientState::Running).is_ok());
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_initialize_from_starting_state() {
+		// This test reproduces the bug where initialize() would fail because
+		// the handle's state is Starting (set by spawn()) but can_initialize()
+		// only allowed Initial or Stopped states.
+		//
+		// The bug manifested as:
+		// ERROR: Failed to send initialize command for rust: Cannot initialize: client is in state Starting
+
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		// Spawn creates the handle with state = Starting
+		let handle = LspHandle::spawn(
+			&runtime,
+			"cat", // Simple command that will exit immediately
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		)
+		.unwrap();
+
+		// Immediately call initialize - this is what get_or_spawn() does
+		// Before the fix, this would fail with "Cannot initialize: client is in state Starting"
+		let result = handle.initialize(None, None);
+
+		assert!(
+			result.is_ok(),
+			"initialize() must succeed from Starting state. Got error: {:?}",
+			result.err()
+		);
+	}
+
+	#[tokio::test]
+	async fn test_lsp_state_machine_race_condition_fix() {
+		// Integration test that simulates the exact flow that was broken:
+		// 1. LspManager::get_or_spawn() calls LspHandle::spawn()
+		// 2. spawn() sets state to Starting and spawns async task
+		// 3. get_or_spawn() immediately calls handle.initialize()
+		// 4. initialize() should succeed even though state is Starting
+
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		// Create a simple fake LSP server script that responds to initialize
+		let fake_lsp_script = r#"
+            read -r line  # Read Content-Length header
+            read -r empty # Read empty line
+            read -r json  # Read JSON body
+
+            # Send a valid initialize response
+            response='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+            echo "Content-Length: ${#response}"
+            echo ""
+            echo -n "$response"
+
+            # Keep running to avoid EOF
+            sleep 10
+        "#;
+
+		// Spawn with bash to execute the fake LSP
+		let handle = LspHandle::spawn(
+			&runtime,
+			"bash",
+			&["-c".to_string(), fake_lsp_script.to_string()],
+			Default::default(),
+			LanguageScope::single("fake"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		)
+		.unwrap();
+
+		// This is the critical test: initialize must succeed from Starting state
+		let init_result = handle.initialize(None, None);
+		assert!(
+			init_result.is_ok(),
+			"initialize() failed from Starting state: {:?}",
+			init_result.err()
+		);
+
+		// Give the async task time to process
+		tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+		// Check that we received status update messages
+		let messages = async_bridge.try_recv_all();
+		let has_status_update =
+			messages.iter().any(|msg| matches!(msg, AsyncMessage::LspStatusUpdate { .. }));
+
+		assert!(has_status_update, "Expected status update messages from LSP initialization");
+
+		// Cleanup - best-effort, test is ending
+		#[allow(clippy::let_underscore_must_use)]
+		let _ = handle.shutdown();
+	}
+
+	#[test]
+	fn test_lsp_client_state_can_shutdown_from_error() {
+		// Regression test for #1797. When the LSP fails to initialize
+		// (e.g. rust-analyzer rustup proxy exits immediately), the state
+		// transitions to Error. Cleanup paths then call shutdown(), which
+		// calls transition_to(Stopping). Before the fix, that produced
+		// `Invalid state transition from Error to Stopping` warnings on
+		// every retry — Cleanup is a legitimate operation from Error.
+		let mut state = LspClientState::Error;
+
+		assert!(
+			state.can_transition_to(LspClientState::Stopping),
+			"Error state must allow transition to Stopping for graceful shutdown"
+		);
+		assert!(state.transition_to(LspClientState::Stopping).is_ok());
+		// Stopping -> Stopped is already permitted; ensure the full
+		// shutdown sequence completes without warnings.
+		assert!(state.transition_to(LspClientState::Stopped).is_ok());
+	}
+
+	#[tokio::test]
+	async fn test_lsp_handle_shutdown_after_spawn_failure_advances_state() {
+		// End-to-end regression for #1797. With a non-existent command
+		// the spawn task transitions state to Error. shutdown() must
+		// be able to advance the state past Error (to Stopping or
+		// Stopped) — before the fix it stayed stuck at Error and
+		// emitted `Invalid state transition from Error to Stopping`.
+		let runtime = tokio::runtime::Handle::current();
+		let async_bridge = AsyncBridge::new();
+
+		let handle = LspHandle::spawn(
+			&runtime,
+			"dx-nonexistent-lsp-binary-7c93af",
+			&[],
+			Default::default(),
+			LanguageScope::single("test"),
+			"test-server".to_string(),
+			&async_bridge,
+			ProcessLimits::unlimited(),
+			Default::default(),
+			local_spawner(),
+		)
+		.unwrap();
+
+		// Wait until the spawn task observes the missing binary and
+		// pushes the state to Error.
+		for _ in 0..200 {
+			if handle.state() == LspClientState::Error {
+				break;
+			}
+			tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+		}
+		assert_eq!(
+			handle.state(),
+			LspClientState::Error,
+			"spawn task should have transitioned to Error after failed spawn"
+		);
+
+		// Shutdown from Error: the channel send may fail because the
+		// spawn task already exited, but state must advance past Error.
+		// It must NOT remain stuck at Error (which is what the broken
+		// state transition produced).
+		#[allow(clippy::let_underscore_must_use)]
+		let _ = handle.shutdown();
+		let final_state = handle.state();
+		assert!(
+			matches!(final_state, LspClientState::Stopping | LspClientState::Stopped),
+			"shutdown from Error must advance state, got {:?}",
+			final_state
+		);
+	}
+
+	#[test]
+	fn hover_null_is_no_hover() {
+		let (contents, is_markdown, range) = LspState::parse_hover_response(Value::Null);
+		assert_eq!(contents, "");
+		assert!(!is_markdown);
+		assert_eq!(range, None);
+	}
+
+	#[test]
+	fn hover_empty_object_is_no_hover() {
+		// slangd returns `{}` (not `null`) when there is nothing to show,
+		// e.g. hovering a keyword or a `[numthreads]` attribute. `contents`
+		// is required on `lsp_types::Hover`, so this must be handled as
+		// no-hover instead of a `missing field \`contents\`` parse error.
+		let (contents, is_markdown, range) = LspState::parse_hover_response(serde_json::json!({}));
+		assert_eq!(contents, "");
+		assert!(!is_markdown);
+		assert_eq!(range, None);
+	}
+
+	#[test]
+	fn hover_object_without_contents_is_no_hover() {
+		// A range but no `contents` field is likewise "nothing to show".
+		let (contents, ..) = LspState::parse_hover_response(serde_json::json!({
+				"range": { "start": { "line": 1, "character": 2 },
+									 "end":   { "line": 1, "character": 5 } }
+		}));
+		assert_eq!(contents, "");
+	}
+
+	#[test]
+	fn hover_markup_contents_parsed_with_range() {
+		// A well-formed slangd hover (MarkupContent + range).
+		let (contents, is_markdown, range) = LspState::parse_hover_response(serde_json::json!({
+				"contents": { "kind": "markdown", "value": "```\ntypedef float3 float3\n```" },
+				"range": { "start": { "line": 7, "character": 4 },
+									 "end":   { "line": 7, "character": 10 } }
+		}));
+		assert_eq!(contents, "```\ntypedef float3 float3\n```");
+		assert!(is_markdown);
+		assert_eq!(range, Some(((7, 4), (7, 10))));
+	}
+
+	#[test]
+	fn hover_malformed_contents_is_no_hover() {
+		// `contents` present but not a valid HoverContents shape: a graceful
+		// no-hover to the editor, logged at warn since it's a protocol
+		// violation.
+		let (contents, is_markdown, range) = LspState::parse_hover_response(serde_json::json!({
+				"contents": 42
+		}));
+		assert_eq!(contents, "");
+		assert!(!is_markdown);
+		assert_eq!(range, None);
+	}
+}

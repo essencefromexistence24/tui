@@ -32,8 +32,6 @@ pub(super) async fn mint_devbox_auth_raw() -> anyhow::Result<GrokAuth> {
 }
 
 /// `grok login --devbox` entry point: always errors in this build.
-pub(crate) async fn run_devbox_login(
-    _config: &crate::agent::config::Config,
-) -> anyhow::Result<GrokAuth> {
+pub async fn run_devbox_login(_config: &crate::agent::config::Config) -> anyhow::Result<GrokAuth> {
     anyhow::bail!(UNAVAILABLE)
 }

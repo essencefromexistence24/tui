@@ -1190,11 +1190,11 @@ pub(crate) mod win_native_selection {
             let Ok(saved) = u32::try_from(saved) else {
                 return;
             };
-            if let Some((handle, current)) = stdin_console_mode() {
-                if current != saved {
-                    unsafe {
-                        let _ = SetConsoleMode(handle, saved);
-                    }
+            if let Some((handle, current)) = stdin_console_mode()
+                && current != saved
+            {
+                unsafe {
+                    let _ = SetConsoleMode(handle, saved);
                 }
             }
         }
@@ -2191,7 +2191,7 @@ mod tests {
         assert_eq!(
             first_5,
             vec![
-                "Grok Build TUI",
+                "Dx",
                 "",
                 "Usage: grok [OPTIONS] [PROMPT] [COMMAND]",
                 "",

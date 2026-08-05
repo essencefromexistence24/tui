@@ -354,17 +354,13 @@ impl Default for ScrollConfig {
     }
 }
 
-/// Scroll indicator display mode: the ▼ jump-to-bottom arrow below
-/// scrollback and its ▲ jump-to-response-top mirror under the sticky
-/// prompt header.
+/// Follow indicator display mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FollowIndicator {
-    /// No scroll indicators.
+    /// No follow indicator.
     None,
     /// Show ▼ centered in the gap row below scrollback when not following
-    /// and there's content below the viewport, and ▲ centered under the
-    /// sticky prompt header while the answer being read starts above the
-    /// viewport top.
+    /// and there's content below the viewport.
     #[default]
     Center,
 }
@@ -394,6 +390,10 @@ pub struct AnimationConfig {
     /// Show an FPS counter overlay in the top-right corner (debug/dev builds only).
     /// Also enabled by the `GROK_FPS=1` env var. Default: false.
     pub show_fps: bool,
+    /// Show the DX splash on the first Down press in an empty chat input.
+    pub intro: bool,
+    /// Enable the DX outro splash for hosts that request an exit animation.
+    pub outro: bool,
 }
 
 impl Default for AnimationConfig {
@@ -402,6 +402,8 @@ impl Default for AnimationConfig {
             fps: 30,
             wave_rows: 32,
             show_fps: false,
+            intro: true,
+            outro: true,
         }
     }
 }
@@ -995,8 +997,8 @@ pub struct RawScrollConfig {
     /// If a scroll would be less than this percentage, scroll by this amount instead.
     /// 0 = minimal scroll (default), 25 = quarter page, 100 = full page.
     pub min_page_fraction: u8,
-    /// Scroll indicators: the ▼ below scrollback and the ▲ under the sticky
-    /// prompt header. "none" = hidden, "center" = centered arrows.
+    /// Follow indicator in the gap row below scrollback.
+    /// "none" = hidden, "center" = ▼ centered when content is below viewport.
     pub follow_indicator: RawFollowIndicator,
     /// When follow mode scrolls to new content, auto-select the latest entry.
     pub follow_auto_select: bool,
@@ -1023,13 +1025,13 @@ impl Default for RawScrollConfig {
     }
 }
 
-/// Scroll indicator display mode (TOML format).
+/// Follow indicator display mode (TOML format).
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum RawFollowIndicator {
-    /// No scroll indicators.
+    /// No follow indicator.
     None,
-    /// Show ▼ centered below scrollback and ▲ under the sticky prompt header.
+    /// Show ▼ centered in the gap row below scrollback.
     #[default]
     Center,
 }
@@ -1110,6 +1112,10 @@ pub struct RawAnimationConfig {
     /// Show an FPS counter overlay in the top-right corner.
     /// Requires a debug build. Also enabled by GROK_FPS=1 env var. Default: false.
     pub show_fps: bool,
+    /// Show the DX splash from the chat input on first Down press.
+    pub intro: bool,
+    /// Allow the host to show the DX splash while exiting.
+    pub outro: bool,
 }
 
 impl Default for RawAnimationConfig {
@@ -1118,6 +1124,8 @@ impl Default for RawAnimationConfig {
             fps: 30,
             wave_rows: 32,
             show_fps: false,
+            intro: true,
+            outro: true,
         }
     }
 }
@@ -1471,6 +1479,8 @@ impl From<RawAnimationConfig> for AnimationConfig {
             fps: raw.fps.clamp(1, 60),
             wave_rows: raw.wave_rows.max(1),
             show_fps: raw.show_fps,
+            intro: raw.intro,
+            outro: raw.outro,
         }
     }
 }

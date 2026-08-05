@@ -1,6 +1,7 @@
 //! Transcript export, block copying, viewer/modal, and input-log dump dispatchers.
 
 use super::ctx::with_active_agent;
+use super::session::lifecycle::skip_picker_and_create_session;
 use crate::app::actions::Effect;
 use crate::app::agent::AgentId;
 use crate::app::app_view::{ActiveView, AppView};
@@ -471,9 +472,10 @@ pub(super) fn dispatch_open_extensions_modal(
     });
 
     let Some(session_id) = agent.session.session_id.clone() else {
-        // Tabs default to Loading; the fetch fires on SessionCreated.
+        // Tabs default to Loading; the fetch fires on SessionCreated. With a
+        // picker-deferred session nothing else would create one, so do it now.
         agent.pending_extensions_fetch = true;
-        return vec![];
+        return skip_picker_and_create_session(app, id);
     };
     agent.pending_extensions_fetch = false;
     let Some(modal) = agent.extensions_modal.as_mut() else {

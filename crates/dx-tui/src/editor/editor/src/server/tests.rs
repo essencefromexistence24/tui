@@ -1,0 +1,1490 @@
+//! Integration tests for client-server communication
+
+#[cfg(test)]
+mod integration_tests {
+	use std::sync::atomic::Ordering;
+	use std::thread;
+	use std::time::Duration;
+
+	use crate::server::daemon::is_process_running;
+	use crate::server::ipc::{ClientConnection, SocketPaths};
+	use crate::server::protocol::{
+		ClientControl, ClientHello, PROTOCOL_VERSION, ServerControl, ServerHello, TermSize,
+	};
+	use crate::server::runner::{Server, ServerConfig};
+
+	/// Read from the client data pipe until the accumulated output contains `needle`.
+	/// Appends to `output` so callers can accumulate across multiple calls.
+	/// No timeout - cargo nextest provides external timeout.
+	fn read_until_contains(conn: &ClientConnection, output: &mut Vec<u8>, needle: &str) {
+		let mut buf = [0u8; 8192];
+		loop {
+			if String::from_utf8_lossy(output).contains(needle) {
+				return;
+			}
+			match conn.data.try_read(&mut buf) {
+				Ok(0) => return,
+				Ok(n) => output.extend_from_slice(&buf[..n]),
+				Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+					thread::sleep(Duration::from_millis(5));
+				}
+				Err(_) => return,
+			}
+		}
+	}
+
+	fn unique_session_name(prefix: &str) -> String {
+		format!(
+			"{}-{}-{}",
+			prefix,
+			std::process::id(),
+			std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+		)
+	}
+
+	/// Test basic server startup and shutdown
+	#[test]
+	fn test_server_creates_sockets_on_bind() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("lifecycle")),
+			idle_timeout: Some(Duration::from_millis(100)),
+			mouse_hover_enabled: true,
+		};
+
+		let mut server = Server::new(config).unwrap();
+		let shutdown = server.shutdown_handle();
+
+		// Sockets should exist after bind
+		let paths = server.socket_paths();
+		assert!(paths.data.exists());
+		assert!(paths.control.exists());
+
+		shutdown.store(true, Ordering::SeqCst);
+		drop(server.run());
+
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// Test client-server handshake protocol
+	#[test]
+	fn test_handshake_exchanges_protocol_version() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-hs-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let session_name = unique_session_name("handshake");
+
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(session_name.clone()),
+			idle_timeout: Some(Duration::from_secs(5)),
+			mouse_hover_enabled: true,
+		};
+
+		let mut server = Server::new(config).unwrap();
+		let socket_paths = server.socket_paths().clone();
+		let server_handle = thread::spawn(move || server.run());
+
+		thread::sleep(Duration::from_millis(50));
+
+		let conn = ClientConnection::connect(&socket_paths).unwrap();
+
+		// Send hello
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		let hello_json = serde_json::to_string(&ClientControl::Hello(hello)).unwrap();
+		conn.write_control(&hello_json).unwrap();
+
+		// Verify server responds with matching protocol version
+		let response = conn.read_control().unwrap().unwrap();
+		let server_msg: ServerControl = serde_json::from_str(&response).unwrap();
+
+		match server_msg {
+			ServerControl::Hello(server_hello) => {
+				assert_eq!(server_hello.protocol_version, PROTOCOL_VERSION);
+				assert_eq!(server_hello.session_id, session_name);
+			}
+			_ => panic!("Expected Hello response"),
+		}
+
+		thread::sleep(Duration::from_millis(100));
+		drop(conn.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()));
+
+		drop(server_handle.join());
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// Test server rejects clients with incompatible protocol version
+	#[test]
+	fn test_version_mismatch_rejected() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-ver-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("version")),
+			idle_timeout: Some(Duration::from_secs(5)),
+			mouse_hover_enabled: true,
+		};
+
+		let mut server = Server::new(config).unwrap();
+		let shutdown = server.shutdown_handle();
+		let socket_paths = server.socket_paths().clone();
+
+		let server_handle = thread::spawn(move || server.run());
+
+		thread::sleep(Duration::from_millis(50));
+
+		let conn = ClientConnection::connect(&socket_paths).unwrap();
+
+		// Send hello with incompatible version
+		let hello_json = serde_json::json!({
+				"type": "hello",
+				"protocol_version": 999,
+				"client_version": "99.0.0",
+				"term_size": { "cols": 80, "rows": 24 },
+				"env": {}
+		});
+		conn.write_control(&hello_json.to_string()).unwrap();
+
+		let response = conn.read_control().unwrap().unwrap();
+		let server_msg: ServerControl = serde_json::from_str(&response).unwrap();
+
+		assert!(matches!(server_msg, ServerControl::VersionMismatch(_)));
+
+		shutdown.store(true, Ordering::SeqCst);
+		drop(server_handle.join());
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// Test idle timeout causes server shutdown
+	#[test]
+	fn test_idle_timeout_triggers_shutdown() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-idle-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("idle")),
+			idle_timeout: Some(Duration::from_millis(50)), // Very short timeout
+			mouse_hover_enabled: true,
+		};
+
+		let mut server = Server::new(config).unwrap();
+
+		// Without any client connections, server should exit due to idle timeout
+		let result = server.run();
+		assert!(result.is_ok());
+
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// Test ping/pong keepalive
+	#[test]
+	#[cfg_attr(
+		windows,
+		ignore = "Windows named pipe handling needs further investigation for sustained connections"
+	)]
+	fn test_ping_pong_keepalive() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-ping-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("ping")),
+			idle_timeout: Some(Duration::from_secs(5)),
+			mouse_hover_enabled: true,
+		};
+
+		let mut server = Server::new(config).unwrap();
+		let socket_paths = server.socket_paths().clone();
+		let server_handle = thread::spawn(move || server.run());
+
+		thread::sleep(Duration::from_millis(50));
+
+		let conn = ClientConnection::connect(&socket_paths).unwrap();
+
+		// Handshake
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+		let _ = conn.read_control().unwrap();
+
+		thread::sleep(Duration::from_millis(100));
+
+		// Send ping
+		conn.write_control(&serde_json::to_string(&ClientControl::Ping).unwrap()).unwrap();
+
+		// Should receive pong
+		thread::sleep(Duration::from_millis(50));
+
+		// Due to non-blocking reads, we need to handle the response carefully
+		// The server processes ping and sends pong
+
+		drop(conn.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()));
+		drop(server_handle.join());
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// Test quit command triggers server shutdown
+	#[test]
+	#[cfg_attr(
+		windows,
+		ignore = "Windows named pipe handling needs further investigation for sustained connections"
+	)]
+	fn test_quit_command_shuts_down_server() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-quit-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("quit")),
+			idle_timeout: None, // No idle timeout
+			mouse_hover_enabled: true,
+		};
+
+		let mut server = Server::new(config).unwrap();
+		let socket_paths = server.socket_paths().clone();
+
+		let server_handle = thread::spawn(move || server.run());
+		thread::sleep(Duration::from_millis(50));
+
+		let conn = ClientConnection::connect(&socket_paths).unwrap();
+
+		// Handshake
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+		let _ = conn.read_control().unwrap();
+
+		thread::sleep(Duration::from_millis(100));
+
+		// Send quit - server should shutdown
+		conn.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()).unwrap();
+
+		// Server should exit
+		let result = server_handle.join().unwrap();
+		assert!(result.is_ok());
+
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// E2E test: Server signals readiness via PID file, client connects using semantic condition
+	///
+	/// This test verifies the cross-platform synchronization mechanism:
+	/// 1. Server writes PID file AFTER successfully binding to sockets
+	/// 2. Client waits for PID file with valid running PID (semantic condition)
+	/// 3. Client connects only after server is ready
+	///
+	/// No arbitrary sleeps - uses semantic signaling via PID file.
+	#[test]
+	fn test_pid_file_signals_server_readiness() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-pid-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let session_name = unique_session_name("pid-ready");
+
+		// Start server in background thread and get socket paths from it
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(session_name.clone()),
+			idle_timeout: Some(Duration::from_secs(5)),
+			mouse_hover_enabled: true,
+		};
+
+		// Use channel to get socket paths from server thread
+		let (paths_tx, paths_rx) = std::sync::mpsc::channel();
+
+		let server_handle = thread::spawn(move || {
+			let mut server = Server::new(config).unwrap();
+			let socket_paths = server.socket_paths().clone();
+			// Write PID file after bind (simulating EditorServer behavior)
+			socket_paths.write_pid(std::process::id()).unwrap();
+			// Send paths to waiting client
+			paths_tx.send(socket_paths).unwrap();
+			server.run()
+		});
+
+		// Get socket paths from server (this blocks until server sends them)
+		let socket_paths = paths_rx.recv().unwrap();
+
+		// PID file exists with valid running PID - server is ready
+		let pid = socket_paths.read_pid().unwrap().unwrap();
+		assert!(is_process_running(pid), "PID file should contain running process ID");
+
+		// Now we can connect reliably
+		let conn = ClientConnection::connect(&socket_paths);
+		assert!(conn.is_ok(), "Connection should succeed after PID file is ready: {:?}", conn.err());
+
+		let conn = conn.unwrap();
+
+		// Perform handshake
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+
+		let response = conn.read_control().unwrap().unwrap();
+		let server_msg: ServerControl = serde_json::from_str(&response).unwrap();
+
+		match server_msg {
+			ServerControl::Hello(server_hello) => {
+				assert_eq!(server_hello.protocol_version, PROTOCOL_VERSION);
+			}
+			other => panic!("Expected Hello, got {:?}", other),
+		}
+
+		// Give server time to process the handshake
+		thread::sleep(Duration::from_millis(50));
+
+		// Clean shutdown
+		drop(conn.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()));
+
+		drop(server_handle.join());
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// E2E test: Full client-server relay loop with data transmission
+	///
+	/// This test verifies the complete data flow:
+	/// 1. Server starts and accepts connection
+	/// 2. Client connects and completes handshake
+	/// 3. Server sends data through data pipe
+	/// 4. Client receives the data
+	///
+	/// This test reproduces issues with Windows named pipe mode toggling.
+	#[test]
+	fn test_client_receives_data_from_server() {
+		use crate::server::ipc::ServerListener;
+
+		let session_name = unique_session_name("relay");
+
+		// Get socket paths for this daemon
+		let socket_paths = SocketPaths::for_session_name(&session_name).unwrap();
+		drop(socket_paths.cleanup()); // Clean any existing
+
+		// Channel to signal when server is ready
+		let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+		// Channel to get server's connection for sending data
+		let (conn_tx, conn_rx) = std::sync::mpsc::channel();
+		// Channel to signal test completion
+		let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+
+		let paths_for_server = socket_paths.clone();
+		let session_for_server = session_name.clone();
+		let server_handle = thread::spawn(move || {
+			let mut listener = ServerListener::bind(paths_for_server.clone()).unwrap();
+			paths_for_server.write_pid(std::process::id()).unwrap();
+			ready_tx.send(()).unwrap();
+
+			// Accept one connection
+			let conn = loop {
+				match listener.accept() {
+					Ok(Some(conn)) => break conn,
+					Ok(None) => {
+						thread::yield_now();
+						continue;
+					}
+					Err(e) => panic!("Accept error: {}", e),
+				}
+			};
+
+			// Do handshake
+			let hello_json = conn.read_control().unwrap().unwrap();
+			let client_msg: ClientControl = serde_json::from_str(&hello_json).unwrap();
+
+			if let ClientControl::Hello(_hello) = client_msg {
+				let server_hello = ServerHello::new(session_for_server);
+				let response = serde_json::to_string(&ServerControl::Hello(server_hello)).unwrap();
+				conn.write_control(&response).unwrap();
+			} else {
+				panic!("Expected Hello, got {:?}", client_msg);
+			}
+
+			// Send connection to main test thread
+			conn_tx.send(conn).unwrap();
+
+			// Wait for test completion
+			done_rx.recv().unwrap();
+		});
+
+		// Wait for server to be ready
+		ready_rx.recv().unwrap();
+
+		// Connect client
+		let conn = ClientConnection::connect(&socket_paths).unwrap();
+
+		// Do client handshake
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+		let response = conn.read_control().unwrap().unwrap();
+		let _server_msg: ServerControl = serde_json::from_str(&response).unwrap();
+
+		// Get server connection
+		let server_conn = conn_rx.recv().unwrap();
+
+		// Server sends test data
+		let test_data = b"Hello from server!";
+		server_conn.write_data(test_data).unwrap();
+
+		// Client reads data using try_read (this is where Windows fails)
+		let mut buf = [0u8; 1024];
+		let mut attempts = 0;
+		let mut received = Vec::new();
+
+		loop {
+			match conn.data.try_read(&mut buf) {
+				Ok(0) => {
+					panic!("Connection closed unexpectedly");
+				}
+				Ok(n) => {
+					received.extend_from_slice(&buf[..n]);
+					if received.len() >= test_data.len() {
+						break;
+					}
+				}
+				Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+					attempts += 1;
+					if attempts > 100 {
+						panic!("Timeout waiting for data after {} attempts", attempts);
+					}
+					thread::sleep(Duration::from_millis(10));
+				}
+				Err(e) => {
+					panic!("Read error: {} (kind={:?}, raw={:?})", e, e.kind(), e.raw_os_error());
+				}
+			}
+		}
+
+		assert_eq!(&received[..test_data.len()], test_data);
+
+		// Signal server to finish and cleanup
+		done_tx.send(()).unwrap();
+		drop(server_handle.join());
+		drop(socket_paths.cleanup());
+	}
+
+	/// E2E test: Client waits for PID file before connecting (no sleep-based timing)
+	///
+	/// Tests the scenario where client starts before server is fully ready.
+	/// Client should poll for PID file existence rather than using arbitrary delays.
+	#[test]
+	fn test_client_waits_for_pid_file_not_timeout() {
+		let temp_dir = std::env::temp_dir().join(format!("dx-test-wait-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let session_name = unique_session_name("wait-pid");
+
+		// Get the socket paths that will be used (global socket dir)
+		let socket_paths = SocketPaths::for_session_name(&session_name).unwrap();
+
+		// Clean up any existing files
+		drop(socket_paths.cleanup());
+
+		// Verify no PID file exists initially
+		assert!(!socket_paths.pid.exists(), "PID file should not exist before server starts");
+
+		// Start client-side waiting BEFORE server starts
+		let paths_for_waiter = socket_paths.clone();
+		let waiter_handle = thread::spawn(move || {
+			// This simulates what run_attach_command does:
+			// Wait for PID file to appear with valid running PID
+			let mut iterations = 0;
+			loop {
+				if let Ok(Some(pid)) = paths_for_waiter.read_pid() {
+					if is_process_running(pid) {
+						return Some(pid); // Got the signal
+					}
+				}
+				thread::yield_now();
+				iterations += 1;
+				if iterations > 10_000_000 {
+					return None; // Timeout (for test safety)
+				}
+			}
+		});
+
+		// Give waiter thread time to start waiting
+		thread::yield_now();
+
+		// Now start server (after waiter is already waiting)
+		let config = ServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(session_name.clone()),
+			idle_timeout: Some(Duration::from_secs(5)),
+			mouse_hover_enabled: true,
+		};
+
+		let paths_for_cleanup = socket_paths.clone();
+		let server_handle = thread::spawn(move || {
+			let mut server = Server::new(config).unwrap();
+			server.socket_paths().write_pid(std::process::id()).unwrap();
+			server.run()
+		});
+
+		// Waiter should detect server readiness
+		let detected_pid = waiter_handle.join().unwrap();
+		assert!(detected_pid.is_some(), "Waiter should detect server PID");
+
+		// Connect and clean up
+		let conn = ClientConnection::connect(&paths_for_cleanup);
+		assert!(conn.is_ok(), "Should connect after detecting PID");
+
+		let conn = conn.unwrap();
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+		let _ = conn.read_control().unwrap();
+		conn.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()).unwrap();
+
+		drop(server_handle.join());
+		drop(paths_for_cleanup.cleanup());
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// E2E test using real EditorServer with full editor initialization
+	///
+	/// This test exercises the complete client-server flow:
+	/// 1. Starts real EditorServer (with Editor, CaptureBackend, LSP, plugins)
+	/// 2. Connects via real IPC (Unix sockets / Windows named pipes)
+	/// 3. Completes handshake with version negotiation
+	/// 4. Sends keystrokes through data pipe (simulating user input)
+	/// 5. Receives rendered output through data pipe
+	/// 6. Verifies editor state via output (e.g., typed text appears)
+	/// 7. Sends quit command and verifies clean shutdown
+	///
+	/// Uses background data drain threads to prevent deadlocks from
+	/// blocking pipe writes on Windows named pipes.
+	#[test]
+	fn test_full_editor_server_e2e() {
+		use crate::config::Config;
+		use crate::config_io::DirectoryContext;
+		use crate::server::editor_server::{EditorServer, EditorServerConfig};
+		use std::sync::mpsc;
+
+		eprintln!("[e2e] === START test_full_editor_server_e2e ===");
+
+		let temp_dir = std::env::temp_dir().join(format!("dx-e2e-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let session_name = unique_session_name("e2e-full");
+
+		let config = Config::default();
+		let dir_context = DirectoryContext::for_testing(&temp_dir);
+
+		let server_config = EditorServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(session_name.clone()),
+			idle_timeout: Some(Duration::from_secs(30)),
+			editor_config: config,
+			dir_context,
+			plugins_enabled: false,
+			init_enabled: false,
+			startup_authority: None,
+			workspace_trust: std::sync::Arc::new(
+				crate::services::workspace_trust::WorkspaceTrust::permissive(),
+			),
+			env_provider: std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			session_keepalive: None,
+		};
+
+		let (paths_tx, paths_rx) = mpsc::channel();
+		let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+		eprintln!("[e2e] Spawning server thread...");
+		// EditorServer must be created in the thread because Editor is not Send
+		let server_handle = thread::spawn(move || {
+			eprintln!("[e2e][server] Creating EditorServer...");
+			let mut server = EditorServer::new(server_config).unwrap();
+			eprintln!("[e2e][server] EditorServer created, sending paths...");
+			let socket_paths = server.socket_paths().clone();
+			let shutdown_handle = server.shutdown_handle();
+			paths_tx.send(socket_paths).unwrap();
+			shutdown_tx.send(shutdown_handle).unwrap();
+			eprintln!("[e2e][server] Calling server.run()...");
+			let result = server.run();
+			eprintln!("[e2e][server] server.run() returned: {:?}", result);
+			result
+		});
+
+		eprintln!("[e2e] Waiting for paths from server thread...");
+		let socket_paths = paths_rx.recv().unwrap();
+		let shutdown_handle = shutdown_rx.recv().unwrap();
+		eprintln!("[e2e] Got paths. PID file: {:?}", socket_paths.pid);
+
+		// Wait for server to be ready (PID file signals readiness)
+		while !socket_paths.pid.exists() || socket_paths.read_pid().ok().flatten().is_none() {
+			thread::yield_now();
+		}
+		eprintln!("[e2e] PID file ready");
+
+		// Connect client 1
+		eprintln!("[e2e] Connecting client...");
+		let conn = ClientConnection::connect(&socket_paths).expect("Failed to connect to server");
+		eprintln!("[e2e] Client connected.");
+
+		// Perform handshake
+		eprintln!("[e2e] Sending Hello...");
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+		eprintln!("[e2e] Hello sent, reading response...");
+
+		let response = conn.read_control().unwrap().unwrap();
+		eprintln!("[e2e] Got server Hello response.");
+		let server_msg: ServerControl = serde_json::from_str(&response).unwrap();
+
+		match server_msg {
+			ServerControl::Hello(server_hello) => {
+				assert_eq!(server_hello.protocol_version, PROTOCOL_VERSION);
+				assert_eq!(server_hello.session_id, session_name);
+			}
+			other => panic!("Expected Hello, got {:?}", other),
+		}
+
+		// Wait for initial render output (semantic: wait for ANSI escape sequences)
+		// Server uses ClientDataWriter background thread for non-blocking writes
+		let mut output1 = Vec::new();
+		eprintln!("[e2e] Waiting for initial render output...");
+		read_until_contains(&conn, &mut output1, "\x1b[");
+		eprintln!("[e2e] Initial render received: {} bytes", output1.len());
+
+		// Send keystrokes and wait for them to appear in the render
+		eprintln!("[e2e] Sending 'hello' keystrokes...");
+		conn.write_data(b"hello").unwrap();
+		eprintln!("[e2e] Waiting for 'hello' to appear in render...");
+		read_until_contains(&conn, &mut output1, "hello");
+		eprintln!("[e2e] Typed text appeared in render: {} bytes total", output1.len());
+
+		// Test detach command
+		eprintln!("[e2e] Sending Detach...");
+		conn.write_control(&serde_json::to_string(&ClientControl::Detach).unwrap()).unwrap();
+
+		// Wait for server to process detach (it sends teardown sequences)
+		// The alternate screen teardown includes ESC[?1049l
+		eprintln!("[e2e] Waiting for teardown sequences...");
+		read_until_contains(&conn, &mut output1, "\x1b[?1049l");
+		eprintln!("[e2e] Teardown received, detach complete.");
+
+		// Server should still be running after detach - reconnect
+		eprintln!("[e2e] Reconnecting second client after detach...");
+		let conn2 = ClientConnection::connect(&socket_paths).expect("Should reconnect after detach");
+		eprintln!("[e2e] Second client connected.");
+
+		// Handshake again
+		eprintln!("[e2e] Sending Hello from second client...");
+		let hello2 = ClientHello::new(TermSize::new(80, 24));
+		conn2.write_control(&serde_json::to_string(&ClientControl::Hello(hello2)).unwrap()).unwrap();
+		eprintln!("[e2e] Reading second Hello response...");
+
+		let response2 = conn2.read_control().unwrap().unwrap();
+		eprintln!("[e2e] Got second Hello response.");
+		let server_msg2: ServerControl = serde_json::from_str(&response2).unwrap();
+		assert!(matches!(server_msg2, ServerControl::Hello(_)), "Should get Hello after reconnect");
+
+		// Wait for render output on reconnected client
+		let mut output2 = Vec::new();
+		eprintln!("[e2e] Waiting for render on reconnected client...");
+		read_until_contains(&conn2, &mut output2, "\x1b[");
+		eprintln!("[e2e] Reconnected client got render: {} bytes", output2.len());
+
+		// Send quit to shut down
+		eprintln!("[e2e] Sending Quit...");
+		conn2.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()).unwrap();
+		eprintln!("[e2e] Quit sent, setting shutdown flag...");
+
+		shutdown_handle.store(true, Ordering::SeqCst);
+		eprintln!("[e2e] Joining server thread...");
+		let result = server_handle.join().unwrap();
+		eprintln!("[e2e] Server thread joined: {:?}", result);
+		assert!(result.is_ok(), "Server should exit cleanly: {:?}", result);
+
+		drop(socket_paths.cleanup());
+		std::fs::remove_dir_all(&temp_dir).ok();
+		eprintln!("[e2e] === END test_full_editor_server_e2e ===");
+	}
+
+	/// E2E test: Second client connecting gets full screen render
+	///
+	/// This test verifies that when a second client connects while the first
+	/// is still connected, the second client receives a complete screen render
+	/// (not just diffs).
+	///
+	/// Uses background data drain threads to prevent deadlocks from
+	/// blocking pipe writes on Windows named pipes.
+	#[test]
+	fn test_second_client_gets_full_screen() {
+		use crate::config::Config;
+		use crate::config_io::DirectoryContext;
+		use crate::server::editor_server::{EditorServer, EditorServerConfig};
+		use std::sync::mpsc;
+
+		eprintln!("[multi] === START test_second_client_gets_full_screen ===");
+
+		let temp_dir = std::env::temp_dir().join(format!("dx-e2e-multi-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let session_name = unique_session_name("e2e-multi-client");
+
+		let config = Config::default();
+		let dir_context = DirectoryContext::for_testing(&temp_dir);
+
+		let server_config = EditorServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(session_name.clone()),
+			idle_timeout: Some(Duration::from_secs(30)),
+			editor_config: config,
+			dir_context,
+			plugins_enabled: false,
+			init_enabled: false,
+			startup_authority: None,
+			workspace_trust: std::sync::Arc::new(
+				crate::services::workspace_trust::WorkspaceTrust::permissive(),
+			),
+			env_provider: std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			session_keepalive: None,
+		};
+
+		let (paths_tx, paths_rx) = mpsc::channel();
+		let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+		eprintln!("[multi] Spawning server thread...");
+		let server_handle = thread::spawn(move || {
+			eprintln!("[multi][server] Creating EditorServer...");
+			let mut server = EditorServer::new(server_config).unwrap();
+			eprintln!("[multi][server] EditorServer created, sending paths...");
+			let socket_paths = server.socket_paths().clone();
+			let shutdown_handle = server.shutdown_handle();
+			paths_tx.send(socket_paths).unwrap();
+			shutdown_tx.send(shutdown_handle).unwrap();
+			eprintln!("[multi][server] Calling server.run()...");
+			let result = server.run();
+			eprintln!("[multi][server] server.run() returned: {:?}", result);
+			result
+		});
+
+		let socket_paths = paths_rx.recv().unwrap();
+		let shutdown_handle = shutdown_rx.recv().unwrap();
+		eprintln!("[multi] Got paths.");
+
+		// Wait for server readiness
+		while !socket_paths.pid.exists() || socket_paths.read_pid().ok().flatten().is_none() {
+			thread::yield_now();
+		}
+		eprintln!("[multi] PID file ready");
+
+		// === First client connects ===
+		eprintln!("[multi] Connecting first client...");
+		let conn1 = ClientConnection::connect(&socket_paths).expect("First client failed to connect");
+		eprintln!("[multi] First client connected.");
+
+		eprintln!("[multi] Sending Hello from first client...");
+		let hello1 = ClientHello::new(TermSize::new(80, 24));
+		conn1.write_control(&serde_json::to_string(&ClientControl::Hello(hello1)).unwrap()).unwrap();
+		eprintln!("[multi] Reading first Hello response...");
+
+		let response1 = conn1.read_control().unwrap().unwrap();
+		eprintln!("[multi] Got first Hello response.");
+		assert!(
+			matches!(serde_json::from_str::<ServerControl>(&response1).unwrap(), ServerControl::Hello(_)),
+			"First client should get Hello"
+		);
+
+		// Wait for initial render (semantic: wait for ANSI sequences)
+		// Server uses ClientDataWriter background thread for non-blocking writes
+		let mut output1 = Vec::new();
+		eprintln!("[multi] Waiting for first client initial render...");
+		read_until_contains(&conn1, &mut output1, "\x1b[");
+		eprintln!("[multi] First client initial render: {} bytes", output1.len());
+
+		// First client types something to create content
+		eprintln!("[multi] First client typing 'HELLO_WORLD'...");
+		conn1.write_data(b"HELLO_WORLD").unwrap();
+
+		// Wait for typed text to appear in render (semantic)
+		eprintln!("[multi] Waiting for 'HELLO_WORLD' to appear in client 1 render...");
+		read_until_contains(&conn1, &mut output1, "HELLO_WORLD");
+		eprintln!("[multi] HELLO_WORLD appeared in client 1 render: {} bytes total", output1.len());
+
+		// === Second client connects while first is still connected ===
+		// Server's ClientDataWriter ensures writes to client 1 don't block the main loop,
+		// so the server can accept client 2's connection concurrently.
+		eprintln!("[multi] Connecting second client...");
+		let conn2 = ClientConnection::connect(&socket_paths).expect("Second client failed to connect");
+		eprintln!("[multi] Second client connected.");
+
+		eprintln!("[multi] Sending Hello from second client...");
+		let hello2 = ClientHello::new(TermSize::new(80, 24));
+		conn2.write_control(&serde_json::to_string(&ClientControl::Hello(hello2)).unwrap()).unwrap();
+		eprintln!("[multi] Reading second Hello response...");
+
+		let response2 = conn2.read_control().unwrap().unwrap();
+		eprintln!("[multi] Got second Hello response.");
+		assert!(
+			matches!(serde_json::from_str::<ServerControl>(&response2).unwrap(), ServerControl::Hello(_)),
+			"Second client should get Hello"
+		);
+
+		// Wait for second client to receive full render with HELLO_WORLD (semantic)
+		let mut output2 = Vec::new();
+		eprintln!("[multi] Waiting for 'HELLO_WORLD' to appear in client 2 render...");
+		read_until_contains(&conn2, &mut output2, "HELLO_WORLD");
+
+		let client2_str = String::from_utf8_lossy(&output2);
+
+		eprintln!(
+			"[multi] Second client received {} bytes, contains HELLO_WORLD: {}",
+			output2.len(),
+			client2_str.contains("HELLO_WORLD")
+		);
+
+		// A full 80x24 render should be substantial (at least 500 bytes with escape sequences)
+		assert!(
+			output2.len() > 500,
+			"Second client should receive substantial output (full render), but only got {} bytes",
+			output2.len()
+		);
+
+		// Cleanup
+		eprintln!("[multi] Setting shutdown flag...");
+		shutdown_handle.store(true, Ordering::SeqCst);
+		eprintln!("[multi] Joining server thread...");
+		drop(server_handle.join());
+		eprintln!("[multi] Server thread joined.");
+		drop(socket_paths.cleanup());
+		std::fs::remove_dir_all(&temp_dir).ok();
+		eprintln!("[multi] === END test_second_client_gets_full_screen ===");
+	}
+
+	// ===========================================================================
+	// E2E regression tests for issue #1089:
+	//   "Mouse codes after pressing Escape"
+	//
+	// These tests start a real EditorServer, connect via IPC, send raw terminal
+	// byte sequences, and verify the editor renders correctly — ensuring escape
+	// codes don't leak into the document as literal text.
+	// ===========================================================================
+
+	/// Helper: start an EditorServer, connect a client, wait for initial render.
+	/// Returns (client_conn, accumulated_output, shutdown_handle, server_thread, socket_paths, temp_dir).
+	fn setup_editor_server_e2e(
+		test_name: &str,
+	) -> (
+		ClientConnection,
+		Vec<u8>,
+		std::sync::Arc<std::sync::atomic::AtomicBool>,
+		thread::JoinHandle<std::io::Result<()>>,
+		SocketPaths,
+		std::path::PathBuf,
+	) {
+		use crate::config::Config;
+		use crate::config_io::DirectoryContext;
+		use crate::server::editor_server::{EditorServer, EditorServerConfig};
+		use std::sync::mpsc;
+
+		let temp_dir =
+			std::env::temp_dir().join(format!("dx-e2e-{}-{}", test_name, std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let session_name = unique_session_name(test_name);
+		let config = Config::default();
+		let dir_context = DirectoryContext::for_testing(&temp_dir);
+
+		let server_config = EditorServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(session_name),
+			idle_timeout: Some(Duration::from_secs(30)),
+			editor_config: config,
+			dir_context,
+			plugins_enabled: false,
+			init_enabled: false,
+			startup_authority: None,
+			workspace_trust: std::sync::Arc::new(
+				crate::services::workspace_trust::WorkspaceTrust::permissive(),
+			),
+			env_provider: std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			session_keepalive: None,
+		};
+
+		let (paths_tx, paths_rx) = mpsc::channel();
+		let (shutdown_tx, shutdown_rx) = mpsc::channel();
+
+		let server_handle = thread::spawn(move || {
+			let mut server = EditorServer::new(server_config).unwrap();
+			let socket_paths = server.socket_paths().clone();
+			let shutdown_handle = server.shutdown_handle();
+			paths_tx.send(socket_paths).unwrap();
+			shutdown_tx.send(shutdown_handle).unwrap();
+			server.run()
+		});
+
+		let socket_paths = paths_rx.recv().unwrap();
+		let shutdown_handle = shutdown_rx.recv().unwrap();
+
+		// Wait for PID file
+		while !socket_paths.pid.exists() || socket_paths.read_pid().ok().flatten().is_none() {
+			thread::yield_now();
+		}
+
+		// Connect
+		let conn = ClientConnection::connect(&socket_paths).expect("Failed to connect");
+		let hello = ClientHello::new(TermSize::new(80, 24));
+		conn.write_control(&serde_json::to_string(&ClientControl::Hello(hello)).unwrap()).unwrap();
+		let response = conn.read_control().unwrap().unwrap();
+		assert!(matches!(
+			serde_json::from_str::<ServerControl>(&response).unwrap(),
+			ServerControl::Hello(_)
+		));
+
+		// Wait for initial render
+		let mut output = Vec::new();
+		read_until_contains(&conn, &mut output, "\x1b[");
+
+		(conn, output, shutdown_handle, server_handle, socket_paths, temp_dir)
+	}
+
+	/// Helper: shut down the server cleanly
+	fn teardown_editor_server_e2e(
+		conn: ClientConnection,
+		shutdown_handle: std::sync::Arc<std::sync::atomic::AtomicBool>,
+		server_handle: thread::JoinHandle<std::io::Result<()>>,
+		socket_paths: SocketPaths,
+		temp_dir: std::path::PathBuf,
+	) {
+		drop(conn.write_control(&serde_json::to_string(&ClientControl::Quit).unwrap()));
+		shutdown_handle.store(true, Ordering::SeqCst);
+		drop(server_handle.join());
+		drop(socket_paths.cleanup());
+		std::fs::remove_dir_all(&temp_dir).ok();
+	}
+
+	/// Parse accumulated ANSI output through a VT100 terminal emulator
+	/// and return the visible screen text (all rows joined by newlines).
+	fn vt100_screen_text(output: &[u8]) -> String {
+		let mut parser = vt100::Parser::new(24, 80, 0);
+		parser.process(output);
+		let screen = parser.screen();
+		let mut result = String::new();
+		for row in 0..24 {
+			for col in 0..80 {
+				let cell = screen.cell(row, col);
+				if let Some(cell) = cell {
+					result.push_str(&cell.contents());
+				} else {
+					result.push(' ');
+				}
+			}
+			if row < 23 {
+				result.push('\n');
+			}
+		}
+		result
+	}
+
+	/// E2E regression test for issue #1089:
+	/// ESC followed by mouse event should NOT insert mouse codes as text.
+	///
+	/// Reproduces: user presses Escape, then moves mouse →
+	/// raw codes like `[<35;67;18M` appear in the document.
+	#[test]
+	fn test_esc_then_mouse_does_not_insert_codes() {
+		let (conn, mut output, shutdown_handle, server_handle, socket_paths, temp_dir) =
+			setup_editor_server_e2e("esc-mouse");
+
+		// Send ESC (0x1b) followed by mouse motion event (SGR format)
+		// This is the exact sequence: user presses Escape, then moves mouse.
+		// The mouse event is: CSI < 35 ; 10 ; 5 M  (motion, no button, at col 10 row 5)
+		conn.write_data(b"\x1b\x1b[<35;10;5M").unwrap();
+
+		// Now type a known marker so we can wait for the server to have processed everything
+		conn.write_data(b"MARKER_OK").unwrap();
+
+		// Wait for the marker to appear in the render
+		read_until_contains(&conn, &mut output, "MARKER_OK");
+
+		// Parse all output through VT100 to get the visible screen text
+		let screen = vt100_screen_text(&output);
+
+		// The screen should contain our marker text
+		assert!(screen.contains("MARKER_OK"), "Screen should contain marker text");
+
+		// The screen should NOT contain literal mouse code fragments
+		assert!(
+			!screen.contains("<35;10;5M"),
+			"Mouse code '<35;10;5M' should NOT appear as literal text on screen.\nScreen:\n{}",
+			screen
+		);
+		// Also check for partial fragments that would appear if ESC was consumed separately
+		assert!(
+			!screen.contains("[<35"),
+			"Partial mouse code '[<35' should NOT appear as literal text.\nScreen:\n{}",
+			screen
+		);
+
+		teardown_editor_server_e2e(conn, shutdown_handle, server_handle, socket_paths, temp_dir);
+	}
+
+	/// E2E regression test for issue #1089:
+	/// Shift+Tab (CSI Z) should NOT insert `[Z` as literal text.
+	#[test]
+	fn test_shift_tab_does_not_insert_bracket_z() {
+		let (conn, mut output, shutdown_handle, server_handle, socket_paths, temp_dir) =
+			setup_editor_server_e2e("shift-tab");
+
+		// Type some text first so we can verify the buffer state
+		conn.write_data(b"hello").unwrap();
+		read_until_contains(&conn, &mut output, "hello");
+
+		// Send Shift+Tab: CSI Z = ESC [ Z
+		conn.write_data(b"\x1b[Z").unwrap();
+
+		// Send marker
+		conn.write_data(b"WORLD").unwrap();
+		read_until_contains(&conn, &mut output, "WORLD");
+
+		let screen = vt100_screen_text(&output);
+
+		// Should have the typed text
+		assert!(screen.contains("WORLD"), "Screen should contain 'WORLD'");
+
+		// Should NOT have literal [Z from a mis-parsed Shift+Tab
+		// If the bug exists, after "hello" we'd see "[Z" inserted before "WORLD"
+		assert!(
+			!screen.contains("[Z"),
+			"Shift+Tab should NOT insert literal '[Z' on screen.\nScreen:\n{}",
+			screen
+		);
+
+		teardown_editor_server_e2e(conn, shutdown_handle, server_handle, socket_paths, temp_dir);
+	}
+
+	/// E2E regression test for issue #1089:
+	/// ESC buffered, then CSI arrow key arrives — should produce Escape + arrow,
+	/// not Alt+Escape + literal characters.
+	#[test]
+	fn test_esc_then_arrow_key_does_not_insert_codes() {
+		let (conn, mut output, shutdown_handle, server_handle, socket_paths, temp_dir) =
+			setup_editor_server_e2e("esc-arrow");
+
+		// Type text first
+		conn.write_data(b"hello").unwrap();
+		read_until_contains(&conn, &mut output, "hello");
+
+		// Send ESC then Down arrow (CSI B = ESC [ B)
+		// If the bug exists, ESC+ESC would be consumed as Alt+Esc,
+		// and then [B would be inserted as literal text
+		conn.write_data(b"\x1b\x1b[B").unwrap();
+
+		// Send marker
+		conn.write_data(b"AFTER").unwrap();
+		read_until_contains(&conn, &mut output, "AFTER");
+
+		let screen = vt100_screen_text(&output);
+
+		// Should NOT have literal [B from the mis-parsed arrow key
+		assert!(
+			!screen.contains("[B"),
+			"Arrow key escape code '[B' should NOT appear as literal text.\nScreen:\n{}",
+			screen
+		);
+
+		teardown_editor_server_e2e(conn, shutdown_handle, server_handle, socket_paths, temp_dir);
+	}
+
+	/// Poll the control socket (non-blocking) for newline-delimited JSON messages.
+	/// Appends to `ctrl_buf` across calls to handle partial reads.
+	/// Returns parsed lines (may be empty if no complete line is available yet).
+	fn poll_control_lines(conn: &ClientConnection, ctrl_buf: &mut Vec<u8>) -> Vec<String> {
+		let mut tmp = [0u8; 4096];
+		loop {
+			match conn.control.try_read(&mut tmp) {
+				Ok(0) => break,
+				Ok(n) => ctrl_buf.extend_from_slice(&tmp[..n]),
+				Err(_) => break,
+			}
+		}
+		// Extract complete newline-delimited lines
+		let mut lines = Vec::new();
+		while let Some(pos) = ctrl_buf.iter().position(|&b| b == b'\n') {
+			let line: Vec<u8> = ctrl_buf.drain(..=pos).collect();
+			if let Ok(s) = String::from_utf8(line) {
+				lines.push(s);
+			}
+		}
+		lines
+	}
+
+	/// Wait (with timeout) for a control message matching the predicate.
+	/// Drains and ignores non-matching messages.
+	fn wait_for_control<F, T>(
+		conn: &ClientConnection,
+		ctrl_buf: &mut Vec<u8>,
+		timeout: Duration,
+		mut pred: F,
+	) -> Option<T>
+	where
+		F: FnMut(&ServerControl) -> Option<T>,
+	{
+		let deadline = std::time::Instant::now() + timeout;
+		// Must set non-blocking so poll_control_lines doesn't hang
+		#[allow(clippy::let_underscore_must_use)]
+		let _ = conn.control.set_nonblocking(true);
+		loop {
+			for line in poll_control_lines(conn, ctrl_buf) {
+				if let Ok(ctrl) = serde_json::from_str::<ServerControl>(&line) {
+					if let Some(val) = pred(&ctrl) {
+						return Some(val);
+					}
+				}
+			}
+			if std::time::Instant::now() >= deadline {
+				return None;
+			}
+			thread::sleep(Duration::from_millis(5));
+		}
+	}
+
+	/// E2E test: Copy in session mode sends SetClipboard control message to client
+	///
+	/// Verifies the full clipboard path in client-server mode:
+	/// 1. Editor runs in session mode (clipboard.session_mode = true)
+	/// 2. User types text, selects it, and copies (Ctrl+A, Ctrl+C)
+	/// 3. Clipboard queues a PendingClipboard instead of writing to stdout
+	/// 4. Server main loop picks it up and broadcasts SetClipboard control message
+	/// 5. Client receives SetClipboard with the correct text and config flags
+	#[test]
+	fn test_copy_sends_set_clipboard_control_message() {
+		let (conn, mut output, shutdown_handle, server_handle, socket_paths, temp_dir) =
+			setup_editor_server_e2e("clipboard-ctrl");
+
+		// Type some text
+		conn.write_data(b"CLIPTEST").unwrap();
+		read_until_contains(&conn, &mut output, "CLIPTEST");
+
+		// Buffer for accumulating partial control reads
+		let mut ctrl_buf = Vec::new();
+
+		// Select all (Ctrl+A = 0x01)
+		conn.write_data(&[0x01]).unwrap();
+
+		// Sync: ping/pong round-trip to ensure select-all has been processed
+		conn.write_control(&serde_json::to_string(&ClientControl::Ping).unwrap()).unwrap();
+
+		wait_for_control(&conn, &mut ctrl_buf, Duration::from_secs(5), |ctrl| {
+			matches!(ctrl, ServerControl::Pong).then_some(())
+		})
+		.expect("Timed out waiting for Pong after Ctrl+A");
+
+		// Copy (Ctrl+C = 0x03)
+		conn.write_data(&[0x03]).unwrap();
+
+		// Wait for SetClipboard control message
+		let (text, use_osc52, use_sys) =
+			wait_for_control(&conn, &mut ctrl_buf, Duration::from_secs(5), |ctrl| match ctrl {
+				ServerControl::SetClipboard { text, use_osc52, use_system_clipboard } => {
+					Some((text.clone(), *use_osc52, *use_system_clipboard))
+				}
+				_ => None,
+			})
+			.expect("Timed out waiting for SetClipboard control message after Ctrl+C copy");
+
+		assert_eq!(text, "CLIPTEST", "SetClipboard should contain the copied text");
+		assert!(use_osc52, "use_osc52 should be true by default");
+		assert!(use_sys, "use_system_clipboard should be true by default");
+
+		// Restore blocking mode before teardown writes Quit
+		#[allow(clippy::let_underscore_must_use)]
+		let _ = conn.control.set_nonblocking(false);
+
+		teardown_editor_server_e2e(conn, shutdown_handle, server_handle, socket_paths, temp_dir);
+	}
+
+	/// Authority transitions in session mode must rebuild the editor in
+	/// place (not shut the daemon down).  This test drives the rebuild
+	/// path directly against an `EditorServer`, without running the
+	/// full event loop — it's enough to assert the public contract: the
+	/// Editor instance is replaced, `current_authority` tracks the new
+	/// authority, and `should_quit` is cleared so the main loop
+	/// wouldn't shut down on the next tick.
+	#[test]
+	fn test_session_rebuild_swaps_editor_and_authority() {
+		use crate::config::Config;
+		use crate::config_io::DirectoryContext;
+		use crate::server::editor_server::{EditorServer, EditorServerConfig};
+		use crate::services::authority::{
+			Authority, AuthorityPayload, FilesystemSpec, SpawnerSpec, TerminalWrapperSpec,
+		};
+
+		let temp_dir = std::env::temp_dir().join(format!("dx-rebuild-test-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+
+		let dir_context = DirectoryContext::for_testing(&temp_dir);
+		let server_config = EditorServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("rebuild")),
+			idle_timeout: Some(Duration::from_secs(30)),
+			editor_config: Config::default(),
+			dir_context,
+			plugins_enabled: false,
+			init_enabled: false,
+			startup_authority: None,
+			workspace_trust: std::sync::Arc::new(
+				crate::services::workspace_trust::WorkspaceTrust::permissive(),
+			),
+			env_provider: std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			session_keepalive: None,
+		};
+
+		// `Editor` isn't `Send`, so construction + rebuild must happen
+		// on the same thread.  Wrap the whole assertion block in a
+		// spawned thread to avoid smuggling the server across `await`
+		// points; use a channel to propagate the test result out.
+		let handle = thread::spawn(move || -> Result<(), String> {
+			let mut server =
+				EditorServer::new(server_config).map_err(|e| format!("EditorServer::new: {e}"))?;
+
+			// Pretend a client has connected — `initialize_editor`
+			// doesn't actually need one, it only needs the term_size
+			// to have been written.
+			server.initialize_editor().map_err(|e| format!("initialize_editor: {e}"))?;
+
+			// Sanity: we booted with a local authority.
+			let label_before =
+				server.editor().expect("editor after init").authority().display_label.clone();
+			if !label_before.is_empty() {
+				return Err(format!("expected empty label, got {:?}", label_before));
+			}
+
+			// Build a container-style authority via the plugin payload
+			// path, to exercise the same code plugins hit.
+			let payload = AuthorityPayload {
+				filesystem: FilesystemSpec::Local,
+				spawner: SpawnerSpec::DockerExec {
+					container_id: "deadbeef".into(),
+					user: Some("vscode".into()),
+					workspace: Some("/workspaces/proj".into()),
+					env: Vec::new(),
+				},
+				terminal_wrapper: TerminalWrapperSpec::Explicit {
+					command: "docker".into(),
+					args: vec!["exec".into(), "-it".into(), "deadbeef".into(), "bash".into()],
+					manages_cwd: true,
+				},
+				display_label: "Container:deadbeef".into(),
+				path_translation: None,
+			};
+			let new_auth = Authority::from_plugin_payload(
+				payload,
+				std::sync::Arc::new(crate::services::workspace_trust::WorkspaceTrust::permissive()),
+				std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			)
+			.map_err(|e| format!("from_plugin_payload: {e}"))?;
+
+			// Capture the pre-rebuild editor's address.  We can't
+			// compare `Editor` by identity directly (it moves), but the
+			// `authority()` pointer is a Arc so it should change.
+			// Snapshot the filesystem Arc via strong_count parity:
+			// after rebuild the old editor is gone, so any Arc it
+			// uniquely held is dropped. We keep a clone to compare.
+			let before_filesystem =
+				server.editor().expect("editor before rebuild").authority().filesystem.clone();
+
+			server
+				.rebuild_editor(None, Some(new_auth), None)
+				.map_err(|e| format!("rebuild_editor: {e}"))?;
+
+			// After rebuild: new editor exists, carries the new label.
+			let editor = server.editor().expect("editor after rebuild");
+			if editor.authority().display_label != "Container:deadbeef" {
+				return Err(format!(
+					"expected Container:deadbeef label, got {:?}",
+					editor.authority().display_label
+				));
+			}
+			if editor.should_quit() {
+				return Err("rebuilt editor still has should_quit=true".into());
+			}
+			// The pre-rebuild filesystem Arc should now only be held
+			// by our local clone (strong_count == 1) because the old
+			// editor was dropped. If it were still referenced by the
+			// new editor, the count would be >= 2.
+			let remaining = std::sync::Arc::strong_count(&before_filesystem);
+			if remaining != 1 {
+				return Err(format!(
+					"expected pre-rebuild filesystem Arc to be unique after rebuild; strong_count={}",
+					remaining
+				));
+			}
+
+			Ok(())
+		});
+
+		let result = handle.join().expect("rebuild test thread panicked");
+		std::fs::remove_dir_all(&temp_dir).ok();
+		result.expect("rebuild test failed");
+	}
+
+	/// Working-directory changes (the "switch project root" flow) must
+	/// also rebuild in place under session mode.  Mirrors the authority
+	/// test above but with the working_dir slot instead.
+	#[test]
+	fn test_session_rebuild_switches_working_dir() {
+		use crate::config::Config;
+		use crate::config_io::DirectoryContext;
+		use crate::server::editor_server::{EditorServer, EditorServerConfig};
+
+		let parent = std::env::temp_dir().join(format!("dx-rebuild-cwd-{}", std::process::id()));
+		let dir_a = parent.join("project_a");
+		let dir_b = parent.join("project_b");
+		std::fs::create_dir_all(&dir_a).unwrap();
+		std::fs::create_dir_all(&dir_b).unwrap();
+
+		let dir_context = DirectoryContext::for_testing(&parent);
+		let server_config = EditorServerConfig {
+			working_dir: dir_a.clone(),
+			session_name: Some(unique_session_name("rebuild-cwd")),
+			idle_timeout: Some(Duration::from_secs(30)),
+			editor_config: Config::default(),
+			dir_context,
+			plugins_enabled: false,
+			init_enabled: false,
+			startup_authority: None,
+			workspace_trust: std::sync::Arc::new(
+				crate::services::workspace_trust::WorkspaceTrust::permissive(),
+			),
+			env_provider: std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			session_keepalive: None,
+		};
+
+		let dir_b_clone = dir_b.clone();
+		let handle = thread::spawn(move || -> Result<(), String> {
+			let mut server =
+				EditorServer::new(server_config).map_err(|e| format!("EditorServer::new: {e}"))?;
+
+			server.initialize_editor().map_err(|e| format!("initialize_editor: {e}"))?;
+
+			server
+				.rebuild_editor(Some(dir_b_clone.clone()), None, None)
+				.map_err(|e| format!("rebuild_editor: {e}"))?;
+
+			let editor = server.editor().expect("editor after rebuild");
+			if editor.should_quit() {
+				return Err("rebuilt editor still has should_quit=true".into());
+			}
+			let current = editor.working_dir();
+			// working_dir may canonicalize — compare via canonical form.
+			let want = dir_b_clone.canonicalize().unwrap_or_else(|_| dir_b_clone.clone());
+			if current != want {
+				return Err(format!("expected working_dir {}, got {}", want.display(), current.display()));
+			}
+			Ok(())
+		});
+
+		let result = handle.join().expect("cwd-rebuild thread panicked");
+		std::fs::remove_dir_all(&parent).ok();
+		result.expect("cwd-rebuild test failed");
+	}
+
+	/// `EditorServerConfig.startup_authority` lets a caller (notably
+	/// the `ssh://` / `user@host:path` CLI forms) hand the daemon a
+	/// non-local authority to boot into.  The paired
+	/// `session_keepalive` must live as long as the server so remote
+	/// resources — SSH runtimes, reconnect tasks — don't get dropped
+	/// mid-flight.  This test drives both contracts without a live
+	/// SSH connection: a plugin-style docker-exec authority stands
+	/// in for "something non-local", and a keepalive that drops an
+	/// `Arc<AtomicBool>` to `true` proves the server retained it.
+	#[test]
+	fn test_server_boots_with_startup_authority_and_keeps_keepalive() {
+		use crate::config::Config;
+		use crate::config_io::DirectoryContext;
+		use crate::server::editor_server::{EditorServer, EditorServerConfig};
+		use crate::services::authority::{
+			Authority, AuthorityPayload, FilesystemSpec, SpawnerSpec, TerminalWrapperSpec,
+		};
+		use std::sync::Arc;
+		use std::sync::atomic::{AtomicBool, Ordering as AOrdering};
+
+		let temp_dir = std::env::temp_dir().join(format!("dx-startup-auth-{}", std::process::id()));
+		std::fs::create_dir_all(&temp_dir).unwrap();
+		let dir_context = DirectoryContext::for_testing(&temp_dir);
+
+		let payload = AuthorityPayload {
+			filesystem: FilesystemSpec::Local,
+			spawner: SpawnerSpec::DockerExec {
+				container_id: "cafef00d".into(),
+				user: None,
+				workspace: None,
+				env: Vec::new(),
+			},
+			terminal_wrapper: TerminalWrapperSpec::Explicit {
+				command: "docker".into(),
+				args: vec!["exec".into(), "-it".into(), "cafef00d".into(), "bash".into()],
+				manages_cwd: true,
+			},
+			display_label: "Container:cafef00d".into(),
+			path_translation: None,
+		};
+		let startup_auth = Authority::from_plugin_payload(
+			payload,
+			std::sync::Arc::new(crate::services::workspace_trust::WorkspaceTrust::permissive()),
+			std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+		)
+		.expect("docker payload is valid");
+
+		// Sentinel for the keepalive: flipped to `true` when the
+		// wrapper is dropped.  While the server holds it, the flag
+		// stays `false`.
+		struct DropFlag(Arc<AtomicBool>);
+		impl Drop for DropFlag {
+			fn drop(&mut self) {
+				self.0.store(true, AOrdering::SeqCst);
+			}
+		}
+		let dropped = Arc::new(AtomicBool::new(false));
+		let keepalive: Box<dyn std::any::Any + Send> = Box::new(DropFlag(dropped.clone()));
+
+		let server_config = EditorServerConfig {
+			working_dir: temp_dir.clone(),
+			session_name: Some(unique_session_name("startup-auth")),
+			idle_timeout: Some(Duration::from_secs(30)),
+			editor_config: Config::default(),
+			dir_context,
+			plugins_enabled: false,
+			init_enabled: false,
+			startup_authority: Some(startup_auth),
+			workspace_trust: std::sync::Arc::new(
+				crate::services::workspace_trust::WorkspaceTrust::permissive(),
+			),
+			env_provider: std::sync::Arc::new(crate::services::env_provider::EnvProvider::inactive()),
+			session_keepalive: Some(keepalive),
+		};
+
+		let dropped_for_thread = dropped.clone();
+		let handle = thread::spawn(move || -> Result<(), String> {
+			let mut server =
+				EditorServer::new(server_config).map_err(|e| format!("EditorServer::new: {e}"))?;
+
+			server.initialize_editor().map_err(|e| format!("initialize_editor: {e}"))?;
+
+			// Authority installed at boot: the editor sees the
+			// container-style label from the first tick.
+			let label = server.editor().expect("editor after init").authority().display_label.clone();
+			if label != "Container:cafef00d" {
+				return Err(format!("expected Container:cafef00d label, got {:?}", label));
+			}
+
+			// Keepalive is still alive inside the server.
+			if dropped_for_thread.load(AOrdering::SeqCst) {
+				return Err("keepalive dropped while server is alive".into());
+			}
+
+			// Drop the server — this must drop the keepalive too.
+			drop(server);
+			if !dropped_for_thread.load(AOrdering::SeqCst) {
+				return Err("keepalive not dropped after server shutdown".into());
+			}
+			Ok(())
+		});
+
+		let result = handle.join().expect("startup-auth thread panicked");
+		std::fs::remove_dir_all(&temp_dir).ok();
+		result.expect("startup-auth test failed");
+	}
+}

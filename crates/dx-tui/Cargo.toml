@@ -1,0 +1,354 @@
+[workspace]
+resolver = "2"
+members = [
+    "src/file_browser/actor",
+    "src/file_browser/adapter",
+    "src/file_browser/binding",
+    "src/file_browser/boot",
+    "src/file_browser/build",
+    "src/file_browser/cli",
+    "src/file_browser/codegen",
+    "src/file_browser/config",
+    "src/file_browser/core",
+    "src/file_browser/dds",
+    "src/file_browser/emulator",
+    "src/file_browser/ffi",
+    "src/file_browser/fs",
+    "src/file_browser/macro",
+    "src/file_browser/packing",
+    "src/file_browser/parser",
+    "src/file_browser/plugin",
+    "src/file_browser/proxy",
+    "src/file_browser/scheduler",
+    "src/file_browser/sftp",
+    "src/file_browser/shared",
+    "src/file_browser/shim",
+    "src/file_browser/term",
+    "src/file_browser/tty",
+    "src/file_browser/vfs",
+    "src/file_browser/watcher",
+    "src/file_browser/widgets",
+    "src/editor/core",
+    "src/editor/editor",
+    "src/editor/languages",
+    "src/editor/parser-js",
+    "src/editor/plugin-runtime",
+    "src/editor/plugin-api-macros",
+    "src/editor/winterm",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.94.0"
+license = "MIT"
+authors = ["essencefromexistence"]
+repository = "https://github.com/essence-dx/cli"
+homepage = "https://github.com/essence-dx/cli"
+
+[workspace.dependencies]
+ansi-to-tui = "8.0.1"
+anyhow = "1.0"
+arc-swap = "1.7"
+async-channel = "2.3"
+async-compression = { version = "0.4", features = ["deflate", "gzip", "zstd", "futures-io"] }
+async-fs = "2.1"
+async-trait = "0.1"
+base64 = "0.22"
+better-panic = "0.3"
+bitflags = "2.6"
+bstr = "1.10"
+byteorder = "1.5"
+bytes = "1.8"
+chrono = "0.4"
+clap = { version = "4.5", features = ["derive", "wrap_help"] }
+color-eyre = "0.6"
+core-foundation-sys = "0.8"
+crossterm = { version = "0.29.0", features = ["event-stream"] }
+dashmap = "6.1"
+dirs = "6.0.0"
+dyn-clone = "1.0"
+either = "1.13"
+encoding_rs = "0.8"
+fd-lock = "4.0"
+fdlimit = "0.3.0"
+flume = "0.12"
+foldhash = "0.2.0"
+futures = "0.3"
+globset = "0.4"
+hashbrown = { version = "0.16.1", features = ["serde"] }
+indexmap = "2.6"
+libc = "0.2"
+log = "0.4"
+lru = "0.16.3"
+md5 = "0.8.0"
+memchr = "2.7"
+mlua = { version = "0.11.6", features = ["lua54", "serialize", "macros", "async", "anyhow"] }
+nix = { version = "0.31.2", default-features = false }
+notify = "8.2.0"
+objc2 = "0.6.4"
+once_cell = "1.20"
+ordered-float = { version = "5.1.0", features = ["serde"] }
+parking_lot = "0.12"
+paste = "1.0"
+percent-encoding = "2.3"
+rand = "0.8"
+ratatui = { version = "0.30.0", features = ["serde"] }
+rayon = "1.10"
+regex = "1.11"
+# russh = { version = "0.60", default-features = false, features = ["ring", "rsa"] }  # COMMENTED OUT: 447 transitive crates (SFTP/SSH)
+scopeguard = "1.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_with = "3.11"
+shell-words = "1.1"
+signal-hook = "0.4.3"
+smallvec = "1.13"
+syntect = "5.2"
+tachyonfx = "0.25.0"
+tempfile = "3.14"
+thiserror = "2.0"
+tokio = { version = "1.42", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+toml = { version = "1.1.0", features = ["parse"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+twox-hash = "2.0"
+typed-path = "0.12.3"
+unicode-width = "0.2"
+url = "2.5"
+uzers = "0.12"
+uuid = { version = "1.11", features = ["v4"] }
+vergen-gitcl = { version = "9.1.0", default-features = false, features = ["build", "cargo"] }
+which = "8.0.2"
+
+[workspace.dependencies.rusqlite]
+version = "0.39"
+features = ["bundled"]
+
+[workspace.lints.rust]
+unsafe_code = "warn"  # Changed from "deny" to "warn" for file_browser code
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(windows)', 'cfg(unix)'] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+
+[package]
+name = "dx-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "DX Ratatui shell for coding, file browsing, and local agent workflows"
+
+[features]
+default = ["vendored-lua"]
+dx-agent = []
+dx-flow = []
+# dx-stack = ["dx-agent", "dx-flow"]
+vendored-lua = ["mlua/vendored"]
+llm = ["llama-cpp-2", "sysinfo"]
+
+[dependencies]
+# File browser dependencies
+fb-actor = { path = "src/file_browser/actor" }
+fb-adapter = { path = "src/file_browser/adapter" }
+fb-binding = { path = "src/file_browser/binding" }
+fb-boot = { path = "src/file_browser/boot" }
+fb-config = { path = "src/file_browser/config" }
+fb-core = { path = "src/file_browser/core" }
+fb-dds = { path = "src/file_browser/dds" }
+fb-emulator = { path = "src/file_browser/emulator" }
+fb-fs = { path = "src/file_browser/fs" }
+fb-macro = { path = "src/file_browser/macro" }
+fb-parser = { path = "src/file_browser/parser" }
+fb-plugin = { path = "src/file_browser/plugin" }
+fb-proxy = { path = "src/file_browser/proxy" }
+fb-shared = { path = "src/file_browser/shared" }
+fb-term = { path = "src/file_browser/term" }
+fb-tty = { path = "src/file_browser/tty" }
+fb-vfs = { path = "src/file_browser/vfs" }
+fb-watcher = { path = "src/file_browser/watcher" }
+fb-widgets = { path = "src/file_browser/widgets" }
+
+# Dx code editor (embedded via fresh crates)
+dx-editor = { path = "src/editor/editor" }
+
+# OpenCode Zen API client
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"] }
+
+# Tokenizer (non-optional — needed for accurate token counting in agent loop)
+tiktoken-rs = "0.9"
+
+# LLM dependencies (optional)
+llama-cpp-2 = { version = "0.1", optional = true }
+sysinfo = { version = "0.38.4", optional = true }
+
+# Optional in-process agent/flow stack (disabled until paths are valid)
+# dx-agents = { path = "../agent", package = "dx-agent", default-features = false, features = ["agent-runtime"], optional = true }
+# dx-flow = { path = "../flow", package = "dx-flow", default-features = false, optional = true }
+
+# Font compression
+zstd = "0.13"
+
+# Animation
+palette = "0.7"
+rand.workspace = true
+
+# Clipboard
+cli-clipboard = "0.4"
+
+# FIGlet rendering
+figlet-rs = "1.0.0"
+anyhow.workspace = true
+better-panic.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+fdlimit.workspace = true
+futures.workspace = true
+mlua.workspace = true
+once_cell.workspace = true
+paste.workspace = true
+ratatui = { workspace = true, features = ["serde"] }
+rusqlite.workspace = true
+scopeguard.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tachyonfx.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+tokio-stream.workspace = true
+tracing.workspace = true
+tracing-appender = "0.2.4"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+ansi-to-tui.workspace = true
+arc-swap.workspace = true
+async-channel.workspace = true
+async-fs.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+bitflags.workspace = true
+bstr.workspace = true
+byteorder.workspace = true
+bytes.workspace = true
+dirs.workspace = true
+dyn-clone.workspace = true
+either.workspace = true
+encoding_rs.workspace = true
+fd-lock.workspace = true
+flume.workspace = true
+foldhash.workspace = true
+globset.workspace = true
+libc.workspace = true
+log.workspace = true
+lru.workspace = true
+md5.workspace = true
+memchr.workspace = true
+notify.workspace = true
+parking_lot.workspace = true
+percent-encoding.workspace = true
+rayon.workspace = true
+regex.workspace = true
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "wav"] }
+cpal = "0.17"
+hound = "3.5"
+shell-words.workspace = true
+signal-hook.workspace = true
+smallvec.workspace = true
+syntect.workspace = true
+tempfile.workspace = true
+twox-hash.workspace = true
+typed-path.workspace = true
+unicode-width.workspace = true
+url.workspace = true
+which.workspace = true
+clap = { workspace = true, features = ["derive", "wrap_help"] }
+color-eyre.workspace = true
+core-foundation-sys.workspace = true
+dashmap.workspace = true
+hashbrown = { workspace = true, features = ["serde"] }
+indexmap.workspace = true
+ordered-float = { workspace = true, features = ["serde"] }
+serde_with.workspace = true
+tokio-util.workspace = true
+toml = { workspace = true, features = ["parse"] }
+uuid = { workspace = true, features = ["v4"] }
+async-compression = { workspace = true, features = ["deflate", "gzip", "zstd", "futures-io"] }
+termimad = "0.35.1"
+pulldown-cmark = "0.13.4"
+portable-pty = "0.9"
+# russh.workspace = true  # COMMENTED OUT: depends on russh (447 crates)
+
+# Codex backend crates (in-process, no subprocess)
+codex-app-server-protocol = { path = "../app-server-protocol" }
+codex-app-server-client = { path = "../app-server-client" }
+
+# Additional codex-rs crates needed by the bridge
+codex-arg0 = { path = "../arg0" }
+codex-config = { path = "../config" }
+codex-exec-server = { path = "../exec-server" }
+codex-feedback = { path = "../feedback" }
+codex-rollout = { path = "../rollout" }
+
+# Pin rama-* transitive deps to alpha.4 (compatible with codex-network-proxy's exact pin)
+rama-error = "=0.3.0-alpha.4"
+rama-macros = "=0.3.0-alpha.4"
+rama-utils = "=0.3.0-alpha.4"
+rama-dns = "=0.3.0-alpha.4"
+rama-http = "=0.3.0-alpha.4"
+rama-http-core = "=0.3.0-alpha.4"
+rama-http-types = "=0.3.0-alpha.4"
+rama-http-headers = "=0.3.0-alpha.4"
+rama-net = "=0.3.0-alpha.4"
+rama-socks5 = "=0.3.0-alpha.4"
+rama-tcp = "=0.3.0-alpha.4"
+rama-tls-rustls = "=0.3.0-alpha.4"
+rama-udp = "=0.3.0-alpha.4"
+rama-unix = "=0.3.0-alpha.4"
+codex-protocol = { version = "0.0.34", path = "../protocol" }
+codex-utils-absolute-path = { version = "0.0.34", path = "../utils/absolute-path" }
+codex-features = { version = "0.0.34", path = "../features" }
+
+[target."cfg(unix)".dependencies]
+libc.workspace = true
+signal-hook-tokio = { version = "0.4.0", features = ["futures-v0_3"] }
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_System_Console"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = ["use-dev-tty", "libc"] }
+
+[target.'cfg(all(not(target_os = "macos"), not(target_os = "windows")))'.dependencies]
+tikv-jemallocator = "0.6.1"
+
+[dev-dependencies]
+wiremock = "0.6"
+
+[build-dependencies]
+zstd = "0.13"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[lib]
+name = "dx_tui"
+crate-type = ["lib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "dx"
+path = "src/main.rs"
+
+[patch.crates-io]
+tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186" }
+tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "4fffad30fe373adbdcffab9545e9e9bf4f2fc19f" }

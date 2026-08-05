@@ -1,0 +1,1564 @@
+//! Prompt/minibuffer system for user input
+
+use crate::input::commands::Suggestion;
+use crate::primitives::grapheme;
+use crate::primitives::word_navigation::{
+	find_word_end_bytes, find_word_start_bytes, is_word_char,
+};
+
+/// Type of prompt - determines what action to take when user confirms
+#[derive(Debug, Clone, PartialEq)]
+pub enum PromptType {
+	/// Open a file
+	OpenFile,
+	/// Open a file with a specific encoding (used when detect_encoding is disabled)
+	/// Contains the path to open after encoding selection
+	OpenFileWithEncoding { path: std::path::PathBuf },
+	/// Reload current file with a different encoding
+	/// Requires the buffer to have no unsaved modifications
+	ReloadWithEncoding,
+	/// Switch to a different project folder (change working directory)
+	SwitchProject,
+	/// Save current buffer to a new file
+	SaveFileAs,
+	/// Search for text in buffer
+	Search,
+	/// Search for text in buffer (for replace operation - will prompt for replacement after)
+	ReplaceSearch,
+	/// Replace text in buffer
+	Replace { search: String },
+	/// Search for text in buffer (for query-replace - will prompt for replacement after)
+	QueryReplaceSearch,
+	/// Query replace text in buffer - prompt for replacement text
+	QueryReplace { search: String },
+	/// Query replace confirmation prompt (y/n/!/q for each match)
+	QueryReplaceConfirm,
+	/// Quick Open - unified prompt with prefix-based provider routing
+	/// Supports file finding (default), commands (>), buffers (#), goto line (:)
+	QuickOpen,
+	/// Live Grep — project-wide search rendered as a centred floating
+	/// overlay (issue #1796). Unlike `Plugin { custom_type }`, this
+	/// variant gets first-class layout handling: the renderer draws the
+	/// prompt and its suggestion list inside a `PopupPosition::CenteredOverlay`
+	/// frame instead of on the bottom minibuffer row, leaving the
+	/// underlying split tree untouched.
+	LiveGrep,
+	/// Go to a specific line number
+	GotoLine,
+	/// Go to a specific byte offset (large file without line index scan)
+	GotoByteOffset,
+	/// Confirm whether to scan a large file for exact line numbers before Go To Line
+	GotoLineScanConfirm,
+	/// Choose an ANSI background file
+	SetBackgroundFile,
+	/// Set background blend ratio (0-1)
+	SetBackgroundBlend,
+	/// Plugin-controlled prompt with custom type identifier
+	/// The string identifier is used to filter hooks in plugin code
+	Plugin { custom_type: String },
+	/// LSP Rename operation
+	/// Stores the original text, start/end positions in buffer, and overlay handle
+	LspRename {
+		original_text: String,
+		start_pos: usize,
+		end_pos: usize,
+		overlay_handle: crate::view::overlay::OverlayHandle,
+	},
+	/// Record a macro - prompts for register (0-9)
+	RecordMacro,
+	/// Play a macro - prompts for register (0-9)
+	PlayMacro,
+	/// Save a recorded macro to init.ts - prompts for register (0-9)
+	SaveMacroToInit,
+	/// Promote a recorded macro to an editable init.ts command - prompts for register
+	PromoteMacro,
+	/// Set a bookmark - prompts for register (0-9)
+	SetBookmark,
+	/// Jump to a bookmark - prompts for register (0-9)
+	JumpToBookmark,
+	/// Set page width (empty clears to viewport)
+	SetPageWidth,
+	/// Add a vertical ruler at a column position
+	AddRuler,
+	/// Remove a vertical ruler (select from list)
+	RemoveRuler,
+	/// Set tab size for current buffer
+	SetTabSize,
+	/// Set line ending format for current buffer
+	SetLineEnding,
+	/// Set text encoding format for current buffer
+	SetEncoding,
+	/// Set language/syntax highlighting for current buffer
+	SetLanguage,
+	/// Stop a running LSP server (select from list)
+	StopLspServer,
+	/// Restart LSP server(s) (select from list)
+	RestartLspServer,
+	/// Select a theme (select from list)
+	/// Stores the original theme name for restoration on cancel
+	SelectTheme { original_theme: String },
+	/// Select a keybinding map (select from list)
+	SelectKeybindingMap,
+	/// Select a cursor style (select from list)
+	SelectCursorStyle,
+	/// Select a UI locale/language (select from list)
+	SelectLocale,
+	/// Select a theme for copy with formatting
+	CopyWithFormattingTheme,
+	/// Confirm reverting a modified file
+	ConfirmRevert,
+	/// Confirm saving over a file that changed on disk
+	ConfirmSaveConflict,
+	/// Confirm saving with sudo after permission denied
+	ConfirmSudoSave { info: crate::model::buffer::SudoSaveRequired },
+	/// Confirm overwriting an existing file during SaveAs
+	ConfirmOverwriteFile { path: std::path::PathBuf },
+	/// Confirm creating parent directories for a save target
+	ConfirmCreateDirectory { path: std::path::PathBuf },
+	/// Confirm closing a modified buffer (save/discard/cancel)
+	/// Stores buffer_id to close after user confirms
+	ConfirmCloseBuffer { buffer_id: crate::model::event::BufferId },
+	/// Confirm quitting with modified buffers
+	ConfirmQuitWithModified,
+	/// Confirm quitting on a clean session (opt-in via `editor.confirm_quit`).
+	/// Issued only when no buffer is modified; otherwise
+	/// `ConfirmQuitWithModified` runs instead.
+	ConfirmQuit,
+	/// File Explorer rename operation
+	/// Stores the original path and name for the file/directory being renamed
+	FileExplorerRename {
+		original_path: std::path::PathBuf,
+		original_name: String,
+		/// True if this rename is for a newly created file (should switch focus to editor after)
+		/// False if renaming an existing file (should keep focus in file explorer)
+		is_new_file: bool,
+	},
+	/// Confirm deleting a file or directory in the file explorer
+	ConfirmDeleteFile { path: std::path::PathBuf, is_dir: bool },
+	/// Confirm overwriting, renaming, or cancelling a paste conflict
+	ConfirmPasteConflict { src: std::path::PathBuf, dst: std::path::PathBuf, is_cut: bool },
+	/// Rename destination when pasting (user chose 'r' in conflict prompt)
+	FileExplorerPasteRename { src: std::path::PathBuf, dst_dir: std::path::PathBuf, is_cut: bool },
+	/// Confirm deleting multiple items from the file explorer
+	ConfirmMultiDelete { paths: Vec<std::path::PathBuf> },
+	/// Per-conflict prompt for multi-file paste.
+	/// `pending[0]` is the conflict currently being shown.
+	/// User choices: (o)verwrite this, (O) all, (s)kip this, (S) all, (c)ancel.
+	ConfirmMultiPasteConflict {
+		safe: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+		confirmed: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+		pending: Vec<(std::path::PathBuf, std::path::PathBuf)>,
+		is_cut: bool,
+	},
+	/// Confirm loading a large file with non-resynchronizable encoding
+	/// (like GB18030, GBK, Shift-JIS, EUC-KR) that requires full file loading
+	ConfirmLargeFileEncoding { path: std::path::PathBuf },
+	/// Switch to a tab by name (from the current split's open buffers)
+	SwitchToTab,
+	/// Run shell command on buffer/selection
+	/// If replace is true, replace the input with the output
+	/// If replace is false, output goes to a new buffer
+	ShellCommand { replace: bool },
+	/// Async prompt from plugin (for editor.prompt() API)
+	/// The result is returned via callback resolution
+	AsyncPrompt,
+}
+
+impl PromptType {
+	/// Whether a mouse click on a suggestion should immediately confirm.
+	///
+	/// Defaults to `true` (matches command palette / file finder UX). Returns
+	/// `false` for prompts that pick from a small fixed list and trigger an
+	/// expensive or destructive action — there, click should preview the
+	/// selection and Enter should commit (issue #1660).
+	pub fn click_confirms(&self) -> bool {
+		!matches!(self, PromptType::ReloadWithEncoding)
+	}
+
+	/// Whether this prompt is one of the search/replace prompts that exposes
+	/// the match-mode toggles (case sensitive / whole word / regex).
+	///
+	/// This is the single source of truth for "are search options in scope":
+	/// it gates both the rendering of the search-options bar and the
+	/// `ToggleSearch*` actions, so the toggle keys are inert in unrelated
+	/// prompts like the (s)ave/(d)iscard/(C)ancel close confirmation
+	/// (otherwise Alt+W there would silently flip whole-word match mode —
+	/// see issue with Alt+W leaking into the close-buffer prompt).
+	pub fn has_search_options(&self) -> bool {
+		matches!(
+			self,
+			PromptType::Search
+				| PromptType::ReplaceSearch
+				| PromptType::Replace { .. }
+				| PromptType::QueryReplaceSearch
+				| PromptType::QueryReplace { .. }
+		)
+	}
+}
+
+/// Prompt state for the minibuffer
+#[derive(Debug, Clone)]
+pub struct Prompt {
+	/// The prompt message (e.g., "Find file: ")
+	pub message: String,
+	/// User's current input
+	pub input: String,
+	/// Cursor position in the input
+	pub cursor_pos: usize,
+	/// What to do when user confirms
+	pub prompt_type: PromptType,
+	/// Autocomplete suggestions (filtered)
+	pub suggestions: Vec<Suggestion>,
+	/// Original unfiltered suggestions (for prompts that filter client-side like SwitchToTab)
+	pub original_suggestions: Option<Vec<Suggestion>>,
+	/// Currently selected suggestion index
+	pub selected_suggestion: Option<usize>,
+	/// Index of the first suggestion shown in the popup viewport.
+	/// Updated minimally by the renderer to keep `selected_suggestion`
+	/// visible — selection changes inside the viewport never scroll
+	/// (issue #1660).
+	pub scroll_offset: usize,
+	/// When true, the user has scrolled the result list with the mouse wheel,
+	/// so the renderer must NOT pull `scroll_offset` back to keep the
+	/// selection in view (issue #2119). Reset whenever the selection moves by
+	/// keyboard or the suggestion list is rebuilt, so normal navigation
+	/// re-engages the keep-selection-visible behaviour.
+	pub manual_scroll: bool,
+	/// Selection anchor position (for Shift+Arrow selection)
+	/// When Some(pos), there's a selection from anchor to cursor_pos
+	pub selection_anchor: Option<usize>,
+	/// Tracks the input value when suggestions were last set by a plugin.
+	/// Used to skip Rust-side filtering when plugin has already filtered for this input.
+	pub suggestions_set_for_input: Option<String>,
+	/// When true, navigating suggestions updates the input text (selected) to match.
+	/// Used by plugin prompts that want picker-like behavior (e.g. compose width).
+	pub sync_input_on_navigate: bool,
+	/// When true, the renderer draws the prompt inside a centred
+	/// floating overlay (PopupPosition::CenteredOverlay) instead of
+	/// the bottom minibuffer row. Set by the live-grep plugin via the
+	/// `floatingOverlay` flag on `editor.startPrompt(...)`. The flag
+	/// is rendering-only — confirm/cancel/hooks behave identically to
+	/// a non-overlay prompt of the same `prompt_type`.
+	pub overlay: bool,
+	/// Title shown in the overlay's frame header as styled
+	/// segments. An empty vec falls back to the `prompt_type`-
+	/// specific default. Plugin-controlled via
+	/// `editor.setPromptTitle(segments)`. Has no effect on
+	/// non-overlay prompts.
+	pub title: Vec<dx_core::api::StyledText>,
+	/// Optional footer chrome shown along the bottom of the
+	/// floating overlay's results pane (above the frame border).
+	/// Plugin-controlled via `editor.setPromptFooter(segments)`.
+	/// Orchestrator uses this for hotkey-hint rows
+	/// (e.g. " [n] new   [d] dive   [k] kill   [Esc] close").
+	/// Empty by default; has no effect on non-overlay prompts.
+	/// Implements the chrome-region piece of Primitive #2 in
+	/// docs/internal/orchestrator-sessions-design.md (the
+	/// session_preview delegate region was already provided by
+	/// Primitive #1 — `editor.previewWindowInRect`).
+	pub footer: Vec<dx_core::api::StyledText>,
+	/// Undo history for the input field: `(input, cursor_pos)` snapshots
+	/// captured before each text mutation. Ctrl+Z pops from here. Kept
+	/// local to the prompt so undo edits the query box rather than the
+	/// underlying (modal-inaccessible) buffer.
+	undo_stack: Vec<(String, usize)>,
+	/// Redo counterpart to `undo_stack`. Cleared on any fresh mutation.
+	redo_stack: Vec<(String, usize)>,
+	/// Optional toolbar for the overlay's header band, as real widgets
+	/// (`Toggle`/`Button` in a `Row`/`Col`). When `Some`, it is rendered via
+	/// the widget engine *in place of* the styled-text `title`, so the
+	/// controls are themed and clickable. Plugin-controlled via
+	/// `editor.setPromptToolbar(spec)`. No effect on non-overlay prompts.
+	pub toolbar_widget: Option<dx_core::api::WidgetSpec>,
+	/// Overlay focus ring position: `None` = the query input is focused
+	/// (typing edits the query, the caret shows there); `Some(key)` = that
+	/// toolbar control is focused (Space/Enter toggles it, it renders
+	/// highlighted). Tab/Shift+Tab cycle input → toggles → input.
+	pub toolbar_focus: Option<String>,
+	/// Short status shown right-aligned on the input row, just left of the
+	/// `selected / total` count (e.g. "Searching…", "No matches"). Plugin-
+	/// controlled via `editor.setPromptStatus(text)`; overlay-only.
+	pub status: String,
+}
+
+/// Maximum number of suggestion rows shown at once. Mirrors the cap used by
+/// `SuggestionsRenderer` so `Prompt::ensure_selected_visible` can compute the
+/// viewport size without inspecting render state.
+pub const MAX_VISIBLE_SUGGESTIONS: usize = 10;
+
+impl Prompt {
+	/// Create a new prompt
+	pub fn new(message: String, prompt_type: PromptType) -> Self {
+		Self {
+			message,
+			input: String::new(),
+			cursor_pos: 0,
+			prompt_type,
+			suggestions: Vec::new(),
+			original_suggestions: None,
+			selected_suggestion: None,
+			scroll_offset: 0,
+			manual_scroll: false,
+			selection_anchor: None,
+			suggestions_set_for_input: None,
+			sync_input_on_navigate: false,
+			overlay: false,
+			title: Vec::new(),
+			footer: Vec::new(),
+			undo_stack: Vec::new(),
+			redo_stack: Vec::new(),
+			toolbar_widget: None,
+			toolbar_focus: None,
+			status: String::new(),
+		}
+	}
+
+	/// Create a new prompt with suggestions
+	///
+	/// The suggestions are stored both as the current filtered list and as the original
+	/// unfiltered list (for prompts that filter client-side like SwitchToTab).
+	pub fn with_suggestions(
+		message: String,
+		prompt_type: PromptType,
+		suggestions: Vec<Suggestion>,
+	) -> Self {
+		let selected_suggestion = if suggestions.is_empty() { None } else { Some(0) };
+		Self {
+			message,
+			input: String::new(),
+			cursor_pos: 0,
+			prompt_type,
+			original_suggestions: Some(suggestions.clone()),
+			suggestions,
+			selected_suggestion,
+			scroll_offset: 0,
+			manual_scroll: false,
+			selection_anchor: None,
+			suggestions_set_for_input: None,
+			sync_input_on_navigate: false,
+			overlay: false,
+			title: Vec::new(),
+			footer: Vec::new(),
+			undo_stack: Vec::new(),
+			redo_stack: Vec::new(),
+			toolbar_widget: None,
+			toolbar_focus: None,
+			status: String::new(),
+		}
+	}
+
+	/// Create a new prompt with initial text, cursor at end, ready for
+	/// incremental editing (no selection). Use for rename-style flows where
+	/// the user typically keeps most of the prefilled name and only
+	/// appends or tweaks a suffix.
+	pub fn with_initial_text_for_edit(
+		message: String,
+		prompt_type: PromptType,
+		initial_text: String,
+	) -> Self {
+		Self::with_initial_text_inner(message, prompt_type, initial_text, false)
+	}
+
+	/// Create a new prompt with initial text (selected so typing replaces it)
+	pub fn with_initial_text(message: String, prompt_type: PromptType, initial_text: String) -> Self {
+		Self::with_initial_text_inner(message, prompt_type, initial_text, true)
+	}
+
+	fn with_initial_text_inner(
+		message: String,
+		prompt_type: PromptType,
+		initial_text: String,
+		select_all: bool,
+	) -> Self {
+		let cursor_pos = initial_text.len();
+		let selection_anchor = if select_all && !initial_text.is_empty() { Some(0) } else { None };
+		Self {
+			message,
+			input: initial_text,
+			cursor_pos,
+			prompt_type,
+			suggestions: Vec::new(),
+			original_suggestions: None,
+			selected_suggestion: None,
+			scroll_offset: 0,
+			manual_scroll: false,
+			selection_anchor,
+			suggestions_set_for_input: None,
+			sync_input_on_navigate: false,
+			overlay: false,
+			title: Vec::new(),
+			footer: Vec::new(),
+			undo_stack: Vec::new(),
+			redo_stack: Vec::new(),
+			toolbar_widget: None,
+			toolbar_focus: None,
+			status: String::new(),
+		}
+	}
+
+	/// Move cursor left (to previous grapheme cluster boundary)
+	///
+	/// Uses grapheme cluster boundaries for proper handling of combining characters
+	/// like Thai diacritics, emoji with modifiers, etc.
+	pub fn cursor_left(&mut self) {
+		if self.cursor_pos > 0 {
+			self.cursor_pos = grapheme::prev_grapheme_boundary(&self.input, self.cursor_pos);
+		}
+	}
+
+	/// Move cursor right (to next grapheme cluster boundary)
+	///
+	/// Uses grapheme cluster boundaries for proper handling of combining characters
+	/// like Thai diacritics, emoji with modifiers, etc.
+	pub fn cursor_right(&mut self) {
+		if self.cursor_pos < self.input.len() {
+			self.cursor_pos = grapheme::next_grapheme_boundary(&self.input, self.cursor_pos);
+		}
+	}
+
+	/// Capture the current `(input, cursor_pos)` for undo, and drop any
+	/// redo history. Call at the start of every text-mutating operation.
+	/// No-ops if the input is unchanged from the most recent snapshot so
+	/// repeated no-op edits don't bloat the stack.
+	fn push_undo_snapshot(&mut self) {
+		if self.undo_stack.last().is_some_and(|(text, _)| *text == self.input) {
+			return;
+		}
+		// Bound the history so a very long editing session can't grow it
+		// without limit.
+		const MAX_UNDO: usize = 500;
+		if self.undo_stack.len() >= MAX_UNDO {
+			self.undo_stack.remove(0);
+		}
+		self.undo_stack.push((self.input.clone(), self.cursor_pos));
+		self.redo_stack.clear();
+	}
+
+	/// Undo the last input edit. Returns true if the input changed.
+	pub fn undo_input(&mut self) -> bool {
+		if let Some((text, cursor)) = self.undo_stack.pop() {
+			self.redo_stack.push((self.input.clone(), self.cursor_pos));
+			self.input = text;
+			self.cursor_pos = cursor.min(self.input.len());
+			self.selection_anchor = None;
+			true
+		} else {
+			false
+		}
+	}
+
+	/// Redo the last undone input edit. Returns true if the input changed.
+	pub fn redo_input(&mut self) -> bool {
+		if let Some((text, cursor)) = self.redo_stack.pop() {
+			self.undo_stack.push((self.input.clone(), self.cursor_pos));
+			self.input = text;
+			self.cursor_pos = cursor.min(self.input.len());
+			self.selection_anchor = None;
+			true
+		} else {
+			false
+		}
+	}
+
+	/// Insert a character at the cursor position
+	pub fn insert_char(&mut self, ch: char) {
+		self.push_undo_snapshot();
+		self.input.insert(self.cursor_pos, ch);
+		self.cursor_pos += ch.len_utf8();
+	}
+
+	/// Delete one code point before cursor (backspace)
+	///
+	/// Deletes one Unicode code point at a time, allowing layer-by-layer deletion
+	/// of combining characters. For Thai text, this means you can delete just the
+	/// tone mark without removing the base consonant.
+	pub fn backspace(&mut self) {
+		if self.cursor_pos > 0 {
+			self.push_undo_snapshot();
+			// Find the previous character (code point) boundary, not grapheme boundary
+			// This allows layer-by-layer deletion of combining marks
+			let prev_boundary =
+				self.input[..self.cursor_pos].char_indices().next_back().map(|(i, _)| i).unwrap_or(0);
+			self.input.drain(prev_boundary..self.cursor_pos);
+			self.cursor_pos = prev_boundary;
+		}
+	}
+
+	/// Delete grapheme cluster at cursor (delete key)
+	///
+	/// Deletes the entire grapheme cluster, handling combining characters properly.
+	pub fn delete(&mut self) {
+		if self.cursor_pos < self.input.len() {
+			self.push_undo_snapshot();
+			let next_boundary = grapheme::next_grapheme_boundary(&self.input, self.cursor_pos);
+			self.input.drain(self.cursor_pos..next_boundary);
+		}
+	}
+
+	/// Move to start of input
+	pub fn move_to_start(&mut self) {
+		self.cursor_pos = 0;
+	}
+
+	/// Move to end of input
+	pub fn move_to_end(&mut self) {
+		self.cursor_pos = self.input.len();
+	}
+
+	/// Set the input text and cursor position
+	///
+	/// Used for history navigation - replaces the entire input with a new value
+	/// and moves cursor to the end.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Search: ".to_string(), PromptType::Search);
+	/// prompt.input = "current".to_string();
+	/// prompt.cursor_pos = 7;
+	///
+	/// prompt.set_input("from history".to_string());
+	/// assert_eq!(prompt.input, "from history");
+	/// assert_eq!(prompt.cursor_pos, 12); // At end
+	/// ```
+	pub fn set_input(&mut self, text: String) {
+		self.push_undo_snapshot();
+		self.cursor_pos = text.len();
+		self.input = text;
+		self.clear_selection();
+	}
+
+	/// Select next suggestion
+	pub fn select_next_suggestion(&mut self) {
+		if !self.suggestions.is_empty() {
+			// Keyboard navigation re-engages keep-selection-visible scrolling.
+			self.manual_scroll = false;
+			self.selected_suggestion = Some(match self.selected_suggestion {
+				Some(idx) if idx + 1 < self.suggestions.len() => idx + 1,
+				Some(_) => 0, // Wrap to start
+				None => 0,
+			});
+		}
+	}
+
+	/// Select previous suggestion
+	pub fn select_prev_suggestion(&mut self) {
+		if !self.suggestions.is_empty() {
+			self.manual_scroll = false;
+			self.selected_suggestion = Some(match self.selected_suggestion {
+				Some(0) => self.suggestions.len() - 1, // Wrap to end
+				Some(idx) => idx - 1,
+				None => 0,
+			});
+		}
+	}
+
+	/// Scroll the result list by `delta` rows without moving the selection
+	/// (mouse wheel over the Live Grep overlay results pane, issue #2119).
+	/// `visible` is the number of result rows currently on screen, used to
+	/// clamp the offset so it can't scroll past the end of the list.
+	pub fn scroll_results(&mut self, delta: i32, visible: usize) {
+		let total = self.suggestions.len();
+		if total == 0 {
+			return;
+		}
+		let max_offset = total.saturating_sub(visible.max(1));
+		let next = (self.scroll_offset as i32 + delta).clamp(0, max_offset as i32) as usize;
+		if next != self.scroll_offset {
+			self.scroll_offset = next;
+		}
+		// Latch manual scroll even when clamped at an edge, so a follow-up
+		// render doesn't immediately yank the offset back to the selection.
+		self.manual_scroll = true;
+	}
+
+	/// Get the currently selected suggestion value
+	pub fn selected_value(&self) -> Option<String> {
+		self
+			.selected_suggestion
+			.and_then(|idx| self.suggestions.get(idx))
+			.map(|s| s.get_value().to_string())
+	}
+
+	/// Get the final input (use selected suggestion if available, otherwise raw input)
+	pub fn get_final_input(&self) -> String {
+		self.selected_value().unwrap_or_else(|| self.input.clone())
+	}
+
+	/// Apply fuzzy filtering to suggestions based on current input
+	///
+	/// If `match_description` is true, also matches against suggestion descriptions.
+	/// Updates `suggestions` with filtered and sorted results.
+	pub fn filter_suggestions(&mut self, match_description: bool) {
+		use crate::input::fuzzy::{FuzzyMatch, fuzzy_match};
+
+		// Skip filtering if the plugin has already set suggestions for this exact input.
+		// This handles the race condition where run_hook("prompt_changed") is async:
+		// the plugin may have already responded with filtered results via setPromptSuggestions.
+		if let Some(ref set_for_input) = self.suggestions_set_for_input {
+			if set_for_input == &self.input {
+				return;
+			}
+		}
+		// Input has diverged from whatever the plugin pre-filtered
+		// for — invalidate the marker so a later return to that
+		// same input doesn't reuse a now-stale list.
+		self.suggestions_set_for_input = None;
+
+		let Some(original) = &self.original_suggestions else {
+			return;
+		};
+
+		let input = &self.input;
+		let mut filtered: Vec<(crate::input::commands::Suggestion, i32)> = original
+			.iter()
+			.filter_map(|s| {
+				let text_result = fuzzy_match(input, &s.text);
+				let desc_result = if match_description {
+					s.description.as_ref().map(|d| fuzzy_match(input, d)).unwrap_or_else(FuzzyMatch::no_match)
+				} else {
+					FuzzyMatch::no_match()
+				};
+				if text_result.matched || desc_result.matched {
+					Some((s.clone(), text_result.score.max(desc_result.score)))
+				} else {
+					None
+				}
+			})
+			.collect();
+
+		filtered.sort_by_key(|b| std::cmp::Reverse(b.1));
+		self.suggestions = filtered.into_iter().map(|(s, _)| s).collect();
+		self.selected_suggestion = if self.suggestions.is_empty() { None } else { Some(0) };
+		self.scroll_offset = 0;
+		self.manual_scroll = false;
+	}
+
+	/// Adjust `scroll_offset` so that `selected_suggestion` is inside the
+	/// viewport, scrolling the minimum amount required. A selection that's
+	/// already on-screen leaves the viewport untouched — this is what stops
+	/// a click on a near-bottom item from snapping the list upward and
+	/// recentering under the cursor (issue #1660).
+	///
+	/// Uses the bottom-popup default cap (`MAX_VISIBLE_SUGGESTIONS`).
+	/// Callers rendering into a different-sized area (e.g. the
+	/// floating Live Grep overlay, where the suggestion list can be
+	/// 30+ rows tall) should call
+	/// [`ensure_selected_visible_within`] with the actual height
+	/// instead — otherwise the scroll moves prematurely once the
+	/// selection passes the 10th row even though the rest of the
+	/// list is still visible on-screen.
+	pub fn ensure_selected_visible(&mut self) {
+		self.ensure_selected_visible_within(MAX_VISIBLE_SUGGESTIONS);
+	}
+
+	/// Like [`ensure_selected_visible`] but with an explicit
+	/// `visible_count` argument, so renderers in differently-sized
+	/// frames don't all share the bottom-popup `MAX_VISIBLE_SUGGESTIONS`
+	/// assumption.
+	pub fn ensure_selected_visible_within(&mut self, visible_count: usize) {
+		let total = self.suggestions.len();
+		let visible = total.min(visible_count.max(1));
+		let max_offset = total.saturating_sub(visible);
+		if visible == 0 {
+			self.scroll_offset = 0;
+			return;
+		}
+		if let Some(selected) = self.selected_suggestion {
+			if selected < self.scroll_offset {
+				self.scroll_offset = selected;
+			} else if selected >= self.scroll_offset + visible {
+				self.scroll_offset = selected + 1 - visible;
+			}
+		}
+		if self.scroll_offset > max_offset {
+			self.scroll_offset = max_offset;
+		}
+	}
+
+	// ========================================================================
+	// Advanced editing operations (word-based, clipboard)
+	// ========================================================================
+	//
+	// MOTIVATION:
+	// These methods provide advanced editing capabilities in prompts that
+	// users expect from normal text editing:
+	// - Word-based deletion (Ctrl+Backspace/Delete)
+	// - Copy/paste/cut operations
+	//
+	// This enables consistent editing experience across both buffer editing
+	// and prompt input (command palette, file picker, search, etc.).
+
+	/// Delete from cursor to end of word (Ctrl+Delete).
+	///
+	/// Deletes from the current cursor position to the end of the current word.
+	/// If the cursor is at a non-word character, skips to the next word and
+	/// deletes to its end.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+	/// prompt.input = "hello world".to_string();
+	/// prompt.cursor_pos = 0; // At start of "hello"
+	/// prompt.delete_word_forward();
+	/// assert_eq!(prompt.input, " world");
+	/// assert_eq!(prompt.cursor_pos, 0);
+	/// ```
+	pub fn delete_word_forward(&mut self) {
+		let word_end = find_word_end_bytes(self.input.as_bytes(), self.cursor_pos);
+		if word_end > self.cursor_pos {
+			self.push_undo_snapshot();
+			self.input.drain(self.cursor_pos..word_end);
+			// Cursor stays at same position
+		}
+	}
+
+	/// Delete from start of word to cursor (Ctrl+Backspace).
+	///
+	/// Deletes from the start of the current word to the cursor position.
+	/// If the cursor is after a non-word character, deletes the previous word.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+	/// prompt.input = "hello world".to_string();
+	/// prompt.cursor_pos = 5; // After "hello"
+	/// prompt.delete_word_backward();
+	/// assert_eq!(prompt.input, " world");
+	/// assert_eq!(prompt.cursor_pos, 0);
+	/// ```
+	pub fn delete_word_backward(&mut self) {
+		let word_start = find_word_start_bytes(self.input.as_bytes(), self.cursor_pos);
+		if word_start < self.cursor_pos {
+			self.push_undo_snapshot();
+			self.input.drain(word_start..self.cursor_pos);
+			self.cursor_pos = word_start;
+		}
+	}
+
+	/// Delete from cursor to end of line (Ctrl+K).
+	///
+	/// Deletes all text from the cursor position to the end of the input.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+	/// prompt.input = "hello world".to_string();
+	/// prompt.cursor_pos = 5; // After "hello"
+	/// prompt.delete_to_end();
+	/// assert_eq!(prompt.input, "hello");
+	/// assert_eq!(prompt.cursor_pos, 5);
+	/// ```
+	pub fn delete_to_end(&mut self) {
+		if self.cursor_pos < self.input.len() {
+			self.push_undo_snapshot();
+			self.input.truncate(self.cursor_pos);
+		}
+	}
+
+	/// Delete from the cursor back to the start of the line (Ctrl+U).
+	///
+	/// Mirrors the standard readline kill-to-start behavior so the
+	/// command palette can be cleared without holding Backspace.
+	pub fn delete_to_start(&mut self) {
+		if self.cursor_pos > 0 {
+			self.push_undo_snapshot();
+			self.input.drain(..self.cursor_pos);
+			self.cursor_pos = 0;
+		}
+	}
+
+	/// Get the current input text (for copy operation).
+	///
+	/// Returns a copy of the entire input. In future, this could be extended
+	/// to support selection ranges for copying only selected text.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Search: ".to_string(), PromptType::Search);
+	/// prompt.input = "test query".to_string();
+	/// assert_eq!(prompt.get_text(), "test query");
+	/// ```
+	pub fn get_text(&self) -> String {
+		self.input.clone()
+	}
+
+	/// Clear the input (used for cut operation).
+	///
+	/// Removes all text from the input and resets cursor to start.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+	/// prompt.input = "some text".to_string();
+	/// prompt.cursor_pos = 9;
+	/// prompt.clear();
+	/// assert_eq!(prompt.input, "");
+	/// assert_eq!(prompt.cursor_pos, 0);
+	/// ```
+	pub fn clear(&mut self) {
+		self.input.clear();
+		self.cursor_pos = 0;
+		// Also clear selection when clearing input
+		self.selected_suggestion = None;
+	}
+
+	/// Insert text at cursor position (used for paste operation).
+	///
+	/// Inserts the given text at the current cursor position and moves
+	/// the cursor to the end of the inserted text.
+	///
+	/// # Example
+	/// ```
+	/// # use dx::prompt::{Prompt, PromptType};
+	/// let mut prompt = Prompt::new("Command: ".to_string(), PromptType::QuickOpen);
+	/// prompt.input = "save".to_string();
+	/// prompt.cursor_pos = 4;
+	/// prompt.insert_str(" file");
+	/// assert_eq!(prompt.input, "save file");
+	/// assert_eq!(prompt.cursor_pos, 9);
+	/// ```
+	pub fn insert_str(&mut self, text: &str) {
+		// If there's a selection, delete it first
+		if self.has_selection() {
+			self.delete_selection();
+		}
+		self.input.insert_str(self.cursor_pos, text);
+		self.cursor_pos += text.len();
+	}
+
+	// ========================================================================
+	// Selection support
+	// ========================================================================
+
+	/// Check if there's an active selection
+	pub fn has_selection(&self) -> bool {
+		self.selection_anchor.is_some() && self.selection_anchor != Some(self.cursor_pos)
+	}
+
+	/// Get the selection range (start, end) where start <= end
+	pub fn selection_range(&self) -> Option<(usize, usize)> {
+		if let Some(anchor) = self.selection_anchor {
+			if anchor != self.cursor_pos {
+				let start = anchor.min(self.cursor_pos);
+				let end = anchor.max(self.cursor_pos);
+				return Some((start, end));
+			}
+		}
+		None
+	}
+
+	/// Get the selected text
+	pub fn selected_text(&self) -> Option<String> {
+		self.selection_range().map(|(start, end)| self.input[start..end].to_string())
+	}
+
+	/// Delete the current selection and return the deleted text
+	pub fn delete_selection(&mut self) -> Option<String> {
+		if let Some((start, end)) = self.selection_range() {
+			self.push_undo_snapshot();
+			let deleted = self.input[start..end].to_string();
+			self.input.drain(start..end);
+			self.cursor_pos = start;
+			self.selection_anchor = None;
+			Some(deleted)
+		} else {
+			None
+		}
+	}
+
+	/// Clear selection without deleting text
+	pub fn clear_selection(&mut self) {
+		self.selection_anchor = None;
+	}
+
+	/// Move cursor left with selection (by grapheme cluster)
+	pub fn move_left_selecting(&mut self) {
+		// Set anchor if not already set
+		if self.selection_anchor.is_none() {
+			self.selection_anchor = Some(self.cursor_pos);
+		}
+
+		// Move cursor left by grapheme cluster
+		if self.cursor_pos > 0 {
+			self.cursor_pos = grapheme::prev_grapheme_boundary(&self.input, self.cursor_pos);
+		}
+	}
+
+	/// Move cursor right with selection (by grapheme cluster)
+	pub fn move_right_selecting(&mut self) {
+		// Set anchor if not already set
+		if self.selection_anchor.is_none() {
+			self.selection_anchor = Some(self.cursor_pos);
+		}
+
+		// Move cursor right by grapheme cluster
+		if self.cursor_pos < self.input.len() {
+			self.cursor_pos = grapheme::next_grapheme_boundary(&self.input, self.cursor_pos);
+		}
+	}
+
+	/// Move to start of input with selection
+	pub fn move_home_selecting(&mut self) {
+		if self.selection_anchor.is_none() {
+			self.selection_anchor = Some(self.cursor_pos);
+		}
+		self.cursor_pos = 0;
+	}
+
+	/// Move to end of input with selection
+	pub fn move_end_selecting(&mut self) {
+		if self.selection_anchor.is_none() {
+			self.selection_anchor = Some(self.cursor_pos);
+		}
+		self.cursor_pos = self.input.len();
+	}
+
+	/// Move to start of previous word with selection
+	/// Mimics Buffer's find_word_start_left behavior
+	pub fn move_word_left_selecting(&mut self) {
+		if self.selection_anchor.is_none() {
+			self.selection_anchor = Some(self.cursor_pos);
+		}
+
+		let bytes = self.input.as_bytes();
+		if self.cursor_pos == 0 {
+			return;
+		}
+
+		let mut new_pos = self.cursor_pos.saturating_sub(1);
+
+		// Skip non-word characters (spaces) backwards
+		while new_pos > 0 && !is_word_char(bytes[new_pos]) {
+			new_pos = new_pos.saturating_sub(1);
+		}
+
+		// Find start of word
+		while new_pos > 0 && is_word_char(bytes[new_pos.saturating_sub(1)]) {
+			new_pos = new_pos.saturating_sub(1);
+		}
+
+		self.cursor_pos = new_pos;
+	}
+
+	/// Move to end of next word with selection
+	/// For selection, we want to select whole words, so move to word END, not word START
+	pub fn move_word_right_selecting(&mut self) {
+		if self.selection_anchor.is_none() {
+			self.selection_anchor = Some(self.cursor_pos);
+		}
+
+		// Use find_word_end_bytes which moves to the END of words
+		let bytes = self.input.as_bytes();
+		let mut new_pos = find_word_end_bytes(bytes, self.cursor_pos);
+
+		// If we didn't move (already at word end), move forward to next word end
+		if new_pos == self.cursor_pos && new_pos < bytes.len() {
+			new_pos = (new_pos + 1).min(bytes.len());
+			new_pos = find_word_end_bytes(bytes, new_pos);
+		}
+
+		self.cursor_pos = new_pos;
+	}
+
+	/// Move to start of previous word (without selection)
+	/// Mimics Buffer's find_word_start_left behavior
+	pub fn move_word_left(&mut self) {
+		self.clear_selection();
+
+		let bytes = self.input.as_bytes();
+		if self.cursor_pos == 0 {
+			return;
+		}
+
+		let mut new_pos = self.cursor_pos.saturating_sub(1);
+
+		// Skip non-word characters (spaces) backwards
+		while new_pos > 0 && !is_word_char(bytes[new_pos]) {
+			new_pos = new_pos.saturating_sub(1);
+		}
+
+		// Find start of word
+		while new_pos > 0 && is_word_char(bytes[new_pos.saturating_sub(1)]) {
+			new_pos = new_pos.saturating_sub(1);
+		}
+
+		self.cursor_pos = new_pos;
+	}
+
+	/// Move to start of next word (without selection)
+	/// Mimics Buffer's find_word_start_right behavior
+	pub fn move_word_right(&mut self) {
+		self.clear_selection();
+
+		let bytes = self.input.as_bytes();
+		if self.cursor_pos >= bytes.len() {
+			return;
+		}
+
+		let mut new_pos = self.cursor_pos;
+
+		// Skip current word
+		while new_pos < bytes.len() && is_word_char(bytes[new_pos]) {
+			new_pos += 1;
+		}
+
+		// Skip non-word characters (spaces)
+		while new_pos < bytes.len() && !is_word_char(bytes[new_pos]) {
+			new_pos += 1;
+		}
+
+		self.cursor_pos = new_pos;
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_delete_word_forward_basic() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world test".to_string();
+		prompt.cursor_pos = 0;
+
+		prompt.delete_word_forward();
+		assert_eq!(prompt.input, " world test");
+		assert_eq!(prompt.cursor_pos, 0);
+	}
+
+	#[test]
+	fn test_delete_word_forward_middle() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world test".to_string();
+		prompt.cursor_pos = 3; // Middle of "hello"
+
+		prompt.delete_word_forward();
+		assert_eq!(prompt.input, "hel world test");
+		assert_eq!(prompt.cursor_pos, 3);
+	}
+
+	#[test]
+	fn test_delete_word_forward_at_space() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world".to_string();
+		prompt.cursor_pos = 5; // At space after "hello"
+
+		prompt.delete_word_forward();
+		assert_eq!(prompt.input, "hello");
+		assert_eq!(prompt.cursor_pos, 5);
+	}
+
+	#[test]
+	fn test_delete_word_backward_basic() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world test".to_string();
+		prompt.cursor_pos = 5; // After "hello"
+
+		prompt.delete_word_backward();
+		assert_eq!(prompt.input, " world test");
+		assert_eq!(prompt.cursor_pos, 0);
+	}
+
+	#[test]
+	fn test_delete_word_backward_middle() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world test".to_string();
+		prompt.cursor_pos = 8; // Middle of "world"
+
+		prompt.delete_word_backward();
+		assert_eq!(prompt.input, "hello rld test");
+		assert_eq!(prompt.cursor_pos, 6);
+	}
+
+	#[test]
+	fn test_delete_word_backward_at_end() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world".to_string();
+		prompt.cursor_pos = 11; // At end
+
+		prompt.delete_word_backward();
+		assert_eq!(prompt.input, "hello ");
+		assert_eq!(prompt.cursor_pos, 6);
+	}
+
+	#[test]
+	fn test_delete_word_with_special_chars() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "save-file-as".to_string();
+		prompt.cursor_pos = 12; // At end
+
+		// Delete "as"
+		prompt.delete_word_backward();
+		assert_eq!(prompt.input, "save-file-");
+		assert_eq!(prompt.cursor_pos, 10);
+
+		// Delete "file"
+		prompt.delete_word_backward();
+		assert_eq!(prompt.input, "save-");
+		assert_eq!(prompt.cursor_pos, 5);
+	}
+
+	#[test]
+	fn test_get_text() {
+		let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+		prompt.input = "test content".to_string();
+
+		assert_eq!(prompt.get_text(), "test content");
+	}
+
+	#[test]
+	fn test_clear() {
+		let mut prompt = Prompt::new("Find: ".to_string(), PromptType::OpenFile);
+		prompt.input = "some text".to_string();
+		prompt.cursor_pos = 5;
+		prompt.selected_suggestion = Some(0);
+
+		prompt.clear();
+
+		assert_eq!(prompt.input, "");
+		assert_eq!(prompt.cursor_pos, 0);
+		assert_eq!(prompt.selected_suggestion, None);
+	}
+
+	#[test]
+	fn test_delete_forward_basic() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello".to_string();
+		prompt.cursor_pos = 1; // After 'h'
+
+		// Simulate delete key (remove 'e')
+		prompt.input.drain(prompt.cursor_pos..prompt.cursor_pos + 1);
+
+		assert_eq!(prompt.input, "hllo");
+		assert_eq!(prompt.cursor_pos, 1);
+	}
+
+	#[test]
+	fn test_delete_at_end() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello".to_string();
+		prompt.cursor_pos = 5; // At end
+
+		// Delete at end should do nothing
+		if prompt.cursor_pos < prompt.input.len() {
+			prompt.input.drain(prompt.cursor_pos..prompt.cursor_pos + 1);
+		}
+
+		assert_eq!(prompt.input, "hello");
+		assert_eq!(prompt.cursor_pos, 5);
+	}
+
+	#[test]
+	fn test_insert_str_at_start() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "world".to_string();
+		prompt.cursor_pos = 0;
+
+		prompt.insert_str("hello ");
+		assert_eq!(prompt.input, "hello world");
+		assert_eq!(prompt.cursor_pos, 6);
+	}
+
+	#[test]
+	fn test_insert_str_at_middle() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "helloworld".to_string();
+		prompt.cursor_pos = 5;
+
+		prompt.insert_str(" ");
+		assert_eq!(prompt.input, "hello world");
+		assert_eq!(prompt.cursor_pos, 6);
+	}
+
+	#[test]
+	fn test_insert_str_at_end() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello".to_string();
+		prompt.cursor_pos = 5;
+
+		prompt.insert_str(" world");
+		assert_eq!(prompt.input, "hello world");
+		assert_eq!(prompt.cursor_pos, 11);
+	}
+
+	#[test]
+	fn test_delete_word_forward_empty() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "".to_string();
+		prompt.cursor_pos = 0;
+
+		prompt.delete_word_forward();
+		assert_eq!(prompt.input, "");
+		assert_eq!(prompt.cursor_pos, 0);
+	}
+
+	#[test]
+	fn test_delete_word_backward_empty() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "".to_string();
+		prompt.cursor_pos = 0;
+
+		prompt.delete_word_backward();
+		assert_eq!(prompt.input, "");
+		assert_eq!(prompt.cursor_pos, 0);
+	}
+
+	#[test]
+	fn test_delete_word_forward_only_spaces() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "   ".to_string();
+		prompt.cursor_pos = 0;
+
+		prompt.delete_word_forward();
+		assert_eq!(prompt.input, "");
+		assert_eq!(prompt.cursor_pos, 0);
+	}
+
+	#[test]
+	fn test_multiple_word_deletions() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "one two three four".to_string();
+		prompt.cursor_pos = 18;
+
+		prompt.delete_word_backward(); // Delete "four"
+		assert_eq!(prompt.input, "one two three ");
+
+		prompt.delete_word_backward(); // Delete "three"
+		assert_eq!(prompt.input, "one two ");
+
+		prompt.delete_word_backward(); // Delete "two"
+		assert_eq!(prompt.input, "one ");
+	}
+
+	// Tests for selection functionality
+	#[test]
+	fn test_selection_with_shift_arrows() {
+		let mut prompt = Prompt::new("Command: ".to_string(), PromptType::QuickOpen);
+		prompt.input = "hello world".to_string();
+		prompt.cursor_pos = 5; // After "hello"
+
+		// No selection initially
+		assert!(!prompt.has_selection());
+		assert_eq!(prompt.selected_text(), None);
+
+		// Move right selecting - should select " "
+		prompt.move_right_selecting();
+		assert!(prompt.has_selection());
+		assert_eq!(prompt.selection_range(), Some((5, 6)));
+		assert_eq!(prompt.selected_text(), Some(" ".to_string()));
+
+		// Move right selecting again - should select " w"
+		prompt.move_right_selecting();
+		assert_eq!(prompt.selection_range(), Some((5, 7)));
+		assert_eq!(prompt.selected_text(), Some(" w".to_string()));
+
+		// Move left selecting - should shrink to " "
+		prompt.move_left_selecting();
+		assert_eq!(prompt.selection_range(), Some((5, 6)));
+		assert_eq!(prompt.selected_text(), Some(" ".to_string()));
+	}
+
+	#[test]
+	fn test_selection_backward() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "abcdef".to_string();
+		prompt.cursor_pos = 4; // After "abcd"
+
+		// Select backward
+		prompt.move_left_selecting();
+		prompt.move_left_selecting();
+		assert!(prompt.has_selection());
+		assert_eq!(prompt.selection_range(), Some((2, 4)));
+		assert_eq!(prompt.selected_text(), Some("cd".to_string()));
+	}
+
+	#[test]
+	fn test_selection_with_home_end() {
+		let mut prompt = Prompt::new("Prompt: ".to_string(), PromptType::QuickOpen);
+		prompt.input = "select this text".to_string();
+		prompt.cursor_pos = 7; // After "select "
+
+		// Select to end
+		prompt.move_end_selecting();
+		assert_eq!(prompt.selection_range(), Some((7, 16)));
+		assert_eq!(prompt.selected_text(), Some("this text".to_string()));
+
+		// Clear and select from current position to home
+		prompt.clear_selection();
+		prompt.move_home_selecting();
+		assert_eq!(prompt.selection_range(), Some((0, 16)));
+		assert_eq!(prompt.selected_text(), Some("select this text".to_string()));
+	}
+
+	#[test]
+	fn test_word_selection() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "one two three".to_string();
+		prompt.cursor_pos = 4; // After "one "
+
+		// Select word right
+		prompt.move_word_right_selecting();
+		assert_eq!(prompt.selection_range(), Some((4, 7)));
+		assert_eq!(prompt.selected_text(), Some("two".to_string()));
+
+		// Select another word
+		prompt.move_word_right_selecting();
+		assert_eq!(prompt.selection_range(), Some((4, 13)));
+		assert_eq!(prompt.selected_text(), Some("two three".to_string()));
+	}
+
+	#[test]
+	fn test_word_selection_backward() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "one two three".to_string();
+		prompt.cursor_pos = 13; // At end
+
+		// Select word left - moves to start of "three"
+		prompt.move_word_left_selecting();
+		assert_eq!(prompt.selection_range(), Some((8, 13)));
+		assert_eq!(prompt.selected_text(), Some("three".to_string()));
+
+		// Note: Currently, calling move_word_left_selecting again when already
+		// at a word boundary doesn't move further back. This matches the behavior
+		// of find_word_start_bytes which finds the start of the current word.
+		// For multi-word backward selection, move cursor backward first, then select.
+	}
+
+	#[test]
+	fn test_delete_selection() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world".to_string();
+		prompt.cursor_pos = 5;
+
+		// Select " world"
+		prompt.move_end_selecting();
+		assert_eq!(prompt.selected_text(), Some(" world".to_string()));
+
+		// Delete selection
+		let deleted = prompt.delete_selection();
+		assert_eq!(deleted, Some(" world".to_string()));
+		assert_eq!(prompt.input, "hello");
+		assert_eq!(prompt.cursor_pos, 5);
+		assert!(!prompt.has_selection());
+	}
+
+	#[test]
+	fn test_insert_deletes_selection() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello world".to_string();
+		prompt.cursor_pos = 0;
+
+		// Select "hello"
+		for _ in 0..5 {
+			prompt.move_right_selecting();
+		}
+		assert_eq!(prompt.selected_text(), Some("hello".to_string()));
+
+		// Insert text - should delete selection first
+		prompt.insert_str("goodbye");
+		assert_eq!(prompt.input, "goodbye world");
+		assert_eq!(prompt.cursor_pos, 7);
+		assert!(!prompt.has_selection());
+	}
+
+	#[test]
+	fn test_clear_selection() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "test".to_string();
+		prompt.cursor_pos = 0;
+
+		// Create selection
+		prompt.move_end_selecting();
+		assert!(prompt.has_selection());
+
+		// Clear selection
+		prompt.clear_selection();
+		assert!(!prompt.has_selection());
+		assert_eq!(prompt.cursor_pos, 4); // Cursor should remain at end
+		assert_eq!(prompt.input, "test"); // Input unchanged
+	}
+
+	#[test]
+	fn test_selection_edge_cases() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "abc".to_string();
+		prompt.cursor_pos = 3;
+
+		// Select beyond end should stop at end (no movement, no selection)
+		prompt.move_right_selecting();
+		assert_eq!(prompt.cursor_pos, 3);
+		// Since cursor didn't move, anchor equals cursor, so no selection
+		assert_eq!(prompt.selection_range(), None);
+		assert_eq!(prompt.selected_text(), None);
+
+		// Delete non-existent selection should return None
+		assert_eq!(prompt.delete_selection(), None);
+		assert_eq!(prompt.input, "abc");
+	}
+
+	#[test]
+	fn test_selection_with_unicode() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "hello 世界 world".to_string();
+		prompt.cursor_pos = 6; // After "hello "
+
+		// Select the Chinese characters
+		for _ in 0..2 {
+			prompt.move_right_selecting();
+		}
+
+		let selected = prompt.selected_text().unwrap();
+		assert_eq!(selected, "世界");
+
+		// Delete should work correctly
+		prompt.delete_selection();
+		assert_eq!(prompt.input, "hello  world");
+	}
+
+	// BUG REPRODUCTION TESTS
+
+	/// Test that Ctrl+Shift+Left continues past first word boundary (was bug #2)
+	#[test]
+	fn test_word_selection_continues_across_words() {
+		let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+		prompt.input = "one two three".to_string();
+		prompt.cursor_pos = 13; // At end
+
+		// First Ctrl+Shift+Left - selects "three"
+		prompt.move_word_left_selecting();
+		assert_eq!(prompt.selection_range(), Some((8, 13)));
+		assert_eq!(prompt.selected_text(), Some("three".to_string()));
+
+		// Second Ctrl+Shift+Left - should extend to "two three"
+		// Now correctly moves back one more word when already at word boundary
+		prompt.move_word_left_selecting();
+
+		// Selection should extend to include "two three"
+		assert_eq!(prompt.selection_range(), Some((4, 13)));
+		assert_eq!(prompt.selected_text(), Some("two three".to_string()));
+	}
+
+	// Property-based tests for Prompt operations
+	#[cfg(test)]
+	mod property_tests {
+		use super::*;
+		use proptest::prelude::*;
+
+		proptest! {
+				/// Property: delete_word_backward should never increase input length
+				#[test]
+				fn prop_delete_word_backward_shrinks(
+						input in "[a-zA-Z0-9_ ]{0,50}",
+						cursor_pos in 0usize..50
+				) {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input.clone();
+						prompt.cursor_pos = cursor_pos.min(input.len());
+
+						let original_len = prompt.input.len();
+						prompt.delete_word_backward();
+
+						prop_assert!(prompt.input.len() <= original_len);
+				}
+
+				/// Property: delete_word_forward should never increase input length
+				#[test]
+				fn prop_delete_word_forward_shrinks(
+						input in "[a-zA-Z0-9_ ]{0,50}",
+						cursor_pos in 0usize..50
+				) {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input.clone();
+						prompt.cursor_pos = cursor_pos.min(input.len());
+
+						let original_len = prompt.input.len();
+						prompt.delete_word_forward();
+
+						prop_assert!(prompt.input.len() <= original_len);
+				}
+
+				/// Property: delete_word_backward should not move cursor past input start
+				#[test]
+				fn prop_delete_word_backward_cursor_valid(
+						input in "[a-zA-Z0-9_ ]{0,50}",
+						cursor_pos in 0usize..50
+				) {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input.clone();
+						prompt.cursor_pos = cursor_pos.min(input.len());
+
+						prompt.delete_word_backward();
+
+						prop_assert!(prompt.cursor_pos <= prompt.input.len());
+				}
+
+				/// Property: delete_word_forward should keep cursor in valid range
+				#[test]
+				fn prop_delete_word_forward_cursor_valid(
+						input in "[a-zA-Z0-9_ ]{0,50}",
+						cursor_pos in 0usize..50
+				) {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input.clone();
+						prompt.cursor_pos = cursor_pos.min(input.len());
+
+						prompt.delete_word_forward();
+
+						prop_assert!(prompt.cursor_pos <= prompt.input.len());
+				}
+
+				/// Property: insert_str should increase length by inserted text length
+				#[test]
+				fn prop_insert_str_length(
+						input in "[a-zA-Z0-9_ ]{0,30}",
+						insert in "[a-zA-Z0-9_ ]{0,20}",
+						cursor_pos in 0usize..30
+				) {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input.clone();
+						prompt.cursor_pos = cursor_pos.min(input.len());
+
+						let original_len = prompt.input.len();
+						prompt.insert_str(&insert);
+
+						prop_assert_eq!(prompt.input.len(), original_len + insert.len());
+				}
+
+				/// Property: insert_str should move cursor by inserted text length
+				#[test]
+				fn prop_insert_str_cursor(
+						input in "[a-zA-Z0-9_ ]{0,30}",
+						insert in "[a-zA-Z0-9_ ]{0,20}",
+						cursor_pos in 0usize..30
+				) {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input.clone();
+						let original_pos = cursor_pos.min(input.len());
+						prompt.cursor_pos = original_pos;
+
+						prompt.insert_str(&insert);
+
+						prop_assert_eq!(prompt.cursor_pos, original_pos + insert.len());
+				}
+
+				/// Property: clear should always result in empty string and zero cursor
+				#[test]
+				fn prop_clear_resets(input in "[a-zA-Z0-9_ ]{0,50}") {
+						let mut prompt = Prompt::new("Test: ".to_string(), PromptType::Search);
+						prompt.input = input;
+						prompt.cursor_pos = prompt.input.len();
+
+						prompt.clear();
+
+						prop_assert_eq!(prompt.input, "");
+						prop_assert_eq!(prompt.cursor_pos, 0);
+				}
+		}
+	}
+}

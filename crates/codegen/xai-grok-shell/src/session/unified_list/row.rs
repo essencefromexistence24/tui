@@ -24,7 +24,7 @@ impl UnifiedRow {
         }
     }
 
-    pub(crate) fn into_ext_superset(self) -> ExtSupersetRow {
+    pub fn into_ext_superset(self) -> ExtSupersetRow {
         let UnifiedRow {
             kind,
             legacy,
@@ -39,7 +39,7 @@ impl UnifiedRow {
         }
     }
 
-    pub(crate) fn into_session_info(self) -> SessionInfo {
+    pub fn into_session_info(self) -> SessionInfo {
         let UnifiedRow {
             kind,
             legacy,

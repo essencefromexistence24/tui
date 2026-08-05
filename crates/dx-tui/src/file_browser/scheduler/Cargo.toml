@@ -1,0 +1,43 @@
+[package]
+name = "fb-scheduler"
+description            = "DX TUI file-browser task scheduler"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-binding = { path = "../binding" }
+fb-config = { path = "../config" }
+fb-dds = { path = "../dds" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-parser = { path = "../parser" }
+fb-plugin = { path = "../plugin" }
+fb-proxy = { path = "../proxy" }
+fb-shared = { path = "../shared" }
+fb-term = { path = "../term" }
+fb-vfs = { path = "../vfs" }
+
+# External dependencies
+anyhow                 = { workspace = true }
+async-priority-channel = "0.2.0"
+foldhash               = { workspace = true }
+hashbrown              = { workspace = true }
+lru                    = { workspace = true }
+mlua                   = { workspace = true }
+ordered-float          = { workspace = true }
+parking_lot            = { workspace = true }
+serde                  = { workspace = true }
+tokio                  = { workspace = true }
+tokio-util             = { workspace = true }
+tracing                = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+libc = { workspace = true }

@@ -1,0 +1,257 @@
+# Vercel-inspired theme using theme.css design system colors
+# Based on the Vercel design system with OKLCH color space
+# : Flavor {{{
+
+[flavor]
+dark  = ""
+light = ""
+
+# : }}}
+
+# : App {{{
+
+[app]
+# Background: oklch(0 0 0) - pure black
+overall = { bg = "#000000" }
+
+# : }}}
+
+# : Manager {{{
+
+[mgr]
+# Foreground: oklch(1 0 0) - pure white
+cwd = { fg = "#ffffff", bold = true }
+
+# Find
+find_keyword  = { fg = "#ffffff", bold = true, italic = true, underline = true }
+find_position = { fg = "#a3a3a3", bg = "reset", bold = true, italic = true }
+
+# Symlink
+symlink_target = { fg = "#737373", italic = true }
+
+# Marker
+marker_copied   = { fg = "#22c55e", bg = "#22c55e" }
+marker_cut      = { fg = "#ef4444", bg = "#ef4444" }
+marker_marked   = { fg = "#3b82f6", bg = "#3b82f6" }
+marker_selected = { fg = "#f59e0b", bg = "#f59e0b" }
+marker_symbol   = "│"
+
+# Count
+count_copied   = { fg = "#ffffff", bg = "#22c55e" }
+count_cut      = { fg = "#ffffff", bg = "#ef4444" }
+count_selected = { fg = "#000000", bg = "#f59e0b" }
+
+# Border - using border color from theme.css: oklch(0.2600 0 0)
+border_symbol = "│"
+border_style  = { fg = "#424242" }
+
+# Highlighting
+syntect_theme = ""
+
+# : }}}
+
+# : Tabs {{{
+
+[tabs]
+# Primary: oklch(1 0 0) on background
+active   = { fg = "#000000", bg = "#ffffff", bold = true }
+# Muted: oklch(0.2300 0 0)
+inactive = { fg = "#ffffff", bg = "#3a3a3a" }
+
+# Separator
+sep_inner = { open = "", close = "" }
+sep_outer = { open = "", close = "" }
+
+# : }}}
+
+# : Mode {{{
+
+[mode]
+normal_main = { fg = "#000000", bg = "#ffffff", bold = true }
+normal_alt  = { fg = "#ffffff", bg = "#3a3a3a" }
+
+# Select mode
+select_main = { fg = "#ffffff", bg = "#3b82f6", bold = true }
+select_alt  = { fg = "#3b82f6", bg = "#3a3a3a" }
+
+# Unset mode
+unset_main = { fg = "#ffffff", bg = "#ef4444", bold = true }
+unset_alt  = { fg = "#ef4444", bg = "#3a3a3a" }
+
+# : }}}
+
+# : Indicator of hovered file {{{
+
+[indicator]
+parent  = { reversed = true }
+current = { reversed = true }
+preview = { underline = true }
+padding = { open = "", close = "" }
+
+# : }}}
+
+# : Status bar {{{
+
+[status]
+overall   = { bg = "#000000" }
+sep_left  = { open = "", close = "" }
+sep_right = { open = "", close = "" }
+
+# Permissions
+perm_sep   = { fg = "#525252" }
+perm_type  = { fg = "#22c55e" }
+perm_read  = { fg = "#f59e0b" }
+perm_write = { fg = "#ef4444" }
+perm_exec  = { fg = "#3b82f6" }
+
+# Progress
+progress_label  = { bold = true }
+progress_normal = { fg = "#22c55e", bg = "#000000" }
+progress_error  = { fg = "#f59e0b", bg = "#ef4444" }
+
+# : }}}
+
+# : Which {{{
+
+[which]
+cols            = 3
+mask            = { bg = "#000000" }
+cand            = { fg = "#ffffff" }
+rest            = { fg = "#737373" }
+desc            = { fg = "#a3a3a3" }
+separator       = "  "
+separator_style = { fg = "#525252" }
+
+# : }}}
+
+# : Confirmation {{{
+
+[confirm]
+# Border: oklch(0.2600 0 0)
+border     = { fg = "#424242" }
+title      = { fg = "#ffffff", bold = true }
+body       = { fg = "#ffffff" }
+list       = { fg = "#ffffff" }
+btn_yes    = { fg = "#000000", bg = "#ffffff", bold = true }
+btn_no     = { fg = "#ffffff", bg = "#3a3a3a" }
+btn_labels = [ "  [Y]es  ", "  (N)o  " ]
+
+# : }}}
+
+# : Spotter {{{
+
+[spot]
+border = { fg = "#424242" }
+title  = { fg = "#ffffff", bold = true }
+
+# Table
+tbl_col  = { fg = "#ffffff", bold = true }
+tbl_cell = { fg = "#f59e0b" }
+
+# : }}}
+
+# : Notification {{{
+
+[notify]
+title_info  = { fg = "#22c55e" }
+title_warn  = { fg = "#f59e0b" }
+title_error = { fg = "#ef4444" }
+
+# Icons
+icon_info  = ""
+icon_warn  = ""
+icon_error = ""
+
+# : }}}
+
+# : Picker {{{
+
+[pick]
+# Border using theme.css border color
+border   = { fg = "#424242" }
+# Active using primary foreground
+active   = { fg = "#ffffff", bg = "#3a3a3a", bold = true }
+# Inactive using muted foreground
+inactive = { fg = "#a3a3a3" }
+
+# : }}}
+
+# : Input {{{
+
+[input]
+border   = { fg = "#424242" }
+title    = { fg = "#ffffff", bold = true }
+value    = { fg = "#ffffff" }
+selected = { reversed = true }
+
+# : }}}
+
+# : Completion {{{
+
+[cmp]
+border   = { fg = "#424242" }
+active   = { fg = "#000000", bg = "#ffffff", bold = true }
+inactive = { fg = "#a3a3a3" }
+
+# Icons
+icon_file    = ""
+icon_folder  = ""
+icon_command = ""
+
+# : }}}
+
+# : Task manager {{{
+
+[tasks]
+border  = { fg = "#424242" }
+title   = { fg = "#ffffff", bold = true }
+hovered = { fg = "#ffffff", bg = "#3a3a3a", bold = true }
+
+# : }}}
+
+# : Help menu {{{
+
+[help]
+on      = { fg = "#3b82f6" }
+run     = { fg = "#a855f7" }
+desc    = { fg = "#ffffff" }
+hovered = { fg = "#000000", bg = "#ffffff", bold = true }
+footer  = { fg = "#000000", bg = "#ffffff" }
+
+# : }}}
+
+# : File-specific styles {{{
+
+[filetype]
+rules = [
+	# Image
+	{ mime = "image/*", fg = "#f59e0b" },
+	# Media
+	{ mime = "{audio,video}/*", fg = "#a855f7" },
+	# Archive
+	{ mime = "application/{zip,rar,7z*,tar,gzip,xz,zstd,bzip*,lzma,compress,archive,cpio,arj,xar,ms-cab*}", fg = "#ef4444" },
+	# Document
+	{ mime = "application/{pdf,doc,rtf}", fg = "#3b82f6" },
+	# Virtual file system
+	{ mime = "vfs/{absent,stale}", fg = "#737373" },
+	# Special file
+	{ url = "*", is = "orphan", bg = "#ef4444" },
+	{ url = "*", is = "exec"  , fg = "#22c55e" },
+	# Dummy file
+	{ url = "*", is = "dummy", bg = "#ef4444" },
+	{ url = "*/", is = "dummy", bg = "#ef4444" },
+	# Fallback
+	{ url = "*/", fg = "#3b82f6" }
+]
+
+# : }}}
+
+# : Icons {{{
+
+[icon]
+globs = []
+dirs  = []
+files = []
+exts  = []
+
+# : }}}

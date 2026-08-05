@@ -506,6 +506,7 @@ fn paint_peek_config_badge(
     }
     let info = PromptInfo {
         model_name: &model_label,
+        mode_name: None,
         flags: &flags,
         multiline,
         usage_warning: None,

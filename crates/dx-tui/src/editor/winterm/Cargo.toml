@@ -1,0 +1,16 @@
+[package]
+name = "dx-winterm"
+version = "1.0.0"
+edition = "2021"
+description = "Windows terminal I/O helpers for dx editor (VT input, console relay, terminal size)"
+
+[dependencies]
+tracing.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+] }

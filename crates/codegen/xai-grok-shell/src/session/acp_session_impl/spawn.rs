@@ -449,9 +449,6 @@ pub(crate) async fn spawn_session_actor(
         .filter(|item| matches!(item, ConversationItem::User(_)))
         .count();
     let initial_conversation_len = conversation.len();
-    let initial_last_recap_main_turn = crate::session::helpers::session_recap::load_recap_watermark(
-        &crate::session::persistence::session_dir(&session_info),
-    );
     let initial_user_count = initial_prompt_index.saturating_sub(1) as u32;
     let initial_assistant_count = conversation
         .iter()
@@ -1092,7 +1089,16 @@ pub(crate) async fn spawn_session_actor(
     ) {
         tracing::warn!(error = %e, "failed to bind local session toolset");
     }
-    let system_prompt = agent.system_prompt().to_string();
+    // A full Grok system prompt can consume thousands of tokens before tool
+    // schemas or conversation history are added. Small local CPU models then
+    // appear frozen while llama-server performs prompt ingestion. Keep the
+    // complete harness for hosted models and use the established compact
+    // prompt for loopback inference.
+    let system_prompt = if crate::agent::local_model::is_local_base_url(&sampling_config.base_url) {
+        agent.compact_system_prompt().to_string()
+    } else {
+        agent.system_prompt().to_string()
+    };
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
@@ -1753,7 +1759,7 @@ pub(crate) async fn spawn_session_actor(
         ),
         observability_bridge: obs_bridge,
         current_turn_number: std::cell::Cell::new(0),
-        last_recap_main_turn: std::cell::Cell::new(initial_last_recap_main_turn),
+        last_recap_main_turn: std::cell::Cell::new(0),
         recap_in_flight: std::cell::Cell::new(false),
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),

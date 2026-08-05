@@ -1,0 +1,63 @@
+use anyhow::bail;
+use mlua::{ExternalError, FromLua, IntoLua, Lua, Table, Value};
+use fb_binding::{FileRef, elements::{Rect, Renderable}};
+use fb_shared::event::ActionCow;
+
+#[derive(Clone, Debug)]
+pub struct UpdatePeekedOpt {
+	pub lock: PreviewLock,
+}
+
+impl TryFrom<ActionCow> for UpdatePeekedOpt {
+	type Error = anyhow::Error;
+
+	fn try_from(mut a: ActionCow) -> Result<Self, Self::Error> {
+		if let Some(opt) = a.take_any2("opt") {
+			return opt;
+		}
+
+		let Some(lock) = a.take_any("lock") else {
+			bail!("Invalid 'lock' in UpdatePeekedOpt");
+		};
+
+		Ok(Self { lock })
+	}
+}
+
+impl FromLua for UpdatePeekedOpt {
+	fn from_lua(_: Value, _: &Lua) -> mlua::Result<Self> { Err("unsupported".into_lua_err()) }
+}
+
+impl IntoLua for UpdatePeekedOpt {
+	fn into_lua(self, _: &Lua) -> mlua::Result<Value> { Err("unsupported".into_lua_err()) }
+}
+
+// --- Lock
+#[derive(Clone, Debug, Default)]
+pub struct PreviewLock {
+	pub url:  fb_shared::url::UrlBuf,
+	pub cha:  fb_fs::cha::Cha,
+	pub mime: String,
+
+	pub skip: usize,
+	pub area: Rect,
+	pub data: Vec<Renderable>,
+}
+
+impl TryFrom<Table> for PreviewLock {
+	type Error = mlua::Error;
+
+	fn try_from(t: Table) -> Result<Self, Self::Error> {
+		let file: FileRef = t.raw_get("file")?;
+		Ok(Self {
+			url:  file.url_owned(),
+			cha:  file.cha,
+			mime: t.raw_get("mime")?,
+
+			skip: t.raw_get("skip")?,
+			area: t.raw_get("area")?,
+			data: Default::default(),
+		})
+	}
+}
+

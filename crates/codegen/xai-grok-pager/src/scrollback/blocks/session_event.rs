@@ -310,6 +310,9 @@ pub struct SessionEventBlock {
     /// The prompt turn a terminal marker belongs to, when known. Gates
     /// which stop-hook batches may merge into it.
     pub prompt_id: Option<String>,
+    /// Compact per-response metadata shown in place of the legacy
+    /// "Worked for …" label when available.
+    pub response_footer: Option<String>,
 }
 
 impl SessionEventBlock {
@@ -319,6 +322,7 @@ impl SessionEventBlock {
             event,
             stop_hooks: Vec::new(),
             prompt_id: None,
+            response_footer: None,
         }
     }
 
@@ -333,7 +337,13 @@ impl SessionEventBlock {
             event,
             stop_hooks,
             prompt_id,
+            response_footer: None,
         }
+    }
+
+    pub fn with_response_footer(mut self, footer: String) -> Self {
+        self.response_footer = Some(footer);
+        self
     }
 
     /// Whether any attached stop hook actually ran (non-skipped). Gates the
@@ -530,7 +540,10 @@ impl BlockContent for SessionEventBlock {
             theme.muted()
         };
 
-        let text = self.event.message();
+        let text = self
+            .response_footer
+            .clone()
+            .unwrap_or_else(|| self.event.message());
         let wrapped = if text.contains('\n') {
             let input_lines = text
                 .split('\n')

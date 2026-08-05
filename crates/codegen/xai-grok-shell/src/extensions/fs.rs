@@ -35,7 +35,7 @@ fn default_include_hidden() -> bool {
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FsListRequest {
+pub struct FsListRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,
@@ -74,14 +74,14 @@ impl FsListRequest {
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FsExistsRequest {
+pub struct FsExistsRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FsReadFileRequest {
+pub struct FsReadFileRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,
@@ -109,7 +109,7 @@ pub(crate) struct FsReadFileRequest {
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FsWriteFileRequest {
+pub struct FsWriteFileRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,
@@ -119,7 +119,7 @@ pub(crate) struct FsWriteFileRequest {
 }
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FsDeleteFileRequest {
+pub struct FsDeleteFileRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,

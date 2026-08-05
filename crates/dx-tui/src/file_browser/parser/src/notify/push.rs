@@ -1,0 +1,73 @@
+use std::{str::FromStr, time::Duration};
+
+use anyhow::anyhow;
+use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Value};
+use serde::{Deserialize, Serialize};
+use serde_with::{DurationSecondsWithFrac, serde_as};
+use fb_binding::SER_OPT;
+use fb_config::{Style, THEME};
+use fb_shared::event::ActionCow;
+
+#[serde_as]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PushOpt {
+	pub title:   String,
+	pub content: String,
+	#[serde(default)]
+	pub level:   PushLevel,
+	#[serde_as(as = "DurationSecondsWithFrac<f64>")]
+	pub timeout: Duration,
+}
+
+impl TryFrom<ActionCow> for PushOpt {
+	type Error = anyhow::Error;
+
+	fn try_from(mut a: ActionCow) -> Result<Self, Self::Error> {
+		a.take_any("opt").ok_or_else(|| anyhow!("Invalid 'opt' in NotifyOpt"))
+	}
+}
+
+impl FromLua for PushOpt {
+	fn from_lua(value: Value, lua: &Lua) -> mlua::Result<Self> { lua.from_value(value) }
+}
+
+impl IntoLua for PushOpt {
+	fn into_lua(self, lua: &Lua) -> mlua::Result<Value> { lua.to_value_with(&self, SER_OPT) }
+}
+
+// --- Level
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PushLevel {
+	#[default]
+	Info,
+	Warn,
+	Error,
+}
+
+impl PushLevel {
+	pub fn icon(self) -> &'static str {
+		match self {
+			Self::Info => &THEME.notify.icon_info,
+			Self::Warn => &THEME.notify.icon_warn,
+			Self::Error => &THEME.notify.icon_error,
+		}
+	}
+
+	pub fn style(self) -> Style {
+		match self {
+			Self::Info => THEME.notify.title_info,
+			Self::Warn => THEME.notify.title_warn,
+			Self::Error => THEME.notify.title_error,
+		}
+	}
+}
+
+impl FromStr for PushLevel {
+	type Err = serde::de::value::Error;
+
+	fn from_str(s: &str) -> Result<Self, Self::Err> {
+		Self::deserialize(serde::de::value::StrDeserializer::new(s))
+	}
+}
+

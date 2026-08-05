@@ -1,0 +1,880 @@
+use super::node::{NodeId, NodeState, TreeNode};
+use crate::model::filesystem::DirEntry;
+use crate::services::fs::FsManager;
+use std::collections::HashMap;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+/// File tree with lazy loading support
+///
+/// The tree starts with just the root node. Directories are only read
+/// when explicitly expanded via `expand_node()`. This makes the tree
+/// efficient even for very large directory structures.
+#[derive(Debug)]
+pub struct FileTree {
+	/// Root directory path
+	root_path: PathBuf,
+	/// All nodes indexed by ID
+	nodes: HashMap<NodeId, TreeNode>,
+	/// Path to node ID mapping for quick lookups
+	path_to_node: HashMap<PathBuf, NodeId>,
+	/// Root node ID
+	root_id: NodeId,
+	/// Next node ID to assign
+	next_id: usize,
+	/// Filesystem manager for async operations
+	fs_manager: Arc<FsManager>,
+}
+
+impl FileTree {
+	/// Create a new file tree rooted at the given path
+	///
+	/// # Errors
+	///
+	/// Returns an error if the root path doesn't exist or isn't a directory.
+	pub async fn new(root_path: PathBuf, fs_manager: Arc<FsManager>) -> io::Result<Self> {
+		// Verify root path exists and is a directory
+		if !fs_manager.exists(&root_path).await {
+			return Err(io::Error::new(
+				io::ErrorKind::NotFound,
+				format!("Path does not exist: {:?}", root_path),
+			));
+		}
+
+		if !fs_manager.is_dir(&root_path).await? {
+			return Err(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!("Path is not a directory: {:?}", root_path),
+			));
+		}
+
+		// Get root entry
+		let root_entry = fs_manager.get_entry(&root_path).await?;
+
+		// Create root node
+		let root_id = NodeId(0);
+		let root_node = TreeNode::new(root_id, root_entry.clone(), None);
+
+		let mut nodes = HashMap::new();
+		nodes.insert(root_id, root_node);
+
+		let mut path_to_node = HashMap::new();
+		path_to_node.insert(root_path.clone(), root_id);
+
+		Ok(Self { root_path, nodes, path_to_node, root_id, next_id: 1, fs_manager })
+	}
+
+	/// Get the root node ID
+	pub fn root_id(&self) -> NodeId {
+		self.root_id
+	}
+
+	/// Get the root path
+	pub fn root_path(&self) -> &Path {
+		&self.root_path
+	}
+
+	/// Get a node by ID
+	pub fn get_node(&self, id: NodeId) -> Option<&TreeNode> {
+		self.nodes.get(&id)
+	}
+
+	/// Get a mutable reference to a node by ID
+	fn get_node_mut(&mut self, id: NodeId) -> Option<&mut TreeNode> {
+		self.nodes.get_mut(&id)
+	}
+
+	/// Get a node by path
+	pub fn get_node_by_path(&self, path: &Path) -> Option<&TreeNode> {
+		self.path_to_node.get(path).and_then(|id| self.get_node(*id))
+	}
+
+	/// Get all nodes
+	pub fn all_nodes(&self) -> impl Iterator<Item = &TreeNode> {
+		self.nodes.values()
+	}
+
+	/// Expand a directory node (load its children)
+	///
+	/// This is an async operation that reads the directory contents and creates
+	/// child nodes. If the directory is already expanded, this does nothing.
+	///
+	/// # Errors
+	///
+	/// Returns an error if the directory cannot be read.
+	pub async fn expand_node(&mut self, id: NodeId) -> io::Result<()> {
+		// Check if node exists and is a directory
+		let node =
+			self.get_node(id).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Node not found"))?;
+
+		if !node.is_dir() {
+			return Err(io::Error::new(io::ErrorKind::InvalidInput, "Cannot expand a file node"));
+		}
+
+		// If already expanded, do nothing
+		if node.is_expanded() {
+			return Ok(());
+		}
+
+		// Set state to loading
+		if let Some(node) = self.get_node_mut(id) {
+			node.state = NodeState::Loading;
+		}
+
+		// Read directory contents with metadata (for file sizes)
+		let path = self.get_node(id).unwrap().entry.path.clone();
+		let result = self.fs_manager.list_dir_with_metadata(path.clone()).await;
+
+		match result {
+			Ok(entries) => {
+				// Sort entries: directories first, then by name using
+				// a natural (alphanumeric) comparison so `chapter-2`
+				// sorts before `chapter-10` (issue #2073).
+				let mut sorted_entries = entries;
+				sorted_entries.sort_by(|a, b| match (a.is_dir(), b.is_dir()) {
+					(true, false) => std::cmp::Ordering::Less,
+					(false, true) => std::cmp::Ordering::Greater,
+					_ => natural_cmp(&a.name, &b.name),
+				});
+
+				// Create child nodes
+				let mut child_ids = Vec::new();
+				for entry in sorted_entries {
+					let child_id = self.add_node(entry, Some(id));
+					child_ids.push(child_id);
+				}
+
+				// Update parent node
+				if let Some(node) = self.get_node_mut(id) {
+					node.children = child_ids;
+					node.state = NodeState::Expanded;
+				}
+
+				Ok(())
+			}
+			Err(e) => {
+				// Set error state
+				if let Some(node) = self.get_node_mut(id) {
+					node.state = NodeState::Error(e.to_string());
+				}
+				Err(e)
+			}
+		}
+	}
+
+	/// Collapse a directory node
+	///
+	/// This removes all child nodes from memory to save space.
+	/// They will be reloaded if the directory is expanded again.
+	pub fn collapse_node(&mut self, id: NodeId) {
+		if let Some(node) = self.get_node(id) {
+			if !node.is_dir() {
+				return;
+			}
+
+			// Collect child IDs to remove
+			let children_to_remove: Vec<NodeId> = node.children.clone();
+
+			// Remove all descendants recursively
+			for child_id in children_to_remove {
+				self.remove_node_recursive(child_id);
+			}
+		}
+
+		// Update parent node state
+		if let Some(node) = self.get_node_mut(id) {
+			node.children.clear();
+			node.state = NodeState::Collapsed;
+		}
+	}
+
+	/// Toggle node expansion (expand if collapsed, collapse if expanded)
+	pub async fn toggle_node(&mut self, id: NodeId) -> io::Result<()> {
+		let node =
+			self.get_node(id).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Node not found"))?;
+
+		if !node.is_dir() {
+			return Ok(());
+		}
+
+		if node.is_expanded() {
+			self.collapse_node(id);
+			Ok(())
+		} else {
+			self.expand_node(id).await
+		}
+	}
+
+	/// Refresh a node (re-read directory contents)
+	///
+	/// This is useful when filesystem contents have changed.
+	pub async fn refresh_node(&mut self, id: NodeId) -> io::Result<()> {
+		// Collapse and re-expand
+		self.collapse_node(id);
+		self.expand_node(id).await
+	}
+
+	/// Re-read this directory from disk, preserving the expansion state of
+	/// every descendant that is still present afterwards.
+	///
+	/// Implementation is deliberately simple: snapshot the paths of all
+	/// currently-expanded descendants, run a normal `refresh_node` (which
+	/// rebuilds child ids via the well-tested `expand_node` path), then
+	/// re-walk each previously-expanded path so its subtree loads again.
+	/// Descendants whose path no longer exists on disk are silently
+	/// dropped — `expand_to_path` returns None for them.
+	///
+	/// Callers should not rely on NodeIds under `id` surviving the call:
+	/// refresh_node recycles every descendant id. Cursor / multi-selection
+	/// state should be re-resolved by path afterwards.
+	pub async fn reload_expanded_node(&mut self, id: NodeId) -> io::Result<()> {
+		let expanded_paths = self.collect_expanded_descendant_paths(id);
+		self.refresh_node(id).await?;
+		// Re-expand each previously-expanded descendant in tree order —
+		// i.e. shallowest first, so `expand_to_path` can walk through them.
+		// `expand_to_path` only expands intermediate ancestors along the
+		// way, so also call `expand_node` on the resolved target so the
+		// directory's own children load.
+		for path in expanded_paths {
+			if let Some(target_id) = self.expand_to_path(&path).await {
+				if let Err(e) = self.expand_node(target_id).await {
+					tracing::warn!("Failed to re-expand {:?} after tree reload: {}", path, e);
+				}
+			}
+		}
+		Ok(())
+	}
+
+	/// Collect the on-disk paths of every descendant of `id` that is in
+	/// `Expanded` state. Excludes `id` itself — the caller is about to
+	/// refresh that node, which handles its own expansion.
+	fn collect_expanded_descendant_paths(&self, id: NodeId) -> Vec<PathBuf> {
+		let mut out = Vec::new();
+		if let Some(node) = self.get_node(id) {
+			for &child in &node.children {
+				self.collect_expanded_recursive(child, &mut out);
+			}
+		}
+		out
+	}
+
+	fn collect_expanded_recursive(&self, id: NodeId, out: &mut Vec<PathBuf>) {
+		if let Some(node) = self.get_node(id) {
+			if node.is_expanded() {
+				out.push(node.entry.path.clone());
+				for &child in &node.children {
+					self.collect_expanded_recursive(child, out);
+				}
+			}
+		}
+	}
+
+	/// Get all visible nodes in tree order
+	///
+	/// Returns a flat list of nodes that should be visible, respecting
+	/// the expansion state of parent directories.
+	pub fn get_visible_nodes(&self) -> Vec<NodeId> {
+		let mut visible = Vec::new();
+		self.collect_visible_recursive(self.root_id, &mut visible);
+		visible
+	}
+
+	/// Recursively collect visible nodes
+	fn collect_visible_recursive(&self, id: NodeId, visible: &mut Vec<NodeId>) {
+		visible.push(id);
+
+		if let Some(node) = self.get_node(id) {
+			if node.is_expanded() {
+				for &child_id in &node.children {
+					self.collect_visible_recursive(child_id, visible);
+				}
+			}
+		}
+	}
+
+	/// Get the parent chain for a node (from root to node)
+	pub fn get_ancestors(&self, id: NodeId) -> Vec<NodeId> {
+		let mut ancestors = Vec::new();
+		let mut current = Some(id);
+
+		while let Some(node_id) = current {
+			ancestors.push(node_id);
+			current = self.get_node(node_id).and_then(|n| n.parent);
+		}
+
+		ancestors.reverse();
+		ancestors
+	}
+
+	/// Get the depth of a node (root is 0)
+	pub fn get_depth(&self, id: NodeId) -> usize {
+		self.get_ancestors(id).len() - 1
+	}
+
+	/// Find node by relative path from root
+	pub fn find_by_relative_path(&self, relative_path: &Path) -> Option<NodeId> {
+		let full_path = self.root_path.join(relative_path);
+		self.path_to_node.get(&full_path).copied()
+	}
+
+	/// Add a new node to the tree
+	fn add_node(&mut self, entry: DirEntry, parent: Option<NodeId>) -> NodeId {
+		let id = NodeId(self.next_id);
+		self.next_id += 1;
+
+		let node = TreeNode::new(id, entry.clone(), parent);
+		self.path_to_node.insert(entry.path.clone(), id);
+		self.nodes.insert(id, node);
+
+		id
+	}
+
+	/// Remove a node and all its descendants
+	fn remove_node_recursive(&mut self, id: NodeId) {
+		if let Some(node) = self.get_node(id) {
+			let children = node.children.clone();
+			let path = node.entry.path.clone();
+
+			// Remove all children first
+			for child_id in children {
+				self.remove_node_recursive(child_id);
+			}
+
+			// Remove from path mapping
+			self.path_to_node.remove(&path);
+
+			// Remove node itself
+			self.nodes.remove(&id);
+		}
+	}
+
+	/// Get number of nodes currently in memory
+	pub fn node_count(&self) -> usize {
+		self.nodes.len()
+	}
+
+	/// Expand all directories along a path and return the final node ID
+	///
+	/// This is useful for revealing a specific file in the tree, even if its
+	/// parent directories are collapsed. All parent directories will be expanded
+	/// as needed.
+	///
+	/// # Arguments
+	///
+	/// * `path` - The full path to the target file or directory
+	///
+	/// # Returns
+	///
+	/// Returns the NodeId of the target if found, or None if:
+	/// - The path is not under the root directory
+	/// - The path doesn't exist
+	/// - There was an error expanding intermediate directories
+	///
+	/// # Example
+	///
+	/// ```ignore
+	/// // Expand to src/components/App.js
+	/// if let Some(node_id) = tree.expand_to_path(&project_root.join("src/components/App.js")).await {
+	///     // All parent directories (src, src/components) are now expanded
+	///     // node_id points to App.js
+	/// }
+	/// ```
+	pub async fn expand_to_path(&mut self, path: &Path) -> Option<NodeId> {
+		// Check if path is under root
+		let relative_path = path.strip_prefix(&self.root_path).ok()?;
+
+		// Start from root
+		let mut current_id = self.root_id;
+
+		// Walk through each component of the path
+		for component in relative_path.components() {
+			let component_str = component.as_os_str().to_str()?;
+
+			// Expand current directory if it's not already expanded
+			let node = self.get_node(current_id)?;
+			if node.is_dir() && !node.is_expanded() {
+				// Expand this directory
+				if let Err(e) = self.expand_node(current_id).await {
+					tracing::warn!("Failed to expand node during path traversal: {}", e);
+					return None;
+				}
+			}
+
+			// Find the child with the matching name
+			let node = self.get_node(current_id)?;
+			let child_id = node
+				.children
+				.iter()
+				.find(|&&child_id| {
+					if let Some(child_node) = self.get_node(child_id) {
+						child_node.entry.name == component_str
+					} else {
+						false
+					}
+				})
+				.copied();
+
+			match child_id {
+				Some(id) => current_id = id,
+				None => {
+					// Child not found - path doesn't exist
+					tracing::warn!("Component '{}' not found in tree", component_str);
+					return None;
+				}
+			}
+		}
+
+		Some(current_id)
+	}
+}
+
+/// Natural ordering of two filenames: ASCII-digit runs compare as
+/// integers, everything else as lowercase strings. This gives a
+/// "human" order like `chapter-2 < chapter-10` (issue #2073) without
+/// pulling in a sort crate.
+///
+/// Only ASCII digits are treated as a numeric run — letters, symbols,
+/// and non-ASCII characters fall back to lowercase string comparison.
+/// Leading zeros are ignored when comparing magnitudes (`v01 == v1`
+/// by value); ties resolve by raw width, with the shorter (unpadded)
+/// form first, matching GNU `sort -V` (`v1 < v01`).
+fn natural_cmp(a: &str, b: &str) -> std::cmp::Ordering {
+	use std::cmp::Ordering;
+	let mut ai = a.char_indices().peekable();
+	let mut bi = b.char_indices().peekable();
+	loop {
+		match (ai.peek().copied(), bi.peek().copied()) {
+			(None, None) => return Ordering::Equal,
+			(None, Some(_)) => return Ordering::Less,
+			(Some(_), None) => return Ordering::Greater,
+			(Some((_, ca)), Some((_, cb))) => {
+				if ca.is_ascii_digit() && cb.is_ascii_digit() {
+					// Compare numeric runs by magnitude (length of the
+					// non-zero portion, then digit-by-digit), then by
+					// raw width so leading-zero variants are ordered
+					// deterministically without claiming equality.
+					let (a_start, a_end) = take_digit_run(&mut ai);
+					let (b_start, b_end) = take_digit_run(&mut bi);
+					let a_digits = &a[a_start..a_end];
+					let b_digits = &b[b_start..b_end];
+					let a_trim = a_digits.trim_start_matches('0');
+					let b_trim = b_digits.trim_start_matches('0');
+					match a_trim.len().cmp(&b_trim.len()) {
+						Ordering::Equal => match a_trim.cmp(b_trim) {
+							Ordering::Equal => {
+								if a_digits.len() != b_digits.len() {
+									return a_digits.len().cmp(&b_digits.len());
+								}
+							}
+							other => return other,
+						},
+						other => return other,
+					}
+				} else {
+					let (_, ca) = ai.next().unwrap();
+					let (_, cb) = bi.next().unwrap();
+					let la = ca.to_ascii_lowercase();
+					let lb = cb.to_ascii_lowercase();
+					if la != lb {
+						return la.cmp(&lb);
+					}
+				}
+			}
+		}
+	}
+}
+
+/// Consume a contiguous ASCII-digit run from `iter` and return its
+/// byte range in the original string. `iter` is left pointing at the
+/// first non-digit (or exhausted).
+fn take_digit_run<I>(iter: &mut std::iter::Peekable<I>) -> (usize, usize)
+where
+	I: Iterator<Item = (usize, char)>,
+{
+	let (start, _) = *iter.peek().expect("caller checked at least one digit");
+	let mut end = start;
+	while let Some(&(idx, c)) = iter.peek() {
+		if c.is_ascii_digit() {
+			end = idx + c.len_utf8();
+			iter.next();
+		} else {
+			break;
+		}
+	}
+	(start, end)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::model::filesystem::StdFileSystem;
+	use std::fs as std_fs;
+	use tempfile::TempDir;
+
+	// ── natural_cmp ──────────────────────────────────────────────────
+
+	/// Issue #2073: digit runs in filenames should compare by
+	/// magnitude so `chapter-2 < chapter-10`, not lexicographically.
+	#[test]
+	fn natural_cmp_orders_digit_runs_by_magnitude() {
+		let mut names =
+			vec!["chapter-1.md", "chapter-10.md", "chapter-2.md", "chapter-21.md", "chapter-3.md"];
+		names.sort_by(|a, b| natural_cmp(a, b));
+		assert_eq!(
+			names,
+			vec!["chapter-1.md", "chapter-2.md", "chapter-3.md", "chapter-10.md", "chapter-21.md",]
+		);
+	}
+
+	/// Non-digit segments keep falling back to case-insensitive
+	/// comparison — `Foo` and `foo` compare equal, `bar` sorts before
+	/// `Foo`, mixed cases still group together rather than splitting
+	/// upper- and lowercase apart the way raw `cmp` would.
+	#[test]
+	fn natural_cmp_is_case_insensitive_for_text() {
+		use std::cmp::Ordering;
+		assert_eq!(natural_cmp("Foo.txt", "foo.txt"), Ordering::Equal);
+		assert_eq!(natural_cmp("bar.txt", "Foo.txt"), Ordering::Less);
+	}
+
+	/// Leading zeros do not change magnitude but still break ties —
+	/// the shorter (unpadded) form wins, matching GNU `sort -V` so a
+	/// sorted listing is deterministic regardless of input order.
+	#[test]
+	fn natural_cmp_leading_zeros_break_ties_after_magnitude() {
+		use std::cmp::Ordering;
+		assert_eq!(natural_cmp("v1", "v01"), Ordering::Less);
+		assert_eq!(natural_cmp("v01", "v1"), Ordering::Greater);
+		// But magnitude wins over width — `v002` still sorts before `v10`.
+		assert_eq!(natural_cmp("v002.txt", "v10.txt"), Ordering::Less);
+	}
+
+	/// Mixed digit + text runs alternate cleanly: shared prefix,
+	/// numeric run by magnitude, shared suffix.
+	#[test]
+	fn natural_cmp_handles_mixed_runs() {
+		use std::cmp::Ordering;
+		assert_eq!(natural_cmp("img2a.png", "img10a.png"), Ordering::Less);
+		assert_eq!(natural_cmp("img2b.png", "img2a.png"), Ordering::Greater);
+		assert_eq!(natural_cmp("img.png", "img2.png"), Ordering::Less);
+	}
+
+	async fn create_test_tree() -> (TempDir, FileTree) {
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		// Create test structure:
+		// /
+		// ├── dir1/
+		// │   ├── file1.txt
+		// │   └── file2.txt
+		// ├── dir2/
+		// │   └── subdir/
+		// │       └── file3.txt
+		// └── file4.txt
+
+		std_fs::create_dir(temp_path.join("dir1")).unwrap();
+		std_fs::write(temp_path.join("dir1/file1.txt"), "content1").unwrap();
+		std_fs::write(temp_path.join("dir1/file2.txt"), "content2").unwrap();
+
+		std_fs::create_dir(temp_path.join("dir2")).unwrap();
+		std_fs::create_dir(temp_path.join("dir2/subdir")).unwrap();
+		std_fs::write(temp_path.join("dir2/subdir/file3.txt"), "content3").unwrap();
+
+		std_fs::write(temp_path.join("file4.txt"), "content4").unwrap();
+
+		let backend = Arc::new(StdFileSystem);
+		let manager = Arc::new(FsManager::new(backend));
+		let tree = FileTree::new(temp_path.to_path_buf(), manager).await.unwrap();
+
+		(temp_dir, tree)
+	}
+
+	#[tokio::test]
+	async fn test_tree_creation() {
+		let (_temp_dir, tree) = create_test_tree().await;
+
+		assert_eq!(tree.node_count(), 1); // Only root initially
+		let root = tree.get_node(tree.root_id()).unwrap();
+		assert!(root.is_collapsed());
+		assert_eq!(root.children.len(), 0);
+	}
+
+	#[tokio::test]
+	async fn test_expand_root() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		tree.expand_node(tree.root_id()).await.unwrap();
+
+		let root = tree.get_node(tree.root_id()).unwrap();
+		assert!(root.is_expanded());
+		assert_eq!(root.children.len(), 3); // dir1, dir2, file4.txt
+
+		// Should be 4 nodes: root + 3 children
+		assert_eq!(tree.node_count(), 4);
+	}
+
+	#[tokio::test]
+	async fn test_expand_nested() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		// Expand root
+		tree.expand_node(tree.root_id()).await.unwrap();
+
+		// Find dir1 and expand it
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0]; // dir1 (directories come first)
+
+		tree.expand_node(dir1_id).await.unwrap();
+
+		let dir1 = tree.get_node(dir1_id).unwrap();
+		assert!(dir1.is_expanded());
+		assert_eq!(dir1.children.len(), 2); // file1.txt, file2.txt
+
+		// Total nodes: root + 3 children + 2 grandchildren = 6
+		assert_eq!(tree.node_count(), 6);
+	}
+
+	#[tokio::test]
+	async fn test_collapse_node() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		// Expand root and dir1
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+		tree.expand_node(dir1_id).await.unwrap();
+
+		assert_eq!(tree.node_count(), 6);
+
+		// Collapse dir1
+		tree.collapse_node(dir1_id);
+
+		let dir1 = tree.get_node(dir1_id).unwrap();
+		assert!(dir1.is_collapsed());
+		assert_eq!(dir1.children.len(), 0);
+
+		// Should remove the 2 child nodes
+		assert_eq!(tree.node_count(), 4);
+	}
+
+	#[tokio::test]
+	async fn test_toggle_node() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+
+		// Toggle to expand
+		tree.toggle_node(dir1_id).await.unwrap();
+		assert!(tree.get_node(dir1_id).unwrap().is_expanded());
+
+		// Toggle to collapse
+		tree.toggle_node(dir1_id).await.unwrap();
+		assert!(tree.get_node(dir1_id).unwrap().is_collapsed());
+	}
+
+	#[tokio::test]
+	async fn test_get_visible_nodes() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		// Initially only root is visible
+		let visible = tree.get_visible_nodes();
+		assert_eq!(visible.len(), 1);
+
+		// Expand root
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let visible = tree.get_visible_nodes();
+		assert_eq!(visible.len(), 4); // root + 3 children
+
+		// Expand dir1
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+		tree.expand_node(dir1_id).await.unwrap();
+
+		let visible = tree.get_visible_nodes();
+		assert_eq!(visible.len(), 6); // root + 3 children + 2 grandchildren
+	}
+
+	#[tokio::test]
+	async fn test_get_ancestors() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+		tree.expand_node(dir1_id).await.unwrap();
+
+		let dir1 = tree.get_node(dir1_id).unwrap();
+		let file1_id = dir1.children[0];
+
+		let ancestors = tree.get_ancestors(file1_id);
+		assert_eq!(ancestors.len(), 3); // root -> dir1 -> file1
+		assert_eq!(ancestors[0], tree.root_id());
+		assert_eq!(ancestors[1], dir1_id);
+		assert_eq!(ancestors[2], file1_id);
+	}
+
+	#[tokio::test]
+	async fn test_get_depth() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+		tree.expand_node(dir1_id).await.unwrap();
+
+		assert_eq!(tree.get_depth(tree.root_id()), 0);
+		assert_eq!(tree.get_depth(dir1_id), 1);
+
+		let dir1 = tree.get_node(dir1_id).unwrap();
+		let file1_id = dir1.children[0];
+		assert_eq!(tree.get_depth(file1_id), 2);
+	}
+
+	#[tokio::test]
+	async fn test_sorted_entries() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		tree.expand_node(tree.root_id()).await.unwrap();
+
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let children: Vec<_> = root.children.iter().map(|&id| tree.get_node(id).unwrap()).collect();
+
+		// Directories should come first
+		assert!(children[0].is_dir());
+		assert!(children[1].is_dir());
+		assert!(children[2].is_file());
+
+		// Directories should be sorted by name
+		assert_eq!(children[0].entry.name, "dir1");
+		assert_eq!(children[1].entry.name, "dir2");
+	}
+
+	#[tokio::test]
+	async fn test_refresh_node() {
+		let temp_dir = TempDir::new().unwrap();
+		let temp_path = temp_dir.path();
+
+		std_fs::create_dir(temp_path.join("dir1")).unwrap();
+		std_fs::write(temp_path.join("dir1/file1.txt"), "content").unwrap();
+
+		let backend = Arc::new(StdFileSystem);
+		let manager = Arc::new(FsManager::new(backend));
+		let mut tree = FileTree::new(temp_path.to_path_buf(), manager).await.unwrap();
+
+		// Expand root and dir1
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+		tree.expand_node(dir1_id).await.unwrap();
+
+		// Initially 1 file in dir1
+		let dir1 = tree.get_node(dir1_id).unwrap();
+		assert_eq!(dir1.children.len(), 1);
+
+		// Add another file
+		std_fs::write(temp_path.join("dir1/file2.txt"), "content2").unwrap();
+
+		// Refresh dir1
+		tree.refresh_node(dir1_id).await.unwrap();
+
+		// Should now have 2 files
+		let dir1 = tree.get_node(dir1_id).unwrap();
+		assert_eq!(dir1.children.len(), 2);
+	}
+
+	#[tokio::test]
+	async fn test_find_by_relative_path() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		tree.expand_node(tree.root_id()).await.unwrap();
+		let root = tree.get_node(tree.root_id()).unwrap();
+		let dir1_id = root.children[0];
+
+		let found_id = tree.find_by_relative_path(Path::new("dir1"));
+		assert_eq!(found_id, Some(dir1_id));
+
+		let not_found = tree.find_by_relative_path(Path::new("nonexistent"));
+		assert_eq!(not_found, None);
+	}
+
+	#[tokio::test]
+	async fn test_expand_to_path() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+		let root_path = tree.root_path().to_path_buf();
+
+		// Initially tree is collapsed
+		assert_eq!(tree.node_count(), 1);
+
+		// Expand to a deeply nested file
+		let target_path = root_path.join("dir2/subdir/file3.txt");
+		let node_id = tree.expand_to_path(&target_path).await;
+
+		assert!(node_id.is_some(), "Should find the nested file");
+
+		// All parent directories should now be expanded
+		let root = tree.get_node(tree.root_id()).unwrap();
+		assert!(root.is_expanded(), "Root should be expanded");
+
+		// Find dir2
+		let dir2_node = root
+			.children
+			.iter()
+			.find_map(|&id| {
+				let node = tree.get_node(id)?;
+				if node.entry.name == "dir2" { Some(node) } else { None }
+			})
+			.expect("dir2 should exist");
+
+		assert!(dir2_node.is_expanded(), "dir2 should be expanded");
+
+		// Find subdir
+		let subdir_node = dir2_node
+			.children
+			.iter()
+			.find_map(|&id| {
+				let node = tree.get_node(id)?;
+				if node.entry.name == "subdir" { Some(node) } else { None }
+			})
+			.expect("subdir should exist");
+
+		assert!(subdir_node.is_expanded(), "subdir should be expanded");
+
+		// Verify the target file is found
+		let target_node = tree.get_node(node_id.unwrap()).unwrap();
+		assert_eq!(target_node.entry.name, "file3.txt");
+		assert!(target_node.is_file());
+	}
+
+	#[tokio::test]
+	async fn test_expand_to_path_not_under_root() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+
+		// Try to expand to a path not under root
+		let outside_path = PathBuf::from("/tmp/somefile.txt");
+		let result = tree.expand_to_path(&outside_path).await;
+
+		assert!(result.is_none(), "Should return None for paths outside root");
+	}
+
+	#[tokio::test]
+	async fn test_expand_to_path_nonexistent() {
+		let (_temp_dir, mut tree) = create_test_tree().await;
+		let root_path = tree.root_path().to_path_buf();
+
+		// Try to expand to a nonexistent file
+		let nonexistent_path = root_path.join("dir1/nonexistent.txt");
+		let result = tree.expand_to_path(&nonexistent_path).await;
+
+		assert!(result.is_none(), "Should return None for nonexistent paths");
+	}
+
+	// End-to-end observable behavior for `reload_expanded_node` —
+	// preserved expansion state, visibility of newly-appeared files,
+	// freshness of rendered metadata — is exercised at the e2e harness
+	// level in `tests/e2e/explorer_bugs.rs`. No unit tests here poke at
+	// `self.nodes` / `self.path_to_node` directly.
+}

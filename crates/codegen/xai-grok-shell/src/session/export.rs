@@ -51,7 +51,7 @@ impl ExportedMessage {
         Self { content, timestamp }
     }
 
-    pub(crate) fn from_xai_notification(
+    pub fn from_xai_notification(
         notification: &crate::extensions::notification::SessionNotification,
     ) -> Self {
         let wrapper = XaiJsonRpcNotification {
@@ -111,7 +111,7 @@ pub struct ExportedMetadata {
 
 impl ExportedMetadata {
     /// Build metadata from a [`Summary`].
-    pub(crate) fn from_summary(summary: &Summary) -> Self {
+    pub fn from_summary(summary: &Summary) -> Self {
         Self {
             title: Some(summary.session_summary.clone()).filter(|s| !s.is_empty()),
             cwd: summary.info.cwd.clone(),
@@ -138,7 +138,7 @@ pub struct ExportedSession {
 }
 
 impl ExportedSession {
-    pub(crate) fn from_persisted_data(info: &Info, data: &PersistedData) -> Self {
+    pub fn from_persisted_data(info: &Info, data: &PersistedData) -> Self {
         let messages = Self::convert_updates(&data.updates);
         let metadata = ExportedMetadata::from_summary(&data.summary);
 
@@ -149,7 +149,7 @@ impl ExportedSession {
         }
     }
 
-    pub(crate) async fn from_local_session(info: &Info) -> std::io::Result<Self> {
+    pub async fn from_local_session(info: &Info) -> std::io::Result<Self> {
         let storage = JsonlStorageAdapter::new();
         let data = storage.load_session(info).await?;
         Ok(Self::from_persisted_data(info, &data))

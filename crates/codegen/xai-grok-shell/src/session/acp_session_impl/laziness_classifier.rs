@@ -111,8 +111,11 @@ impl LazinessAbortReason {
 /// "Do not roleplay", JSON-only, no chain-of-thought,
 /// no role context, transcript framed as third-party data.
 /// Prefix on `x_grok_req_id` for laziness-classifier sampler calls.
-/// Centralised here as the single source of truth for the production
-/// producer (`maybe_fire_laziness_check`).
+/// Centralised here so the production producer
+/// (`maybe_fire_laziness_check`) AND the offline replay harness
+/// (`crate::trace_classifier::build_classifier_request`) share a
+/// single source of truth — a drift would otherwise pass the F17
+/// fidelity test by re-typing the literal in both sites.
 pub(crate) const LAZINESS_REQ_ID_PREFIX: &str = "xai-laziness-";
 
 /// Preamble on the User-item text of the classifier request. The
@@ -226,9 +229,10 @@ Example INVALID outputs (do not produce any of these):\n\
 - \"The agent appears stalled. {...}\" (no prose around JSON)\n";
 
 /// Harness-wide default for `[assistant reasoning]` emission in the
-/// classifier transcript. The per-model override
-/// (`LazinessDetectorPerModelConfig::include_reasoning`) resolves
-/// through this default when absent. Flip to `false` for a one-line revert if
+/// classifier transcript. Per-model
+/// (`LazinessDetectorPerModelConfig::include_reasoning`) and CLI
+/// (`trace_classify --include-reasoning`) overrides resolve through
+/// this default when absent. Flip to `false` for a one-line revert if
 /// the live classifier proves biased by chain-of-thought in shadow.
 pub(crate) const LAZINESS_INCLUDE_REASONING: bool = true;
 
@@ -260,8 +264,10 @@ pub(crate) fn turn_elapsed_seconds_from_start_ms(
 }
 
 /// Render the harness-truth `[runtime_state] ...` line that precedes
-/// the flattened transcript, for the production classifier
-/// (`maybe_fire_laziness_check`).
+/// the flattened transcript. Shared between production
+/// (`maybe_fire_laziness_check`) and the offline replay
+/// (`trace_classifier::build_classifier_request`) so the wire format
+/// stays in lock-step.
 ///
 /// `turn_elapsed_seconds` is omitted when `None` (no signal available)
 /// so the classifier sees only the fields the harness actually

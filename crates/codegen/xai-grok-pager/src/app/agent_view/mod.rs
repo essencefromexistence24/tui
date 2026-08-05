@@ -742,6 +742,8 @@ pub(crate) enum AgentDeferredSend {
 }
 pub struct AgentView {
     pub session: AgentSession,
+    /// Native, presentation-only state for the directly merged DX surfaces.
+    pub dx_ui: crate::dx::DxUiState,
     pub(crate) session_binding_epoch: u32,
     pub scrollback: ScrollbackState,
     pub prompt: PromptWidget,
@@ -871,6 +873,10 @@ pub struct AgentView {
     pub(crate) modal_hovered_key: Option<char>,
     /// Cached server-reported context state.
     pub context_state: Option<xai_grok_shell::session::ContextInfo>,
+    /// `context_state.used` snapshot taken at turn start, so the turn footer
+    /// can report the tokens consumed by *this* message (delta), not the whole
+    /// accumulated context.
+    pub turn_start_total_tokens: Option<u64>,
     /// Gateway light-frontend session (`kind: "chat"` / `--chat` / conversation
     /// resume). Suppresses Build credits / local sampler context telemetry so the
     /// status bar and prompt never imply remote usage from wrong metrics.
@@ -1092,11 +1098,12 @@ pub struct AgentView {
     pub hit_queue_badge: HitArea,
     pub hit_plan_button: HitArea,
     pub hit_plan_approval_status: HitArea,
+    /// Diff stats (+N, -M) in the status bar (click to open the diff screen).
+    pub hit_diff_stats: HitArea,
     pub hit_follow_indicator: HitArea,
-    /// ▲ jump-to-response-top indicator in the sticky header's gap row
-    /// (click snaps the answer's first line to the top, same as `K`).
-    pub hit_response_top_indicator: HitArea,
-    /// CWD / worktree path in the status bar (click to copy).
+    /// Git branch in the status bar (click to open the code editor).
+    pub hit_branch: HitArea,
+    /// CWD / worktree path in the status bar (click to open the browser).
     pub hit_cwd: HitArea,
     /// Cancel button in turn status line (`[stop]`).
     pub hit_cancel_button: HitArea,
@@ -1329,10 +1336,6 @@ pub struct AgentView {
     pub permission_stashed_prompt: Option<StashedPrompt>,
     /// Scrollback focus stolen for a permission prompt; restored when the queue empties.
     pub permission_stashed_pane: Option<AgentPane>,
-    /// Free-form "Always allow" pattern editor buffer for the front request.
-    /// `Some` only in `PermissionFocus::PatternEdit`; cleared when the request
-    /// resolves or the edit is cancelled.
-    pub permission_pattern_edit: Option<crate::views::permission_view::PatternEditState>,
     /// Active plan approval view (from `exit_plan_mode` ext_method). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
@@ -1663,6 +1666,22 @@ fn translate_local_submit(
     skipped: bool,
 ) -> InputOutcome {
     use crate::views::question_view::{LocalQuestionKind, QuestionSelection};
+    if let LocalQuestionKind::ProjectSelect {
+        resolved_paths,
+        original_cwd,
+        stashed_prompt,
+        dont_ask_index,
+    } = kind
+    {
+        return translate_project_select(
+            qv,
+            resolved_paths,
+            original_cwd,
+            stashed_prompt,
+            dont_ask_index,
+            skipped,
+        );
+    }
     if skipped {
         return InputOutcome::Changed;
     }
@@ -1742,7 +1761,82 @@ fn translate_local_submit(
                 confirmed: *idx == 0,
             })
         }
+        LocalQuestionKind::ProjectSelect { .. } => unreachable!(),
     }
+}
+fn translate_project_select(
+    qv: &crate::views::question_view::QuestionViewState,
+    resolved_paths: Vec<std::path::PathBuf>,
+    original_cwd: std::path::PathBuf,
+    stashed_prompt: String,
+    dont_ask_index: usize,
+    skipped: bool,
+) -> InputOutcome {
+    use crate::views::question_view::QuestionSelection;
+    use xai_grok_telemetry::events::{ProjectPickerOutcome, ProjectPickerSelected};
+    let project_dir_options = resolved_paths.len().saturating_sub(1);
+    let emit = |outcome: ProjectPickerOutcome| {
+        xai_grok_telemetry::session_ctx::log_event(ProjectPickerSelected {
+            outcome,
+            picked_project: outcome.picked_project(),
+            project_dir_options,
+        });
+    };
+    if skipped {
+        emit(ProjectPickerOutcome::Dismissed);
+        return InputOutcome::Action(Action::ProjectSelected {
+            path: original_cwd,
+            stashed_prompt,
+            disable_picker: false,
+        });
+    }
+    let freeform_path = qv
+        .per_question_freeform_selected
+        .first()
+        .copied()
+        .unwrap_or(false)
+        .then(|| qv.per_question_freeform.first())
+        .flatten()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| {
+            let expanded = shellexpand::tilde(s.trim());
+            std::path::PathBuf::from(expanded.as_ref())
+        });
+    if let Some(path) = freeform_path {
+        emit(ProjectPickerOutcome::CustomPath);
+        return InputOutcome::Action(Action::ProjectSelected {
+            path,
+            stashed_prompt,
+            disable_picker: false,
+        });
+    }
+    let selected_idx = qv.selections.first().and_then(|s| match s {
+        QuestionSelection::Single(Some(idx)) => Some(*idx),
+        _ => None,
+    });
+    if selected_idx == Some(dont_ask_index) {
+        emit(ProjectPickerOutcome::DontAskAgain);
+        return InputOutcome::Action(Action::ProjectSelected {
+            path: original_cwd,
+            stashed_prompt,
+            disable_picker: true,
+        });
+    }
+    let picked_recent =
+        matches!(selected_idx, Some(idx) if (1..resolved_paths.len()).contains(&idx));
+    emit(if picked_recent {
+        ProjectPickerOutcome::RecentProject
+    } else {
+        ProjectPickerOutcome::CurrentDir
+    });
+    let path = selected_idx
+        .and_then(|idx| resolved_paths.get(idx).cloned())
+        .unwrap_or(original_cwd);
+    InputOutcome::Action(Action::ProjectSelected {
+        path,
+        stashed_prompt,
+        disable_picker: false,
+    })
 }
 /// Convert an [`OverlayAction`] to an [`InputOutcome`].
 fn overlay_action_to_outcome(action: crate::views::overlay::OverlayAction) -> InputOutcome {

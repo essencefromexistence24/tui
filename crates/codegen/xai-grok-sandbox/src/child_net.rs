@@ -223,11 +223,19 @@ pub unsafe fn install_namespace_lockdown_filter() -> std::io::Result<()> {
     ns_lockdown::install(&mut filter)
 }
 
+/// No-op network filter installation on platforms without seccomp support.
+///
+/// # Safety
+/// This function performs no operation on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
     Ok(())
 }
 
+/// No-op namespace lockdown installation on platforms without seccomp support.
+///
+/// # Safety
+/// This function performs no operation on non-Linux platforms.
 #[cfg(not(target_os = "linux"))]
 pub unsafe fn install_namespace_lockdown_filter() -> std::io::Result<()> {
     Ok(())

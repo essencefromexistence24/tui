@@ -104,7 +104,6 @@ impl TrackedTask {
             description: self.description.clone(),
             // ACP tracked tasks are only registered via run_background.
             is_backgrounded: true,
-            output_total_bytes: 0,
         }
     }
 }

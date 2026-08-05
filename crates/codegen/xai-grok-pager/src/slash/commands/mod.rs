@@ -18,6 +18,7 @@ pub mod debug;
 pub mod delete;
 pub mod docs;
 pub mod doctor;
+pub mod dx_view;
 pub mod edit_prompt;
 pub mod effort;
 pub mod effort_levels;
@@ -46,6 +47,7 @@ pub mod personas;
 pub mod plan;
 pub mod plugin;
 pub mod privacy;
+pub mod provider_connect;
 pub mod queue;
 pub mod recap;
 pub mod release_notes;
@@ -66,6 +68,7 @@ pub mod toggle_mouse_reporting;
 pub mod transcript;
 pub mod tutorial;
 pub mod usage;
+pub mod video;
 pub mod view_plan;
 pub mod vim_mode;
 pub mod voice;
@@ -80,6 +83,11 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
     vec![
         Arc::new(exit::ExitCommand),
         Arc::new(help::HelpCommand),
+        Arc::new(dx_view::DxViewCommand::editor()),
+        Arc::new(dx_view::DxViewCommand::browser()),
+        Arc::new(dx_view::DxViewCommand::diff()),
+        Arc::new(dx_view::DxViewCommand::animation()),
+        Arc::new(video::VideoCommand),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),
         Arc::new(delete::DeleteCommand),
@@ -134,6 +142,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(toggle_mouse_reporting::ToggleMouseReportingCommand),
         Arc::new(settings_cmd::SettingsCommand),
         Arc::new(privacy::PrivacyCommand),
+        Arc::new(provider_connect::ConnectCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),
         Arc::new(login::LoginCommand),
@@ -213,6 +222,15 @@ mod tests {
         assert!(reg.get("model").is_some());
         assert!(reg.get("home").is_some());
         assert!(reg.get("view-plan").is_some());
+        assert!(reg.get("video").is_some(), "/video should be registered");
+        assert!(
+            reg.triggers().iter().any(|trigger| {
+                trigger.canonical == "video"
+                    && trigger.display == "/video"
+                    && trigger.usage == "/video <local-path>"
+            }),
+            "/video should appear in autocomplete and command help metadata"
+        );
         reg.set_available_tools(std::collections::HashSet::from([
             "scheduler_create".to_string()
         ]));

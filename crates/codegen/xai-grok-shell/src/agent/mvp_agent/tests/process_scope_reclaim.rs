@@ -36,7 +36,7 @@ fn insert_session_with_scope(
     let mut handle = make_test_handle("test", false, None);
     handle.info.id = sid.clone();
     handle.tool_context.process_scope = Some(scope);
-    agent.insert_resident(sid, handle);
+    agent.sessions.borrow_mut().insert(sid.clone(), handle);
 }
 
 #[test]
@@ -51,7 +51,7 @@ fn close_reaps_enrolled_session_child() {
         agent.remove_session(&sid);
 
         assert!(
-            !agent.is_resident(&sid),
+            !agent.sessions.borrow().contains_key(&sid),
             "close must remove the session handle"
         );
         assert!(died(&mut child).await, "close must reap the enrolled child");

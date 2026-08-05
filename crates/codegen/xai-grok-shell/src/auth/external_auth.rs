@@ -40,8 +40,7 @@ pub(crate) fn parse_output(output: &std::process::Output) -> anyhow::Result<Grok
 }
 
 /// Short timeout for a mid-session refresh: it must not hang the session.
-/// The single run in `ExternalBinaryRefresher` gets this whole budget.
-const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(7);
+const EXTERNAL_AUTH_REFRESH_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Runs the external auth binary for a headless mid-session refresh. Initial,
 /// interactive sign-in takes a separate path (`flow::run_external_auth_provider`,

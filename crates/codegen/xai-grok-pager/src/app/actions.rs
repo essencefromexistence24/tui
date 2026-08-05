@@ -616,6 +616,10 @@ pub enum Action {
     /// directly in `handle_agent_action`; this lets a slash command reach the
     /// same modal through dispatch.
     OpenCommandPalette,
+    /// Switch the active agent to a directly embedded DX surface.
+    SwitchDxView(crate::dx::DxView),
+    /// Validate and launch one video path in the separate native DX player.
+    PlayVideo(String),
     /// Open the in-TUI How-to Guides doc picker (`/docs`, palette "How-to Guides").
     OpenHowtoGuides,
     /// Open the onboarding tutorial overlay (`/tutorial` or the command
@@ -709,6 +713,10 @@ pub enum Action {
     SendFeedback(String),
     /// Enter remember mode (visual prompt change, not a send).
     EnterRememberMode,
+    /// Edit the memory note: load MEMORY.md into the prompt in remember mode.
+    EditNote,
+    /// Delete the memory note (clears MEMORY.md).
+    DeleteNote,
     /// Send a remember note from # mode. Routes through LLM rewrite when a
     /// session is active; falls back to direct save otherwise.
     SendRememberNote(String),
@@ -785,6 +793,13 @@ pub enum Action {
         plan: Box<crate::diagnostics::FixPlan>,
     },
     DoctorFixCancelled(DoctorFixTarget),
+    /// User selected a project directory from the project picker.
+    ProjectSelected {
+        path: std::path::PathBuf,
+        stashed_prompt: String,
+        /// "Don't ask me again" was chosen: persist the opt-out.
+        disable_picker: bool,
+    },
     /// Persist the memory modal fullscreen preference to config.toml.
     PersistMemoryFullscreen(bool),
     /// Open the Agent Dashboard view (`/dashboard`, `Ctrl+\`, `grok dashboard`).
@@ -971,6 +986,8 @@ pub enum Action {
     },
     /// Open the memory browser modal.
     OpenMemoryModal,
+    /// Open the provider connect browser (/connect).
+    OpenProviderConnect,
     /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
     OpenGboom,
     /// Suspend the TUI and open a configuration file in `$EDITOR`.
@@ -1400,7 +1417,7 @@ pub enum Effect {
         /// process-wide mode.
         chat_kind: bool,
     },
-    /// Change the process working directory (dashboard location picker, `/cd`).
+    /// Change the process working directory (project-picker selection).
     SetWorkingDir { path: std::path::PathBuf },
     /// Create a git worktree and then create or load an ACP session in it.
     /// When `load_session_id` is `Some`, loads that session in the new worktree
@@ -1593,6 +1610,8 @@ pub enum Effect {
     PersistPrivacyBannerAcked { acked_at: String },
     /// Persist memory modal fullscreen preference to `[hints]` in config.toml.
     PersistMemoryFullscreen { fullscreen: bool },
+    /// Persist the project-picker opt-out to `[hints] project_picker_disabled`.
+    PersistProjectPickerDisabled { disabled: bool },
     /// Persist the dashboard's `[dashboard]` configuration to `~/.grok/config.toml`.
     /// Edge case 15: multi-pager safe via `config_toml_edit::read_config_document_for_edit`,
     /// which loads → modifies → writes the whole document. Concurrent

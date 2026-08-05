@@ -54,7 +54,10 @@ async fn handle_btw(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
 
     let req: BtwRequest = parse_params(args)?;
     let sid: acp::SessionId = req.session_id.clone().into();
-    let session_handle = agent.resident_handle(&sid);
+    let session_handle = {
+        let sessions = agent.sessions.borrow();
+        sessions.get(&sid).cloned()
+    };
     let Some(session) = session_handle else {
         return Err(
             acp::Error::invalid_params().data(format!("session not found: {}", req.session_id))
@@ -127,7 +130,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
                 };
 
             let session_id = acp::SessionId::new(feedback_input.session_id.clone());
-            let session_handle = agent.resident_handle(&session_id);
+            let session_handle = agent.sessions.borrow().get(&session_id).cloned();
 
             let (model_id, model_metadata) = if let Some(ref session) = session_handle {
                 let (tx1, rx1) = tokio::sync::oneshot::channel();
@@ -301,7 +304,7 @@ async fn handle_feedback(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult 
             // Persist dismiss locally; flushed before storage CopyFile by the persistence actor.
             {
                 let session_id = acp::SessionId::new(dismiss_input.session_id.clone());
-                if let Some(session_handle) = agent.resident_handle(&session_id) {
+                if let Some(session_handle) = agent.sessions.borrow().get(&session_id) {
                     session_handle.persist_feedback(LocalFeedbackEntry::UserFeedback(
                         UserFeedbackEntry {
                             submitted_at: chrono::Utc::now(),

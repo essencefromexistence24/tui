@@ -45,7 +45,7 @@ impl MvpAgent {
         session_id: &agent_client_protocol::SessionId,
         title: &str,
     ) {
-        if self.is_resident(session_id) {
+        if self.sessions.borrow().contains_key(session_id) {
             self.gateway
                 .forward_fire_and_forget(
                     crate::session::summary::session_info_update(
@@ -56,18 +56,28 @@ impl MvpAgent {
         }
     }
     pub fn reload_skills_all_sessions(&self) -> usize {
-        let session_ids = self.resident_ids();
+        let session_ids: Vec<agent_client_protocol::SessionId> = self
+            .sessions
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
         for sid in &session_ids {
-            if let Some(handle) = self.resident_handle(sid) {
+            if let Some(handle) = self.sessions.borrow().get(sid).cloned() {
                 let _ = handle.cmd_tx.send(SessionCommand::ReloadSkills);
             }
         }
         session_ids.len()
     }
     pub fn advertise_commands_all_sessions(&self) -> usize {
-        let session_ids = self.resident_ids();
+        let session_ids: Vec<agent_client_protocol::SessionId> = self
+            .sessions
+            .borrow()
+            .keys()
+            .cloned()
+            .collect();
         for session_id in &session_ids {
-            if let Some(handle) = self.resident_handle(session_id) {
+            if let Some(handle) = self.sessions.borrow().get(session_id).cloned() {
                 let _ = handle.cmd_tx.send(SessionCommand::AdvertiseCommands);
             }
         }
@@ -198,7 +208,7 @@ impl MvpAgent {
         self.cfg.borrow().managed_mcp_gateway_tools_enabled
             && self.has_managed_mcp_auth()
     }
-    pub(crate) async fn get_managed_mcp_configs(
+    pub async fn get_managed_mcp_configs(
         &self,
     ) -> Vec<crate::session::managed_mcp::ManagedMcpConfig> {
         if !self.can_fetch_managed_mcps() {
@@ -212,7 +222,7 @@ impl MvpAgent {
             )
             .await
     }
-    pub(crate) async fn get_managed_mcp_gateway_tool_catalog(
+    pub async fn get_managed_mcp_gateway_tool_catalog(
         &self,
     ) -> Option<crate::session::managed_mcp::GatewayToolCatalog> {
         if !self.can_fetch_managed_mcp_gateway_tools() {
@@ -234,20 +244,15 @@ impl MvpAgent {
             )
             .await
     }
-    pub(crate) fn managed_mcp_cache(
+    pub fn managed_mcp_cache(
         &self,
     ) -> &crate::session::managed_mcp::ManagedMcpStateHandle {
         &self.managed_mcp_cache
     }
     pub(crate) fn disable_managed_gateway_tools_and_refresh_sessions(&self) {
-        self.disable_managed_gateway_tools_and_refresh_sessions_with_txs({
-            let mut txs = Vec::new();
-            self.session_registry
-                .for_each_resident(|_, handle| {
-                    txs.push(handle.cmd_tx.clone());
-                });
-            txs
-        });
+        self.disable_managed_gateway_tools_and_refresh_sessions_with_txs(
+            self.sessions.borrow().values().map(|handle| handle.cmd_tx.clone()).collect(),
+        );
     }
     fn disable_managed_gateway_tools_and_refresh_sessions_with_txs(
         &self,
@@ -262,7 +267,12 @@ impl MvpAgent {
         });
     }
     pub(crate) fn spawn_managed_gateway_tool_catalog_fetch(&self) {
-        let session_txs = self.resident_cmd_txs();
+        let session_txs: Vec<_> = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|handle| handle.cmd_tx.clone())
+            .collect();
         if !self.can_fetch_managed_mcp_gateway_tools() {
             self.disable_managed_gateway_tools_and_refresh_sessions_with_txs(
                 session_txs,
@@ -316,16 +326,16 @@ impl MvpAgent {
         &self,
         managed: &[crate::session::managed_mcp::ManagedMcpConfig],
     ) {
-        let mut sessions = Vec::new();
-        self.session_registry
-            .for_each_resident(|_, handle| {
-                sessions
-                    .push((
-                        handle.cmd_tx.clone(),
-                        handle.info.cwd.clone(),
-                        handle.initial_client_mcp_servers.clone(),
-                    ));
-            });
+        let sessions: Vec<_> = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|handle| (
+                handle.cmd_tx.clone(),
+                handle.info.cwd.clone(),
+                handle.initial_client_mcp_servers.clone(),
+            ))
+            .collect();
         if sessions.is_empty() {
             return;
         }
@@ -365,7 +375,12 @@ impl MvpAgent {
     /// `NotFetched` in gateway mode. Callers gate on a successful refetch and
     /// skip on failure to keep the last-good index.
     pub(crate) fn refresh_mcp_search_index_in_sessions(&self) {
-        let session_txs = self.resident_cmd_txs();
+        let session_txs: Vec<_> = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|handle| handle.cmd_tx.clone())
+            .collect();
         for tx in session_txs {
             let _ = tx.send(SessionCommand::RefreshMcpSearchIndex);
         }
@@ -450,7 +465,7 @@ impl MvpAgent {
             }
         });
     }
-    pub(crate) fn agent_mcp_state(
+    pub fn agent_mcp_state(
         &self,
     ) -> std::sync::Arc<tokio::sync::Mutex<crate::session::mcp_servers::McpState>> {
         self.agent_mcp_state.clone()
@@ -481,38 +496,23 @@ impl MvpAgent {
             "lazily populated plugin registry snapshot"
         );
     }
-    /// Fetch managed configs, admit client servers under a post-await compat
-    /// snapshot, merge, and return `(admitted_seed, merged, earliest_expiry)`.
-    ///
-    /// Compat is read **after** the managed-config await so admit + merge share
-    /// one snapshot; a settings reapply during the await cannot make the
-    /// retained seed and the spawned set disagree.
+    /// Fetch managed configs, merge with client servers, return merged list + earliest expiry.
     pub(super) async fn resolve_mcp_servers(
         &self,
         client_servers: Vec<acp::McpServer>,
         cwd: &std::path::Path,
-    ) -> (
-        Vec<acp::McpServer>,
-        Vec<acp::McpServer>,
-        Option<chrono::DateTime<chrono::Utc>>,
-    ) {
+    ) -> (Vec<acp::McpServer>, Option<chrono::DateTime<chrono::Utc>>) {
         self.ensure_plugin_registry();
         let managed = self.get_managed_mcp_configs().await;
         let expires_at = managed.iter().filter_map(|c| c.token_expires_at).min();
-        let compat = self.cfg.borrow().compat_resolved;
-        let admitted = crate::session::managed_mcp::admit_client_mcp_servers(
-            client_servers,
-            cwd,
-            &compat,
-        );
         let merged = crate::session::managed_mcp::merge_managed_mcp_servers(
-            admitted.clone(),
+            client_servers,
             cwd,
             &managed,
             self.plugin_registry_handle.snapshot().as_deref(),
-            &compat,
+            &self.cfg.borrow().compat_resolved,
         );
-        (admitted, merged, expires_at)
+        (merged, expires_at)
     }
     /// Set the memory configuration (called from TUI after config resolution).
     pub fn set_memory_config(&mut self, config: crate::config::MemoryConfig) {
@@ -524,10 +524,7 @@ impl MvpAgent {
     ///
     /// Must be called right after construction: entries registered on the
     /// constructor-created default instance are NOT migrated.
-    pub(crate) fn set_activity(
-        &mut self,
-        activity: crate::agent::activity::AgentActivity,
-    ) {
+    pub fn set_activity(&mut self, activity: crate::agent::activity::AgentActivity) {
         self.activity = activity;
     }
     /// Send [`SessionCommand::Shutdown`] to every live session actor and wait
@@ -545,7 +542,7 @@ impl MvpAgent {
     /// the watcher is constructed in `agent/app.rs`. In simple /
     /// non-leader mode the channel is never wired and
     /// `notify_session_cwd_for_watch` is a no-op.
-    pub(crate) fn set_config_watcher_path_tx(
+    pub fn set_config_watcher_path_tx(
         &mut self,
         tx: tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
     ) {
@@ -1540,7 +1537,7 @@ impl MvpAgent {
         self.reapply_official_marketplace();
         {
             let cfg_snapshot = self.cfg.borrow().clone();
-            if self.session_registry.resident_count() == 0 {
+            if self.sessions.borrow().is_empty() {
                 self.models_manager.apply_config_reselecting_default(cfg_snapshot);
             } else {
                 self.models_manager.apply_config(cfg_snapshot);
@@ -1585,14 +1582,13 @@ impl MvpAgent {
         tracing::info!(?resolved_mode, "storage mode upgraded from remote settings");
         self.storage_mode.set(resolved_mode);
         if resolved_mode == StorageMode::Writeback {
-            self.session_registry
-                .for_each_resident(|_, handle| {
-                    let _ = handle
-                        .persistence_tx
-                        .send(crate::session::persistence::PersistenceMsg::UpgradeToWriteback {
-                            auth_manager: self.auth_manager.clone(),
-                        });
-                });
+            for handle in self.sessions.borrow().values() {
+                let _ = handle
+                    .persistence_tx
+                    .send(crate::session::persistence::PersistenceMsg::UpgradeToWriteback {
+                        auth_manager: self.auth_manager.clone(),
+                    });
+            }
         }
     }
     /// Run the blocking `/settings` fetch for `auth` off the runtime thread.
@@ -1631,11 +1627,7 @@ impl MvpAgent {
         auth: &crate::auth::GrokAuth,
     ) -> Option<crate::util::config::RemoteSettings> {
         let identity = auth.user_id.clone();
-        let channel = {
-            let proxy_url = self.cfg.borrow().endpoints.proxy_url();
-            crate::agent::otel_gate::policy_channel_for(&proxy_url)
-        };
-        self.otel_gate.rearm_on_switch(&identity, channel);
+        self.otel_gate.rearm_on_switch(&identity);
         let outcome = self.fetch_settings_self_healing_401(auth).await;
         let live = self.auth_manager.current_or_expired().map(|a| a.user_id);
         self.otel_gate.resolve(&identity, outcome, live.as_deref())
@@ -2100,6 +2092,22 @@ impl MvpAgent {
         model: &ModelEntry,
         origin_client: Option<crate::http::OriginClientInfo>,
     ) -> SamplingConfig {
+        // Ensure local server is running for localhost models
+        let base_url = model.info().base_url.clone();
+        let model_key = model.info().model.clone();
+        if base_url.contains("localhost") || base_url.contains("127.0.0.1") {
+            let base_url_clone = base_url.clone();
+            let model_key_clone = model_key.clone();
+            tokio::spawn(async move {
+                if let Err(error) =
+                    crate::agent::local_model::ensure_local_server(&model_key_clone, &base_url_clone)
+                        .await
+                {
+                    tracing::error!(model = %model_key_clone, %error, "failed to prewarm local model");
+                }
+            });
+        }
+
         let preferred = self.cfg.borrow().grok_com_config.preferred_method;
         let prefers_oidc = preferred == Some(PreferredAuthMethod::Oidc);
         let is_session_based_auth = self.is_session_based_auth();
@@ -2492,8 +2500,10 @@ impl MvpAgent {
         let (subagent_event_tx, subagent_event_rx) = tokio::sync::mpsc::unbounded_channel();
         let activity = crate::agent::activity::AgentActivity::default();
         let instance = Self {
+            sessions: RefCell::new(HashMap::new()),
             activity,
             session_registry: SessionRegistry::default(),
+            loading_sessions: RefCell::new(HashMap::new()),
             resident_roster_titles: RefCell::new(HashMap::new()),
             initialize_request: OnceLock::new(),
             gateway,
@@ -2653,50 +2663,20 @@ impl MvpAgent {
             sessions = ?p.session_ids,
             "Client disconnected; detaching sessions (no-evict keystone)"
         );
-        let (attaching, to_check): (Vec<_>, Vec<_>) = p
+        let checks = p
             .session_ids
             .iter()
-            .map(|sid| acp::SessionId::new(sid.clone()))
-            .partition(|id| self.session_registry.is_attaching(id));
-        for id in &attaching {
-            tracing::info!(
-                session_id = %id.0,
-                "kept session resident across client disconnect (attach in flight)"
-            );
-        }
-        let checks = to_check
-            .into_iter()
-            .map(|id| async move {
-                let measured = self.resident_handle(&id).map(|h| h.cmd_tx);
-                let busy = self.session_has_live_work(&id).await;
-                (id, busy, measured)
+            .map(|sid| {
+                let id = acp::SessionId::new(sid.clone());
+                async move {
+                    let busy = self.session_has_live_work(&id).await;
+                    (id, busy)
+                }
             });
         let resolved = futures::future::join_all(checks).await;
-        let mut kept_resident: usize = attaching.len();
+        let mut kept_resident: usize = 0;
         let mut unloaded: usize = 0;
-        for (id, busy, measured) in resolved {
-            if self.session_registry.is_attaching(&id) {
-                kept_resident += 1;
-                tracing::info!(
-                    session_id = %id.0,
-                    "kept session resident across client disconnect (attach in flight)"
-                );
-                continue;
-            }
-            let same_actor = self
-                .resident_handle(&id)
-                .zip(measured)
-                .is_some_and(|(current, measured)| {
-                    current.cmd_tx.same_channel(&measured)
-                });
-            if !same_actor {
-                kept_resident += 1;
-                tracing::info!(
-                    session_id = %id.0,
-                    "kept session resident across client disconnect (actor replaced mid-check)"
-                );
-                continue;
-            }
+        for (id, busy) in resolved {
             if busy {
                 self.set_session_live_state(&id, SessionLiveState::Working);
                 kept_resident += 1;
@@ -2729,14 +2709,6 @@ impl MvpAgent {
     /// Uses async polling (never blocks the `LocalSet` runtime) with a 5s deadline
     /// to handle slow shutdowns (e.g., embedding API timeouts).
     pub(super) async fn drain_old_session_thread(&self, session_id: &acp::SessionId) {
-        self.drain_old_session_thread_within(session_id, DRAIN_OLD_THREAD_WAIT).await;
-    }
-    /// [`Self::drain_old_session_thread`] under a caller-supplied budget.
-    pub(super) async fn drain_old_session_thread_within(
-        &self,
-        session_id: &acp::SessionId,
-        budget: std::time::Duration,
-    ) {
         match self.session_registry.thread_is_finished(session_id) {
             None => return,
             Some(true) => {
@@ -2749,7 +2721,7 @@ impl MvpAgent {
             session_id = %session_id.0,
             "Waiting for old session thread to finish before reload"
         );
-        let deadline = tokio::time::Instant::now() + budget;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match self.session_registry.thread_is_finished(session_id) {
                 None => return,
@@ -2766,8 +2738,7 @@ impl MvpAgent {
             if tokio::time::Instant::now() >= deadline {
                 tracing::warn!(
                     session_id = %session_id.0,
-                    budget_ms = budget.as_millis() as u64,
-                    "Old session thread still running at the drain budget; proceeding. \
+                    "Old session thread still running after 5s — proceeding with replay. \
                      Session data may be incomplete if the old actor is still writing."
                 );
                 return;
@@ -2786,7 +2757,8 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> SessionLoadGuard<'_> {
-        let (tx, rx) = self.session_registry.begin_attach(session_id);
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        self.loading_sessions.borrow_mut().insert(session_id.clone(), rx.clone());
         SessionLoadGuard {
             agent: self,
             session_id: session_id.clone(),
@@ -2810,12 +2782,12 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> Option<crate::session::SessionHandle> {
-        let existing = self.resident_handle(session_id);
+        let existing = self.sessions.borrow().get(session_id).cloned();
         if existing.is_some() {
             return existing;
         }
         self.wait_for_in_flight_session_load(session_id).await;
-        self.resident_handle(session_id)
+        self.sessions.borrow().get(session_id).cloned()
     }
     /// If a `session/load` for `session_id` is in flight, wait (bounded) for
     /// it to finish. Returns immediately when no load is in flight.
@@ -2835,10 +2807,10 @@ impl MvpAgent {
         );
         let deadline = tokio::time::Instant::now() + LOAD_WAIT_TIMEOUT;
         loop {
-            if self.is_resident(session_id) {
+            if self.sessions.borrow().contains_key(session_id) {
                 return;
             }
-            let rx = self.session_registry.attach_waiter(session_id);
+            let rx = self.loading_sessions.borrow().get(session_id).cloned();
             let Some(mut rx) = rx else { return };
             let now = tokio::time::Instant::now();
             if now >= deadline {
@@ -2848,53 +2820,7 @@ impl MvpAgent {
                 );
                 return;
             }
-            if let Ok(Err(_)) = tokio::time::timeout(deadline - now, rx.changed()).await
-                && self
-                    .session_registry
-                    .attach_waiter(session_id)
-                    .is_some_and(|w| w.same_channel(&rx))
-            {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "attach waiter closed without settling; abandoning the wait"
-                );
-                return;
-            }
-        }
-    }
-    /// Wait until no attach is in flight for this id, up to `budget`. An
-    /// attach registers its actor and keeps going, so handle presence is not
-    /// enough.
-    pub(crate) async fn wait_for_load_to_settle(
-        &self,
-        session_id: &acp::SessionId,
-        budget: std::time::Duration,
-    ) {
-        let deadline = tokio::time::Instant::now() + budget;
-        loop {
-            let Some(mut rx) = self.session_registry.attach_waiter(session_id) else {
-                return;
-            };
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "timed out waiting for session/load to settle"
-                );
-                return;
-            }
-            if let Ok(Err(_)) = tokio::time::timeout(deadline - now, rx.changed()).await
-                && self
-                    .session_registry
-                    .attach_waiter(session_id)
-                    .is_some_and(|w| w.same_channel(&rx))
-            {
-                tracing::warn!(
-                    session_id = %session_id.0,
-                    "attach waiter closed without settling; abandoning the wait"
-                );
-                return;
-            }
+            let _ = tokio::time::timeout(deadline - now, rx.changed()).await;
         }
     }
     /// Returns the default YOLO mode setting for new sessions
@@ -2906,12 +2832,12 @@ impl MvpAgent {
         self.storage_mode.get()
     }
     /// Returns the background copy context for managing background file copy tasks.
-    pub(crate) fn background_copy_context(&self) -> BackgroundCopyContext {
+    pub fn background_copy_context(&self) -> BackgroundCopyContext {
         self.background_copy_context.clone()
     }
     /// Move a foreground bash command to background.
     /// Routes through the session's tool bridge to unblock the agent loop.
-    pub(crate) async fn background_foreground_command(
+    pub async fn background_foreground_command(
         &self,
         session_id: &str,
         tool_call_id: &str,
@@ -2925,7 +2851,7 @@ impl MvpAgent {
     }
     /// Kill a background task by task_id.
     /// Routes through the session's tool bridge to the TerminalBackend.
-    pub(crate) async fn kill_background_task(
+    pub async fn kill_background_task(
         &self,
         session_id: &str,
         task_id: &str,
@@ -2937,7 +2863,7 @@ impl MvpAgent {
             Err("session not found".to_string())
         }
     }
-    pub(crate) async fn delete_scheduled_task(
+    pub async fn delete_scheduled_task(
         &self,
         session_id: &str,
         task_id: &str,
@@ -2952,7 +2878,7 @@ impl MvpAgent {
     /// Cancel a subagent by id, returning a typed outcome that backs the pager's
     /// `x.ai/subagent/cancel`. Active/pending → cancelled (a finish follows);
     /// already-finished → its terminal status; unknown id → `NotFound`.
-    pub(crate) async fn cancel_subagent(
+    pub async fn cancel_subagent(
         &self,
         subagent_id: &str,
     ) -> xai_grok_tools::implementations::grok_build::task::types::SubagentCancelOutcome {
@@ -3045,7 +2971,7 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> Result<(), &'static str> {
-        let cmd_tx = self.resident_handle(session_id).map(|h| h.cmd_tx.clone());
+        let cmd_tx = self.sessions.borrow().get(session_id).map(|h| h.cmd_tx.clone());
         let Some(cmd_tx) = cmd_tx else {
             return Err("session not found");
         };
@@ -3153,22 +3079,21 @@ impl MvpAgent {
     }
     /// Get a session's cwd by session_id.
     /// Returns None if the session is not found.
-    pub(crate) fn get_session_cwd(
-        &self,
-        session_id: &acp::SessionId,
-    ) -> Option<PathBuf> {
-        self.resident_handle(session_id).map(|handle| PathBuf::from(&handle.info.cwd))
+    pub fn get_session_cwd(&self, session_id: &acp::SessionId) -> Option<PathBuf> {
+        let sessions = self.sessions.borrow();
+        sessions.get(session_id).map(|handle| PathBuf::from(&handle.info.cwd))
     }
     /// Get a session handle by session_id.
     /// Returns None if the session is not found.
-    pub(crate) fn get_session_handle(
+    pub fn get_session_handle(
         &self,
         session_id: &acp::SessionId,
     ) -> Option<crate::session::SessionHandle> {
-        self.resident_handle(session_id)
+        let sessions = self.sessions.borrow();
+        sessions.get(session_id).cloned()
     }
     /// Get hooks list for a session (for `x.ai/hooks/list` extension).
-    pub(crate) async fn list_hooks(
+    pub async fn list_hooks(
         &self,
         session_id: &acp::SessionId,
     ) -> Option<xai_hooks_plugins_types::HooksListResponse> {
@@ -3176,7 +3101,7 @@ impl MvpAgent {
         handle.get_hooks_list().await
     }
     /// Execute a hooks management action (for `x.ai/hooks/action`).
-    pub(crate) async fn execute_hooks_action(
+    pub async fn execute_hooks_action(
         &self,
         session_id: &acp::SessionId,
         action: xai_hooks_plugins_types::HooksAction,
@@ -3192,7 +3117,7 @@ impl MvpAgent {
         handle.execute_hooks_action(action).await
     }
     /// Execute a plugins management action (for `x.ai/plugins/action`).
-    pub(crate) async fn execute_plugins_action(
+    pub async fn execute_plugins_action(
         &self,
         session_id: &acp::SessionId,
         action: xai_hooks_plugins_types::PluginsAction,
@@ -3210,7 +3135,7 @@ impl MvpAgent {
         outcome
     }
     /// Get a snapshot of the shared plugin registry (for `x.ai/plugins/list`).
-    pub(crate) fn plugin_registry_snapshot(
+    pub fn plugin_registry_snapshot(
         &self,
     ) -> Option<std::sync::Arc<xai_grok_agent::plugins::PluginRegistry>> {
         self.plugin_registry_handle.snapshot()
@@ -3218,7 +3143,7 @@ impl MvpAgent {
     /// Run content search at agent level.
     /// This allows content search to work with just a cwd, without requiring a session.
     /// Returns an upload method, or `None` when trace uploads are disabled.
-    pub(crate) async fn trace_upload_config(
+    pub async fn trace_upload_config(
         &self,
     ) -> Option<crate::session::repo_changes::UploadMethod> {
         let (method, _reason) = self.trace_upload_config_with_reason().await;
@@ -3397,8 +3322,8 @@ impl MvpAgent {
         session_id: Option<&acp::SessionId>,
     ) -> acp::SessionModelState {
         let model_id = lookup_session_model(
-            session_id
-                .and_then(|sid| self.resident_handle(sid).map(|h| h.model_id.clone())),
+            &self.sessions.borrow(),
+            session_id,
             &self.models_manager.current_model_id(),
         );
         let mut available_models: Vec<acp::ModelInfo> = self
@@ -3408,7 +3333,7 @@ impl MvpAgent {
             .cloned()
             .collect();
         let override_effort = session_id
-            .and_then(|sid| self.resident_handle(sid).map(|h| h.reasoning_effort))
+            .and_then(|sid| self.sessions.borrow().get(sid).map(|h| h.reasoning_effort))
             .flatten()
             .or_else(|| self.models_manager.current_reasoning_effort());
         if let Some(override_effort) = override_effort
@@ -3453,7 +3378,9 @@ impl MvpAgent {
         };
         let current_effort = if supports_effort {
             session_id
-                .and_then(|sid| self.resident_handle(sid).map(|h| h.reasoning_effort))
+                .and_then(|sid| {
+                    self.sessions.borrow().get(sid).map(|h| h.reasoning_effort)
+                })
                 .flatten()
                 .or_else(|| self.models_manager.current_reasoning_effort())
                 .or_else(|| {
@@ -3496,7 +3423,9 @@ impl MvpAgent {
         );
         meta.insert("x.ai/sessionDetail".to_string(), serde_json::json!(detail));
         if let Some(background_loops) = self
-            .resident_handle(session_id)
+            .sessions
+            .borrow()
+            .get(session_id)
             .map(|handle| handle.scheduler_background_loops)
         {
             meta.insert(
@@ -3788,7 +3717,12 @@ impl MvpAgent {
             archive_name_override: None,
             upload_method,
         };
-        let session_handle = self.resident_handle(&session_info.id)?;
+        let session_handle = match self.sessions.borrow().get(&session_info.id) {
+            Some(h) => h.clone(),
+            None => {
+                return None;
+            }
+        };
         let queue = session_handle
             .upload_queue
             .get_or_init(|| {
@@ -4858,7 +4792,10 @@ impl MvpAgent {
             });
         self.notify_session_cwd_for_watch(std::path::Path::new(&session_info.cwd));
         self.activity.register_session(&session_info.id.0, &handle);
-        if let Some(old) = self.insert_resident(&session_info.id, handle)
+        if let Some(old) = self
+            .sessions
+            .borrow_mut()
+            .insert(session_info.id.clone(), handle)
             && let Some(scope) = &old.tool_context.process_scope
         {
             scope.kill_all();

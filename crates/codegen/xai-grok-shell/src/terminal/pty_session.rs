@@ -29,7 +29,7 @@ const EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 /// Collecting a killed shell, not waiting on a live one.
 const REAP_GRACE: std::time::Duration = std::time::Duration::from_millis(100);
 
-pub(crate) struct PtySession {
+pub struct PtySession {
     master: Option<Box<dyn MasterPty + Send>>,
     /// Taken at teardown so the writer loop ends and releases its master dup.
     input_tx: Option<mpsc::Sender<Vec<u8>>>,
@@ -202,13 +202,11 @@ type PtyMap = HashMap<String, Arc<Mutex<PtySession>>>;
 
 static PTY_REGISTRY: LazyLock<Mutex<PtyMap>> = LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(crate) async fn get_pty(pty_id: &str) -> Option<Arc<Mutex<PtySession>>> {
+pub async fn get_pty(pty_id: &str) -> Option<Arc<Mutex<PtySession>>> {
     PTY_REGISTRY.lock().await.get(pty_id).cloned()
 }
 
-pub(crate) async fn require_pty(
-    terminal_id: &str,
-) -> Result<Arc<Mutex<PtySession>>, TerminalExtError> {
+pub async fn require_pty(terminal_id: &str) -> Result<Arc<Mutex<PtySession>>, TerminalExtError> {
     get_pty(terminal_id)
         .await
         .ok_or_else(|| TerminalExtError::NotInteractive {
@@ -216,7 +214,7 @@ pub(crate) async fn require_pty(
         })
 }
 
-pub(crate) async fn create_pty(
+pub async fn create_pty(
     shell: Option<&str>,
     cwd: Option<&str>,
     env: HashMap<String, String>,
@@ -579,7 +577,7 @@ async fn flush_output(
     );
 }
 
-pub(crate) async fn write_pty_input(pty_id: &str, data: &[u8]) -> Result<(), TerminalExtError> {
+pub async fn write_pty_input(pty_id: &str, data: &[u8]) -> Result<(), TerminalExtError> {
     let entry = require_pty(pty_id).await?;
     let input_tx = entry.lock().await.input_tx.clone();
     input_tx
@@ -595,7 +593,7 @@ pub(crate) async fn write_pty_input(pty_id: &str, data: &[u8]) -> Result<(), Ter
     Ok(())
 }
 
-pub(crate) async fn resize_pty(pty_id: &str, rows: u16, cols: u16) -> Result<(), TerminalExtError> {
+pub async fn resize_pty(pty_id: &str, rows: u16, cols: u16) -> Result<(), TerminalExtError> {
     let entry = require_pty(pty_id).await?;
     let mut session = entry.lock().await;
     let Some(master) = session.master.as_ref() else {
@@ -614,14 +612,14 @@ pub(crate) async fn resize_pty(pty_id: &str, rows: u16, cols: u16) -> Result<(),
     Ok(())
 }
 
-pub(crate) async fn is_exited(pty_id: &str) -> bool {
+pub async fn is_exited(pty_id: &str) -> bool {
     match get_pty(pty_id).await {
         Some(entry) => entry.lock().await.shell.poll_exit(),
         None => true,
     }
 }
 
-pub(crate) async fn close_pty(pty_id: &str) -> Result<(), String> {
+pub async fn close_pty(pty_id: &str) -> Result<(), String> {
     let entry = { PTY_REGISTRY.lock().await.remove(pty_id) };
     if let Some(entry) = entry {
         tokio::task::spawn_blocking(move || reap(&entry))
@@ -664,7 +662,7 @@ fn wait_for_exit(entry: &Arc<Mutex<PtySession>>, budget: std::time::Duration) ->
 }
 
 /// Called on agent disconnect to clean up all PTYs.
-pub(crate) async fn close_all() {
+pub async fn close_all() {
     let entries: Vec<Arc<Mutex<PtySession>>> = {
         let mut reg = PTY_REGISTRY.lock().await;
         reg.drain().map(|(_, v)| v).collect()
@@ -699,7 +697,7 @@ fn resolve_pty_shell(shell: Option<&str>) -> (String, Vec<String>) {
     }
 }
 
-pub(crate) async fn list_ptys() -> Vec<TerminalInfo> {
+pub async fn list_ptys() -> Vec<TerminalInfo> {
     let entries: Vec<(String, Arc<Mutex<PtySession>>)> = {
         let reg = PTY_REGISTRY.lock().await;
         reg.iter()
@@ -731,7 +729,7 @@ pub(crate) async fn list_ptys() -> Vec<TerminalInfo> {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PtyLoadResult {
+pub struct PtyLoadResult {
     pub terminal_id: String,
     pub rows: u16,
     pub cols: u16,
@@ -743,7 +741,7 @@ pub(crate) struct PtyLoadResult {
 /// Reconnect to a PTY, replaying the ring buffer so the client can reset its
 /// VTE emulator and feed all bytes from scratch. An exited PTY still loads, so
 /// its final output stays readable.
-pub(crate) async fn load(
+pub async fn load(
     pty_id: &str,
     gateway: &GatewaySender,
     target_client_id: TargetClientId,

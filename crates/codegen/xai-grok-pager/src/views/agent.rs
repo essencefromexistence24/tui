@@ -166,14 +166,14 @@ impl AgentViewLayout {
         todo_height: u16,
         queue_height: u16,
         btw_height: u16,
-        turn_status_height: u16,
+        _turn_status_height: u16,
         banner_height: u16,
         cta_height: u16,
         follow_ups_height: u16,
         startup_warning_height: u16,
         prompt_gap: u16,
         voice_recording_height: u16,
-        shortcuts_height: u16,
+        _shortcuts_height: u16,
         compact: bool,
     ) -> Self {
         let outer_vpad = layout_cfg.eff_outer_vpad(compact);
@@ -192,7 +192,8 @@ impl AgentViewLayout {
         } else {
             follow_ups_height
         };
-        let top_vpad = outer_vpad;
+        // Smallest one-row gap at the top of the chat screen.
+        let top_vpad = 1u16;
         let outer_block = Block::default().padding(Padding::new(
             layout_cfg.eff_hpad_left(compact),
             layout_cfg.eff_hpad_right(compact),
@@ -200,13 +201,12 @@ impl AgentViewLayout {
             bottom_vpad,
         ));
         let inner_area = outer_block.inner(area);
-        let mut constraints = vec![
-            Constraint::Length(1), // StatusBar
-        ];
+        let mut constraints: Vec<Constraint> = Vec::new();
         if startup_warning_height > 0 {
             constraints.push(Constraint::Length(startup_warning_height));
         }
-        let pane_gap = if top_vpad == 0 { 0u16 } else { 1 };
+        // Top pad already provides the outer gap; keep pane/scrollback flush.
+        let pane_gap = 0u16;
         if tasks_height > 0 {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(tasks_height));
@@ -219,7 +219,7 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(pane_gap));
             constraints.push(Constraint::Length(todo_height));
         }
-        let status_gap = if top_vpad == 0 { 0u16 } else { 1 };
+        let status_gap = 0u16;
         constraints.push(Constraint::Length(status_gap));
         constraints.push(Constraint::Min(5));
         if btw_height > 0 {
@@ -229,10 +229,6 @@ impl AgentViewLayout {
         if queue_height > 0 {
             constraints.push(Constraint::Length(1));
             constraints.push(Constraint::Length(queue_height));
-        }
-        if turn_status_height > 0 {
-            constraints.push(Constraint::Length(1));
-            constraints.push(Constraint::Length(turn_status_height));
         }
         if banner_height > 0 {
             constraints.push(Constraint::Length(1));
@@ -253,15 +249,10 @@ impl AgentViewLayout {
             constraints.push(Constraint::Length(voice_recording_height));
         }
         constraints.push(Constraint::Length(prompt_height));
-        let shortcuts_gap = if bottom_vpad == 0 { 0u16 } else { 1 };
-        if shortcuts_gap > 0 {
-            constraints.push(Constraint::Length(shortcuts_gap));
-        }
-        constraints.push(Constraint::Length(shortcuts_height));
+        constraints.push(Constraint::Length(1)); // gap below prompt
+        constraints.push(Constraint::Length(1)); // bottom status bar (turn_status left + status chips right)
         let chunks = Layout::vertical(constraints).split(inner_area);
         let mut i = 0;
-        let status_bar = chunks[i];
-        i += 1;
         let startup_warnings = if startup_warning_height > 0 {
             let r = chunks[i];
             i += 1;
@@ -312,14 +303,6 @@ impl AgentViewLayout {
         } else {
             Rect::default()
         };
-        let turn_status = if turn_status_height > 0 {
-            i += 1;
-            let r = chunks[i];
-            i += 1;
-            r
-        } else {
-            Rect::default()
-        };
         let banner = if banner_height > 0 {
             i += 1;
             let r = chunks[i];
@@ -356,10 +339,8 @@ impl AgentViewLayout {
         };
         let prompt = chunks[i];
         i += 1;
-        if shortcuts_gap > 0 {
-            i += 1;
-        }
-        let shortcuts = chunks[i];
+        i += 1; // skip gap
+        let status_bar = chunks[i];
         let scrollbar_x = area.right().saturating_sub(scrollbar_cfg.gap_right + 1);
         let timeline_width = if scrollbar_cfg.enabled {
             timeline_width
@@ -390,13 +371,13 @@ impl AgentViewLayout {
             todo,
             queue,
             btw,
-            turn_status,
+            turn_status: Rect::default(),
             banner,
             plugin_cta,
             follow_ups,
             voice_recording,
             prompt,
-            shortcuts,
+            shortcuts: Rect::default(),
             scrollback_content,
             scrollbar_x,
             timeline_x,
@@ -1152,7 +1133,9 @@ pub fn build_hints(
                     registry.key_for(ActionId::NextTurn),
                 )
             {
-                hints.push(HintItem::paired(l, h, "turn").pinned());
+                let mut hint = HintItem::paired(l, h, "turn").pinned();
+                hint.custom_display = Some("Shift+l/h");
+                hints.push(hint);
             }
             if !selected_is_user_prompt
                 && let Some(key) = registry.key_for(ActionId::ExpandAllThinking)

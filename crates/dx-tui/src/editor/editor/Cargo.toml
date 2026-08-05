@@ -1,0 +1,262 @@
+[package]
+name = "dx-editor"
+version = "1.0.0"
+edition = "2021"
+description = "A lightweight, fast terminal-based text editor with LSP support and TypeScript plugins"
+keywords = ["editor", "terminal", "tui", "text-editor", "lsp"]
+categories = ["command-line-utilities", "text-editors"]
+autobins = false
+autotests = false
+autoexamples = false
+
+[lib]
+name = "dx"
+path = "src/lib.rs"
+
+[features]
+default = ["plugins", "runtime", "embed-plugins", "tree-sitter", "http"]
+plugins = [
+    "dep:dx-plugin-runtime",
+    "dep:dx-parser-js",
+    "dep:dx-plugin-api-macros",
+    # oxc parses init.ts, which only the plugin runtime can execute.
+    "dep:oxc_allocator",
+    "dep:oxc_parser",
+    "dep:oxc_span",
+]
+# Tree-sitter AST features (precise indent, scope-aware reference highlighting,
+# and tree-sitter syntax highlighting for the languages syntect can't cover).
+# Enabled by default, but only bundles the grammars that *must* use tree-sitter
+# — JavaScript, TypeScript, JSONC, Templ and Go (see
+# `dx-languages/bundled-languages`). Every other language is highlighted by
+# syntect and indented by the regex indent-rules tier, so its parse table is
+# not linked. When this feature is disabled entirely, all tree-sitter code is
+# dropped and indentation is pattern/rules-based. Requires `runtime`.
+tree-sitter = ["dx-languages/bundled-languages"]
+# Embed plugins into the binary as a fallback when no disk plugins are found
+embed-plugins = ["plugins", "dep:include_dir", "dep:trash"]
+# Feature for optional development binaries (generate_schema, event_debug)
+# Includes ratatui for theme type definitions needed by schema generation
+dev-bins = ["dep:ratatui", "dep:vt100"]
+# Runtime feature includes all heavy dependencies needed for the actual editor
+runtime = [
+    "dep:crossterm",
+    "dep:ratatui",
+    "ratatui/crossterm",  # Enable ratatui's crossterm backend for native terminal
+    "dep:chrono",
+    "dep:clap",
+    "dep:tracing-subscriber",
+    "dep:dx-languages",
+    "dep:lsp-types",
+    "dep:tokio",
+    "dep:async-trait",
+
+    "dep:ignore",
+    "dep:notify",
+    "dep:libc",
+    "dep:libloading",
+    "dep:nix",
+    "dep:pulldown-cmark",
+    "dep:sha2",
+    "dep:arboard",
+    "dep:syntect",
+    # Use onig regex engine for runtime (faster than fancy-regex)
+    "syntect/regex-onig",
+    "syntect/parsing",
+    "syntect/dump-load",
+    "syntect/dump-create",
+    "syntect/yaml-load",  # Needed for SyntaxDefinition::load_from_str
+    "syntect/default-syntaxes",
+    "syntect/default-themes",
+
+    "dep:alacritty_terminal",
+    "dep:portable-pty",
+    "dep:trash",
+    "dep:open",
+
+]
+# HTTP(S) networking: the update/release checker, anonymous open-count
+# telemetry, and the `editor.httpFetch` plugin API. Enabled by default.
+# When disabled, those paths become no-ops / return errors and the whole
+# TLS stack (ureq + rustls + ring + webpki) is dropped from the binary.
+http = ["dep:ureq"]
+
+# Schema-only feature for minimal builds (just schema generation)
+schema-only = []
+# WASM browser build - shared editor core without native dependencies
+# Enables the same pure Rust modules as runtime but without platform-specific deps
+wasm = [
+    "dep:ratatui",  # ratatui core is WASM-compatible (no crossterm backend)
+    "dep:crossterm",  # crossterm event types are pure Rust data structures
+    "dep:syntect",
+    # Use fancy-regex instead of onig for WASM (pure Rust, no C dependencies)
+    "syntect/regex-fancy",
+    "syntect/parsing",
+    "syntect/dump-load",
+    "syntect/yaml-load",  # yaml-rust is pure Rust, WASM-compatible
+    "syntect/default-syntaxes",
+    "syntect/default-themes",
+
+]
+
+[dependencies]
+# Local crates
+dx-core = { path = "../core" }
+dx-parser-js = { path = "../parser-js", optional = true }
+# Provides the shared `Language` / `HighlightCategory` types (small, always
+# needed by the syntect grammar catalog). The heavy tree-sitter grammar
+# crates are pulled in separately via the `tree-sitter` feature so they can
+# be dropped from minimal builds.
+dx-languages = { path = "../languages", optional = true }
+dx-plugin-runtime = { path = "../plugin-runtime", optional = true }
+
+# oxc syntax-checks the user's `init.ts` (`dx --cmd init check` and the
+# pre-load check). `init.ts` is config-as-code executed by the QuickJS plugin
+# runtime, so it is only meaningful when `plugins` is enabled — these deps are
+# pulled in by that feature and dropped from plugin-less builds.
+oxc_allocator = { version = "0.128.0", optional = true }
+oxc_parser = { version = "0.128.0", optional = true }
+oxc_span = { version = "0.128.0", optional = true }
+
+# Always required (for schema generation and runtime)
+serde.workspace = true
+serde_json.workspace = true
+# Comment- and trailing-comma-tolerant JSON parsing for config files (JSONC).
+jsonc-parser = { version = "0.32", features = ["serde", "serde_json", "cst"] }
+schemars = { version = "1.2", features = ["preserve_order"] }
+rust-i18n = "3.1.5"
+once_cell.workspace = true
+# Cross-platform PATH / binary resolution.  Handles Windows PATHEXT
+# (.CMD/.BAT/.PS1 wrappers that npm -g creates for Node-based LSPs),
+# the Unix executable bit, symlinks, and App Execution Aliases on
+# Windows — all of which our previous hand-rolled probe missed.
+which = "6"
+
+# Runtime dependencies (optional, enabled by "runtime" feature)
+crossterm = { version = "0.29.0", features = ["osc52"], optional = true }
+# ratatui with default-features=false is WASM-compatible (no crossterm backend)
+# Runtime feature adds the crossterm backend for native terminal rendering
+ratatui = { version = "0.30.0", default-features = false, features = ["std", "underline-color"], optional = true }
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"], optional = true }
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"], optional = true }
+# tracing is always needed for logging throughout the codebase
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"], optional = true }
+
+lsp-types = { version = "0.97", optional = true }
+tokio = { version = "1.49", features = ["fs", "io-util", "process", "rt", "rt-multi-thread", "sync", "time", "macros"], optional = true }
+async-trait = { version = "0.1", optional = true }
+
+ignore = { version = "0.4", default-features = false, optional = true }
+# notify backs the watchPath plugin API. macros_only / debouncing
+# features stay off; we want raw events forwarded straight to
+# plugins so the collision-radar matrix can dedupe at the plugin
+# level (different debouncing policy than auto-revert wants).
+notify = { version = "8.2", default-features = false, features = ["macos_kqueue"], optional = true }
+# regex is always needed for model::buffer search functionality
+regex = { version = "1.12" }
+libc = { version = "0.2", optional = true }
+libloading = { version = "0.9", optional = true }
+nix = { version = "0.31", features = ["signal", "pthread", "resource", "poll", "fs"], optional = true }
+
+# Plugin API proc macros for type-safe bindings
+dx-plugin-api-macros = { path = "../plugin-api-macros", optional = true }
+
+# anyhow is always needed for model error handling
+anyhow = { workspace = true }
+# base64 for remote protocol encoding (and the webui WebSocket handshake)
+base64 = { version = "0.22" }
+# sha1 for the webui WebSocket handshake (Sec-WebSocket-Accept); already in
+# Cargo.lock as a transitive dep, so this adds no new compilation.
+sha1 = { version = "0.11" }
+# thiserror for custom error types
+thiserror = { version = "2.0" }
+# dirs is always needed for path_utils home directory expansion
+dirs = { version = "6.0" }
+pulldown-cmark = { version = "0.13", default-features = false, optional = true }
+sha2 = { version = "0.10", optional = true }
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"], optional = true }
+# syntect with default-features=false so we can choose regex engine per build target
+# runtime uses onig (faster), wasm uses fancy-regex (pure Rust, WASM-compatible)
+syntect = { version = "5.3", default-features = false, optional = true }
+
+ureq = { version = "3.1.4", default-features = false, features = ["rustls", "platform-verifier"], optional = true }
+# Unicode handling - always needed for primitives
+unicode-width = { version = "0.2" }
+unicode-segmentation = { version = "1.12" }
+
+# Encoding support - detection and conversion for various text encodings
+encoding_rs = "0.8"
+chardetng = "0.1"
+
+# Terminal emulation (optional)
+alacritty_terminal = { version = "0.25", optional = true }
+portable-pty = { version = "0.9", optional = true }
+
+# Session persistence / client-server IPC
+interprocess = { version = "2.2", features = ["tokio"] }
+
+# Embedded plugins support (optional)
+include_dir = { version = "0.7", optional = true }
+tempfile = { version = "3.25", optional = true }
+trash = { version = "5.2.5", optional = true }
+open = { version = "5.3", optional = true }
+vt100 = { version = "0.16", optional = true }
+
+# GUI mode — not available in TUI build
+# dx-gui excluded
+
+[dev-dependencies]
+proptest = "1.9"
+tempfile = "3.25"
+insta = { version = "1.46", features = ["yaml"] }
+vt100 = "0.16"  # Virtual terminal emulator for testing real ANSI output
+ctor = "0.6.3"
+tiny_http = "0.12"  # Lightweight HTTP server for testing release checker
+unicode-segmentation = "1.12"  # For grapheme cluster testing
+
+[target.'cfg(windows)'.dependencies]
+dx-winterm = { path = "../winterm" }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_Security",
+] }
+
+[build-dependencies]
+serde_json.workspace = true
+syntect = { version = "5.3", default-features = false, features = ["parsing", "dump-load", "dump-create", "yaml-load", "default-syntaxes", "regex-onig"] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[package.metadata.dist]
+# Point dist at the changelog so GitHub Releases get populated
+changelog = "../../CHANGELOG.md"
+
+# RPM package configuration for cargo-generate-rpm
+[package.metadata.generate-rpm]
+assets = [
+    # Binary directly in /usr/bin (CI creates symlink: crates/dx-editor/target -> ../../target).
+    # Plugins and themes are compiled into the binary (embed-plugins feature +
+    # build.rs BUILTIN_THEMES), so nothing under /usr/share/dx-editor/ ships.
+    { source = "target/release/dx", dest = "/usr/bin/dx", mode = "755" },
+    { source = "../../README.md", dest = "/usr/share/doc/dx-editor/README.md", mode = "644" },
+    # Freedesktop hicolor icons
+    { source = "../../docs/icons/linux/hicolor/16x16/apps/dx.png", dest = "/usr/share/icons/hicolor/16x16/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/22x22/apps/dx.png", dest = "/usr/share/icons/hicolor/22x22/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/24x24/apps/dx.png", dest = "/usr/share/icons/hicolor/24x24/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/32x32/apps/dx.png", dest = "/usr/share/icons/hicolor/32x32/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/48x48/apps/dx.png", dest = "/usr/share/icons/hicolor/48x48/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/64x64/apps/dx.png", dest = "/usr/share/icons/hicolor/64x64/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/128x128/apps/dx.png", dest = "/usr/share/icons/hicolor/128x128/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/256x256/apps/dx.png", dest = "/usr/share/icons/hicolor/256x256/apps/dx.png", mode = "644" },
+    { source = "../../docs/icons/linux/hicolor/512x512/apps/dx.png", dest = "/usr/share/icons/hicolor/512x512/apps/dx.png", mode = "644" },
+    # Freedesktop desktop entry
+    { source = "resources/dx.desktop", dest = "/usr/share/applications/dx.desktop", mode = "644" },
+    # Man page
+    { source = "resources/dx.1", dest = "/usr/share/man/man1/dx.1", mode = "644" },
+]

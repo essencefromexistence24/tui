@@ -309,6 +309,8 @@ pub struct PromptFlag<'a> {
 pub struct PromptInfo<'a> {
     /// Primary label to display on the info line (left side).
     pub model_name: &'a str,
+    /// Build/Plan composer mode displayed as a distinct right-side item.
+    pub mode_name: Option<&'a str>,
     /// Flags to display on the left side, joined by " · " (e.g., "plan", "always-approve").
     pub flags: &'a [PromptFlag<'a>],
     /// Whether multiline mode is active (shown right-aligned).
@@ -1492,9 +1494,14 @@ impl PromptWidget {
             self.textarea.desired_height(text_width).max(1)
         };
         let vpad_top = style.vpad_top;
+        let top_h = if style.chrome && style.show_borders {
+            1u16.max(vpad_top)
+        } else {
+            vpad_top
+        };
         let info_block = style.info_block(has_info);
-        let total = vpad_top + text_height + info_block;
-        let min = vpad_top + 1 + info_block;
+        let total = top_h + text_height + info_block;
+        let min = top_h + 1 + info_block;
         total.clamp(min.min(max_height), max_height)
     }
 
@@ -2899,10 +2906,14 @@ impl PromptWidget {
         let theme = Theme::current();
         let bg = style.bg.color(theme.bg_base);
 
+        // Use the active theme's semantic foregrounds directly. The older
+        // prompt-border slots can be Reset or too close to the canvas in
+        // some themes, which makes the box disappear even though the theme
+        // changed successfully.
         let border_color = style.border_color_override.unwrap_or(if style.focused {
-            theme.prompt_border_active
+            theme.accent_user
         } else {
-            theme.prompt_border
+            theme.text_secondary
         });
 
         // Fill entire area with fg + bg so every cell has RGB colors (needed for blending)
@@ -2935,8 +2946,11 @@ impl PromptWidget {
         // Split content: vpad_top + text + info_block
         let vpad_top = style.vpad_top;
         let info_block = style.info_block(info.is_some());
+        // Always reserve 1 row for the top divider (╭─╮) when borders are on,
+        // even if vpad_top would collapse it to 0.
+        let top_h = if style.chrome && style.show_borders { 1u16.max(vpad_top) } else { vpad_top };
         let chunks = Layout::vertical([
-            Constraint::Length(vpad_top),
+            Constraint::Length(top_h),
             Constraint::Min(1),
             Constraint::Length(info_block),
         ])
@@ -2945,7 +2959,7 @@ impl PromptWidget {
         let text_area_rect = chunks[1];
 
         // Top divider: ╭──────────╮
-        if vpad_top > 0 && style.chrome && style.show_borders {
+        if style.chrome && style.show_borders {
             let div_style = Style::default().fg(border_color).bg(bg);
             let div_y = chunks[0].y;
             let left_x = area.x;
@@ -3403,15 +3417,20 @@ impl PromptWidget {
                 sep_fg
             };
             let warning_style = Style::default().fg(fg).bg(bg);
-            left_spans.push(Span::styled(warning.to_owned(), warning_style));
+            left_spans.push(Span::styled(
+                warning.replace('-', " ").to_owned(),
+                warning_style,
+            ));
             left_spans.push(Span::styled(" · ", sep_style));
         }
-        left_spans.push(Span::styled(info.model_name, model_style));
+        left_spans.push(Span::styled(
+            info.model_name.replace('-', " "),
+            model_style,
+        ));
         for flag in info.flags {
             left_spans.push(Span::styled(" · ", sep_style));
             let mut style = if let Some(color) = flag.color {
                 if flag.bold {
-                    // Bold flags use full color for visibility.
                     Style::default().fg(color).bg(bg)
                 } else {
                     let dimmed = crate::render::color::blend_color(bg, color, flag_opacity)
@@ -3430,14 +3449,25 @@ impl PromptWidget {
             if flag.bold {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            left_spans.push(Span::styled(flag.text, style));
+            left_spans.push(Span::styled(
+                flag.text.replace('-', " "),
+                style,
+            ));
         }
-        // Trailing pad mirrors the leading pad above.
-        left_spans.push(Span::styled(" ", pad_style));
+        // No trailing pad — the dot separator touches the model name directly
+        // so both sides of '·' have the same (zero) gap.
 
-        // Build right-side spans: "multiline" indicator.
+        // Trailing pad removed — right side starts flush so no visible gap
+        // separates the model name from the composer mode.
         let mut right_spans: Vec<Span<'static>> = Vec::new();
+        if let Some(mode) = info.mode_name {
+            right_spans.push(Span::styled(" · ", sep_style));
+            right_spans.push(Span::styled(mode.replace('-', " ").to_owned(), model_style));
+        }
         if info.multiline {
+            if !right_spans.is_empty() {
+                right_spans.push(Span::styled(" · ", sep_style));
+            }
             right_spans.push(Span::styled("multiline", flag_style));
         }
 
@@ -3447,15 +3477,19 @@ impl PromptWidget {
             let right_line = Line::from(right_spans);
             let right_w = right_line.width() as u16;
             let left_line = Line::from(left_spans);
-            let left_w = (left_line.width() as u16).min(area.width.saturating_sub(right_w + 1));
-            // Right-align both parts: [left][gap][right]
-            let total_w = left_w + 1 + right_w; // 1 for gap
+            let left_w = (left_line.width() as u16).min(area.width.saturating_sub(right_w));
+            // Left and right parts flush — no gap so the border ╰─╯ divider
+            // stays continuous where text does not cover it.
+            let total_w = left_w + right_w;
             let x = area.x + area.width.saturating_sub(total_w);
             buf.set_line_safe(x, area.y, &left_line, left_w);
             let rx = area.x + area.width.saturating_sub(right_w);
             buf.set_line_safe(rx, area.y, &right_line, right_w);
         } else {
             // Right-align: clamp to area width so text doesn't overflow borders.
+            // Keep the home-screen info line one cell away from the right
+            // corner when no Build/Plan/multiline item occupies right_spans.
+            left_spans.push(Span::styled(" ", pad_style));
             let line = Line::from(left_spans);
             let text_w = (line.width() as u16).min(area.width);
             let x = area.x + area.width.saturating_sub(text_w);

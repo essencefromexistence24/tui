@@ -209,16 +209,16 @@ async fn fetch_bundle_inner(
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ShareResponse {
+pub struct ShareResponse {
     pub permission_id: String,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct LoadDataResponse {
+pub struct LoadDataResponse {
     pub messages: Option<Vec<LoadedMessage>>,
     pub session: Option<SessionInfo>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct LoadedMessage {
+pub struct LoadedMessage {
     pub id: String,
     pub content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -237,14 +237,14 @@ pub struct SessionInfo {
     pub metadata: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct SaveDataRequest {
+pub struct SaveDataRequest {
     pub messages: Vec<ExportedMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct UpsertSessionRequest {
+pub struct UpsertSessionRequest {
     pub session: SessionUpdate,
     pub agent_id: String,
 }
@@ -322,10 +322,7 @@ impl BackendClient {
     }
     /// Attach a live `AuthManager` so every request resolves a fresh token
     /// instead of requiring the caller to pass `&GrokAuth`.
-    pub(crate) fn with_auth_manager(
-        mut self,
-        manager: std::sync::Arc<crate::auth::AuthManager>,
-    ) -> Self {
+    pub fn with_auth_manager(mut self, manager: std::sync::Arc<crate::auth::AuthManager>) -> Self {
         let credentials: std::sync::Arc<dyn xai_grok_auth::AuthCredentialProvider> =
             std::sync::Arc::new(
                 crate::auth::credential_provider::ShellAuthCredentialProvider::new(
@@ -386,6 +383,22 @@ impl BackendClient {
         }
         let share_response = self.create_share_link(&session.session_id).await?;
         Ok(share_url(&share_response.permission_id))
+    }
+    /// Sync session to backend without creating a share link.
+    pub async fn sync_session(
+        &self,
+        session: &ExportedSession,
+        agent_id: &str,
+    ) -> Result<(), BackendError> {
+        self.upsert_session(&session.session_id, &session.metadata, agent_id)
+            .await?;
+        self.save_session_data(
+            &session.session_id,
+            &session.messages,
+            Some(&session.metadata),
+        )
+        .await?;
+        Ok(())
     }
     /// Build auth + identity headers.
     /// Must include X-XAI-Token-Auth so nginx auth subrequest routes to authenticate_xai_grok_cli_token.
@@ -461,7 +474,7 @@ impl BackendClient {
         }
         Ok(())
     }
-    pub(crate) async fn save_session_data(
+    pub async fn save_session_data(
         &self,
         session_id: &str,
         messages: &[ExportedMessage],
@@ -498,7 +511,7 @@ impl BackendClient {
         let data: ListResponse = response.json().await?;
         Ok(data.sessions)
     }
-    pub(crate) async fn load_session_data(
+    pub async fn load_session_data(
         &self,
         session_id: &str,
     ) -> Result<LoadDataResponse, BackendError> {
@@ -517,10 +530,7 @@ impl BackendClient {
         let data: LoadDataResponse = response.json().await?;
         Ok(data)
     }
-    pub(crate) async fn create_share_link(
-        &self,
-        session_id: &str,
-    ) -> Result<ShareResponse, BackendError> {
+    pub async fn create_share_link(&self, session_id: &str) -> Result<ShareResponse, BackendError> {
         let url = format!("{}/sessions/{}/share", self.base_url, session_id);
         let response = self.send_with_auth(self.reqwest_client.post(&url)).await?;
         if !response.status().is_success() {
@@ -531,7 +541,7 @@ impl BackendClient {
         let share_response: ShareResponse = response.json().await?;
         Ok(share_response)
     }
-    pub(crate) async fn delete_session_data(&self, session_id: &str) -> Result<(), BackendError> {
+    pub async fn delete_session_data(&self, session_id: &str) -> Result<(), BackendError> {
         let url = format!("{}/sessions/{}/data", self.base_url, session_id);
         let response = self
             .send_with_auth(self.reqwest_client.delete(&url))
@@ -829,7 +839,7 @@ pub(crate) fn fetch_models_blocking(
 }
 /// Parse a single model entry from the /models-v2 response.
 /// Used by both initial model fetch and session-resume metadata refresh.
-pub(crate) fn parse_remote_model_value(
+pub fn parse_remote_model_value(
     value: &serde_json::Value,
     default_base_url: &str,
 ) -> Option<crate::agent::config::ModelEntryConfig> {
@@ -981,6 +991,7 @@ pub(crate) fn parse_remote_model_value(
                 }
             })
             .unwrap_or_default(),
+        local_model_path: None,
     })
 }
 fn get_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {

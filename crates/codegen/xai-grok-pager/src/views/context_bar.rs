@@ -151,7 +151,7 @@ fn color_to_rgb(c: Color) -> (u8, u8, u8) {
 // ---------------------------------------------------------------------------
 
 /// The separator character between status bar items.
-pub const SEPARATOR: &str = "│";
+pub const SEPARATOR: &str = "·";
 
 // ---------------------------------------------------------------------------
 // Context bar line builder

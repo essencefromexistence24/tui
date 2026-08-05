@@ -25,10 +25,7 @@ pub struct NotificationMeta {
 
 /// Inject `targetClientId` into the `_meta` field of a JSON params object.
 /// Merges with any existing `_meta` fields rather than replacing them.
-pub(crate) fn inject_routing_meta(
-    params: &mut serde_json::Value,
-    target_client_id: &TargetClientId,
-) {
+pub fn inject_routing_meta(params: &mut serde_json::Value, target_client_id: &TargetClientId) {
     if target_client_id.is_none() {
         return;
     }

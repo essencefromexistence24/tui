@@ -628,7 +628,6 @@ fn render_permission(
         area,
         perm,
         &followup,
-        agent.permission_pattern_edit.as_ref(),
         minimal_api::hovered_permission_item(agent),
         theme,
         true,

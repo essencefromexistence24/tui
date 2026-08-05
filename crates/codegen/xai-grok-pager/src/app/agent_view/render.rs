@@ -8,9 +8,8 @@ use super::{
 use crate::actions::{ActionId, ActionRegistry};
 use crate::key;
 use crate::render::SafeBuf;
-use crate::render::line_utils::truncate_line;
+
 use crate::scrollback::block::BlockContent;
-use crate::scrollback::layout::HorizontalLayout;
 use crate::scrollback::render::ScratchBuffer;
 use crate::scrollback::text_selection::{
     ResolvedSelectionBoundaries, ResolvedSelectionModel, render_active_selection_overlay,
@@ -29,8 +28,163 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
+
+/// Translate every editor color role onto the active Dx palette. The Code
+/// Editor keeps its layout and behavior without carrying an independent
+/// built-in color scheme.
+fn editor_theme_overrides(theme: &Theme) -> Vec<(&'static str, ratatui::style::Color)> {
+    vec![
+        ("editor.bg", theme.bg_base),
+        ("editor.fg", theme.text_primary),
+        ("editor.cursor", theme.accent_user),
+        ("editor.inactive_cursor", theme.gray),
+        ("editor.selection_bg", theme.bg_visual),
+        ("editor.current_line_bg", theme.bg_highlight),
+        ("editor.line_number_fg", theme.gray_dim),
+        ("editor.line_number_bg", theme.bg_base),
+        ("editor.after_eof_bg", theme.bg_base),
+        ("editor.ruler_bg", theme.bg_dark),
+        ("editor.indentation_guide_fg", theme.gray_dim),
+        ("editor.whitespace_indicator_fg", theme.gray_dim),
+        ("editor.bracket_match_fg", theme.fuzzy_accent),
+        ("editor.bracket_rainbow_1", theme.md_heading_h1),
+        ("editor.bracket_rainbow_2", theme.md_heading_h2),
+        ("editor.bracket_rainbow_3", theme.md_heading_h3),
+        ("editor.bracket_rainbow_4", theme.md_heading_h4),
+        ("editor.bracket_rainbow_5", theme.md_heading_h5),
+        ("editor.bracket_rainbow_6", theme.md_heading_h6),
+        ("editor.diff_add_bg", theme.diff_insert_bg),
+        ("editor.diff_remove_bg", theme.diff_delete_bg),
+        ("editor.diff_modify_bg", theme.bg_hover),
+        ("editor.diff_add_highlight_bg", theme.diff_insert_bg),
+        ("editor.diff_remove_highlight_bg", theme.diff_delete_bg),
+        ("ui.tab_active_fg", theme.text_primary),
+        ("ui.tab_active_bg", theme.bg_highlight),
+        ("ui.tab_inactive_fg", theme.text_secondary),
+        ("ui.tab_inactive_bg", theme.bg_dark),
+        ("ui.tab_separator_bg", theme.bg_base),
+        ("ui.tab_close_hover_fg", theme.accent_error),
+        ("ui.tab_hover_bg", theme.bg_hover),
+        ("ui.menu_bg", theme.bg_light),
+        ("ui.menu_fg", theme.text_primary),
+        ("ui.menu_active_bg", theme.bg_visual),
+        ("ui.menu_active_fg", theme.text_primary),
+        ("ui.menu_dropdown_bg", theme.bg_light),
+        ("ui.menu_dropdown_fg", theme.text_primary),
+        ("ui.menu_highlight_bg", theme.bg_visual),
+        ("ui.menu_highlight_fg", theme.text_primary),
+        ("ui.menu_border_fg", theme.selection_border),
+        ("ui.menu_separator_fg", theme.gray_dim),
+        ("ui.menu_hover_bg", theme.bg_hover),
+        ("ui.menu_hover_fg", theme.text_primary),
+        ("ui.menu_disabled_fg", theme.gray_dim),
+        ("ui.menu_disabled_bg", theme.bg_light),
+        ("ui.status_bar_fg", theme.text_secondary),
+        ("ui.status_bar_bg", theme.bg_dark),
+        ("ui.status_palette_fg", theme.text_primary),
+        ("ui.status_palette_bg", theme.accent_model),
+        ("ui.status_separator_fg", theme.gray_dim),
+        ("ui.status_separator_bg", theme.bg_dark),
+        ("ui.status_lsp_on_fg", theme.text_primary),
+        ("ui.status_lsp_on_bg", theme.accent_running),
+        ("ui.status_lsp_actionable_fg", theme.bg_base),
+        ("ui.status_lsp_actionable_bg", theme.warning),
+        ("ui.prompt_fg", theme.text_primary),
+        ("ui.prompt_bg", theme.bg_light),
+        ("ui.prompt_selection_fg", theme.text_primary),
+        ("ui.prompt_selection_bg", theme.bg_visual),
+        ("ui.popup_border_fg", theme.prompt_border_active),
+        ("ui.popup_bg", theme.bg_light),
+        ("ui.popup_selection_bg", theme.bg_visual),
+        ("ui.popup_selection_fg", theme.text_primary),
+        ("ui.popup_text_fg", theme.text_primary),
+        ("ui.text_input_selection_bg", theme.bg_visual),
+        ("ui.suggestion_bg", theme.bg_light),
+        ("ui.suggestion_fg", theme.text_secondary),
+        ("ui.suggestion_selected_bg", theme.bg_visual),
+        ("ui.help_bg", theme.bg_light),
+        ("ui.help_fg", theme.text_primary),
+        ("ui.help_key_fg", theme.accent_skill),
+        ("ui.help_separator_fg", theme.gray_dim),
+        ("ui.help_indicator_fg", theme.bg_base),
+        ("ui.help_indicator_bg", theme.accent_system),
+        ("ui.inline_code_bg", theme.md_code_bg),
+        ("ui.split_separator_fg", theme.gray_dim),
+        ("ui.split_separator_hover_fg", theme.hover_border),
+        ("ui.scrollbar_track_fg", theme.scrollbar_bg),
+        ("ui.scrollbar_thumb_fg", theme.scrollbar_fg),
+        ("ui.scrollbar_track_hover_fg", theme.bg_hover),
+        ("ui.scrollbar_thumb_hover_fg", theme.accent_user),
+        ("ui.compose_margin_bg", theme.bg_dark),
+        ("ui.semantic_highlight_bg", theme.bg_visual),
+        ("ui.terminal_bg", theme.bg_terminal),
+        ("ui.terminal_fg", theme.text_primary),
+        ("ui.status_warning_indicator_bg", theme.warning),
+        ("ui.status_warning_indicator_fg", theme.bg_base),
+        ("ui.status_error_indicator_bg", theme.accent_error),
+        ("ui.status_error_indicator_fg", theme.bg_base),
+        ("ui.status_warning_indicator_hover_bg", theme.accent_plan),
+        ("ui.status_warning_indicator_hover_fg", theme.bg_base),
+        ("ui.status_error_indicator_hover_bg", theme.accent_error),
+        ("ui.status_error_indicator_hover_fg", theme.text_primary),
+        ("ui.tab_drop_zone_bg", theme.bg_visual),
+        ("ui.tab_drop_zone_border", theme.selection_border),
+        ("ui.settings_selected_bg", theme.bg_visual),
+        ("ui.settings_selected_fg", theme.text_primary),
+        ("ui.file_status_added_fg", theme.accent_success),
+        ("ui.file_status_modified_fg", theme.warning),
+        ("ui.file_status_deleted_fg", theme.accent_error),
+        ("ui.file_status_renamed_fg", theme.accent_user),
+        ("ui.file_status_untracked_fg", theme.gray_bright),
+        ("ui.file_status_conflicted_fg", theme.accent_error),
+        ("search.match_bg", theme.bg_visual),
+        ("search.match_fg", theme.fuzzy_accent),
+        ("search.label_bg", theme.bg_highlight),
+        ("search.label_fg", theme.text_primary),
+        ("diagnostic.error_fg", theme.accent_error),
+        ("diagnostic.error_bg", theme.diff_delete_bg),
+        ("diagnostic.warning_fg", theme.warning),
+        ("diagnostic.warning_bg", theme.bg_highlight),
+        ("diagnostic.info_fg", theme.running),
+        ("diagnostic.info_bg", theme.bg_highlight),
+        ("diagnostic.hint_fg", theme.accent_thinking),
+        ("diagnostic.hint_bg", theme.bg_highlight),
+        ("syntax.keyword", theme.command),
+        ("syntax.string", theme.accent_success),
+        ("syntax.comment", theme.gray),
+        ("syntax.function", theme.accent_user),
+        ("syntax.type", theme.accent_assistant),
+        ("syntax.variable", theme.md_text),
+        ("syntax.variable_builtin", theme.accent_verify),
+        ("syntax.constant", theme.path),
+        ("syntax.operator", theme.md_code),
+        ("syntax.punctuation_bracket", theme.gray_bright),
+        ("syntax.punctuation_delimiter", theme.text_secondary),
+    ]
+}
+
+#[cfg(test)]
+mod editor_theme_sync_tests {
+    use super::*;
+
+    #[test]
+    fn every_dx_editor_override_is_a_real_editor_theme_key() {
+        let dx_theme = Theme::tokyonight();
+        let overrides = editor_theme_overrides(&dx_theme);
+        let mut editor = dx::view::theme::Theme::load_builtin("dark").expect("dark editor theme");
+        let applied = editor.override_colors(overrides.iter().copied());
+
+        assert_eq!(applied, overrides.len());
+        assert_eq!(editor.editor_bg, dx_theme.bg_base);
+        assert_eq!(editor.editor_fg, dx_theme.text_primary);
+        assert_eq!(editor.selection_bg, dx_theme.bg_visual);
+        assert_eq!(editor.syntax_keyword, dx_theme.command);
+        assert_eq!(editor.diagnostic_error_fg, dx_theme.accent_error);
+    }
+}
 use std::collections::HashSet;
 use std::time::Instant;
+use unicode_width::UnicodeWidthStr;
 /// AppView-owned per-frame inputs to [`AgentView::draw`] — state the agent
 /// view cannot see itself (the voice pipeline and app-level Esc ownership).
 /// Grouped (mirroring `WelcomeRenderParams`) so the next app-level render
@@ -131,36 +285,6 @@ impl AgentView {
             PlanApprovalFocus::Preview => vec![HintItem::new(key!('y'), "copy plan")],
         }
     }
-    /// Shortcut hints for an open `ask_user_question` card.
-    fn question_shortcut_hints(
-        &self,
-        qv: &crate::views::question_view::QuestionViewState,
-    ) -> Vec<HintItem> {
-        use crate::views::question_view::QuestionFocus;
-        match qv.focus {
-            QuestionFocus::InputMode if self.prompt.file_search_visible() => {
-                vec![
-                    HintItem::paired(key!(Up), key!(Down), "nav"),
-                    HintItem::new(key!(Tab), "accept"),
-                    HintItem::new(key!(Right), "drill"),
-                    HintItem::new(key!(Esc), "dismiss"),
-                ]
-            }
-            QuestionFocus::InputMode => {
-                vec![
-                    HintItem::new(key!(Enter), "submit"),
-                    HintItem::new(key!(Esc), "back"),
-                ]
-            }
-            QuestionFocus::Navigation => {
-                vec![
-                    HintItem::new(key!(Tab), "next answer"),
-                    HintItem::new(key!(Esc), "unselect"),
-                    HintItem::new(key!('X'), "dismiss"),
-                ]
-            }
-        }
-    }
     /// Returns the *exact* hints the bottom shortcuts bar would render right now.
     ///
     /// Single source of truth for context-sensitive shortcuts (pane, overlays,
@@ -195,12 +319,6 @@ impl AgentView {
                             HintItem::new(key!(Esc), "back"),
                         ]
                     }
-                    PermissionFocus::PatternEdit => {
-                        vec![
-                            HintItem::new(key!(Enter), "save"),
-                            HintItem::new(key!(Esc), "cancel"),
-                        ]
-                    }
                     PermissionFocus::Options => {
                         use crate::input::key::KeyShortcut;
                         use crossterm::event::{KeyCode, KeyModifiers};
@@ -210,9 +328,6 @@ impl AgentView {
                         let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
                         if perm.has_adjustable_scope() {
                             hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
-                        }
-                        if perm.has_editable_bash_pattern() {
-                            hints.push(HintItem::new(key!('e'), "edit pattern"));
                         }
                         if !perm.description.is_empty() {
                             let label = if perm.args_expanded {
@@ -257,7 +372,31 @@ impl AgentView {
                 h
             }
         } else if let Some(ref qv) = self.question_view {
-            self.question_shortcut_hints(qv)
+            use crate::views::question_view::QuestionFocus;
+            match qv.focus {
+                QuestionFocus::InputMode => {
+                    if self.prompt.file_search_visible() {
+                        vec![
+                            HintItem::paired(key!(Up), key!(Down), "nav"),
+                            HintItem::new(key!(Tab), "accept"),
+                            HintItem::new(key!(Right), "drill"),
+                            HintItem::new(key!(Esc), "dismiss"),
+                        ]
+                    } else {
+                        vec![
+                            HintItem::new(key!(Enter), "submit"),
+                            HintItem::new(key!(Esc), "back"),
+                        ]
+                    }
+                }
+                QuestionFocus::Navigation => {
+                    vec![
+                        HintItem::new(key!(Esc), "unselect"),
+                        HintItem::new(key!(Tab), "scrollback"),
+                        HintItem::new(key!('X'), "dismiss"),
+                    ]
+                }
+            }
         } else if self.cancel_turn_view.is_some() {
             vec![
                 HintItem::paired(key!('1'), key!('4'), "select"),
@@ -459,13 +598,13 @@ impl AgentView {
         agent::fill_background(buf, area, layout_cfg, compact, theme);
         let padded = Rect {
             x: area.x + layout_cfg.eff_hpad_left(compact),
-            y: area.y + layout_cfg.eff_outer_vpad(compact),
+            y: area.y,
             width: area.width.saturating_sub(
                 layout_cfg.eff_hpad_left(compact) + layout_cfg.eff_hpad_right(compact),
             ),
             height: area
                 .height
-                .saturating_sub(layout_cfg.eff_outer_vpad(compact) * 2),
+                .saturating_sub(layout_cfg.eff_outer_vpad(compact)),
         };
         if padded.width < 10 || padded.height < 5 {
             return (None, crate::terminal::overlay::clear().map(Into::into));
@@ -668,7 +807,6 @@ impl AgentView {
                 super::BannerSlotParams::none(),
                 bundle_state,
                 false,
-                false,
                 &mut Vec::new(),
                 AppRenderParams::default(),
             );
@@ -686,14 +824,10 @@ impl AgentView {
     ///
     /// `in_dashboard_overlay` is `true` when this view is being
     /// rendered inside the dashboard's session-overlay; it appends
-    /// `Ctrl+\\:dashboard` (and, when `overlay_can_cycle`, the
-    /// `Ctrl+[/]:prev/next agent` chip) to the bottom shortcuts bar so the
-    /// user can discover keyboard back-out and agent navigation from
-    /// inside the agent view itself (not just from the overlay header).
-    ///
-    /// `overlay_can_cycle` mirrors the header `[‹]`/`[›]` gate: true when
-    /// the visible overlay cycle order has more than one agent. Callers
-    /// derive it from the same `position` used for the header chips.
+    /// `Ctrl+\\:dashboard` and `Ctrl+[/]:agents` hints to the bottom shortcuts
+    /// bar so the user can discover the keyboard back-out and
+    /// agent-navigation shortcuts from inside the agent view itself
+    /// (not just from the overlay's top header).
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &mut self,
@@ -706,7 +840,6 @@ impl AgentView {
         banner: super::BannerSlotParams<'_>,
         bundle_state: &crate::app::bundle::BundleState,
         in_dashboard_overlay: bool,
-        overlay_can_cycle: bool,
         link_spans_out: &mut Vec<xai_ratatui_inline::LinkSpan>,
         app_params: AppRenderParams<'_>,
     ) -> (
@@ -719,7 +852,23 @@ impl AgentView {
             voice_interim,
             esc_owned_before_agent,
         } = app_params;
-        self.scrollback.begin_frame();
+        let full_area = area;
+        let dx_chrome_visible =
+            !in_dashboard_overlay && !self.modal_owns_input() && !self.dx_ui.palette_visible;
+        let dx_chat_layout = self.dx_ui.view == crate::dx::DxView::Chat;
+        // The unified extensions menu is an overlay over the working chat,
+        // not a replacement screen. Keep the right sidebar in the underlying
+        // layout so session context remains visible around the modal.
+        let dx_sidebar_visible = !in_dashboard_overlay
+            && !self.dx_ui.palette_visible
+            && dx_chat_layout
+            && (!self.modal_owns_input() || self.extensions_modal.is_some());
+        let (area, dx_sidebar_area) =
+            crate::dx::sidebar::split(area, self.dx_ui.sidebar_visible && dx_sidebar_visible);
+        // Minimap is a short rail beside scrollback only — not a full-height
+        // column — so the prompt keeps the full width of the left column.
+        // Hidden on non-chat screens (carousel, editor, file browser).
+        let dx_minimap_visible = self.dx_ui.minimap_visible && dx_chrome_visible && dx_chat_layout;
         self.in_dashboard_overlay = in_dashboard_overlay;
         let super::BannerSlotParams {
             height: banner_height,
@@ -742,6 +891,37 @@ impl AgentView {
         self.clear_scrollback_selection_state();
         self.refresh_prompt_suggestion_gate();
         let theme = Theme::current();
+        if self.dx_ui.view == crate::dx::DxView::Editor {
+            if let Err(error) = self.dx_ui.editor.tick() {
+                tracing::error!(%error, "Code Editor tick failed");
+            }
+            let base = if theme.is_dark() { "dark" } else { "light" };
+            self.dx_ui
+                .editor
+                .apply_host_theme(base, editor_theme_overrides(&theme));
+            self.dx_ui.editor.render(full_area, buf);
+            let cursor = self
+                .dx_ui
+                .editor
+                .cursor()
+                .map(|(position, _)| (position.x, position.y));
+            return (cursor, None);
+        }
+        if self.dx_ui.view == crate::dx::DxView::FileBrowser {
+            self.dx_ui.file_browser.render(full_area, buf);
+            return (None, None);
+        }
+        let dx_animation_mode = self.dx_ui.view == crate::dx::DxView::Animation;
+        if dx_animation_mode {
+            // Carousel screens keep the real prompt and completion menus, but
+            // intentionally omit the passive bottom-left ghost suggestion.
+            self.prompt.prompt_suggestion.dismiss();
+        }
+        if self.dx_ui.view == crate::dx::DxView::Diff {
+            let dx_theme = crate::theme::ChatTheme::from(&theme);
+            crate::dx::diff_view::render_diff_view(&mut self.dx_ui.diff, &dx_theme, full_area, buf);
+            return (None, None);
+        }
         let link_active_style = Style::default()
             .fg(theme.link_fg)
             .add_modifier(ratatui::style::Modifier::UNDERLINED | ratatui::style::Modifier::BOLD);
@@ -799,6 +979,9 @@ impl AgentView {
             });
         }
         let appearance = self.scrollback.appearance().clone();
+        // Symmetric left/right outer+block padding (defaults 2/2). The minimap
+        // overlays inside the left chrome (accent + block pad) and never adds
+        // an extra gutter beyond the message gap.
         let layout_cfg = &appearance.scrollback.layout;
         let scrollbar_cfg = &appearance.scrollback.scrollbar;
         let model_id = self
@@ -1003,7 +1186,7 @@ impl AgentView {
             let style = PromptStyle {
                 focused: true,
                 show_prefix: false,
-                vpad_top: 0,
+                vpad_top: 1,
                 chrome: false,
                 chrome_pad_left: 0,
                 chrome_pad_right: 0,
@@ -1129,25 +1312,17 @@ impl AgentView {
         let drain_blocked = self.drain_blocked();
         let watchers = self.watchers();
         let parked = self.renders_parked();
-        let turn_status_height = if turn_status::should_show(
+        let _turn_status_active = turn_status::should_show(
             &self.session.state,
             drain_blocked,
             self.mcp_init_progress.as_ref(),
             watchers,
             parked,
-        ) {
-            1
-        } else {
-            0
-        };
-        let prompt_gap = if appearance.prompt.compact
-            || (turn_status_height > 0 && !appearance.turn_status.gap)
-            || area.height <= agent::SHORT_TERMINAL_ROWS
-        {
-            0
-        } else {
-            1
-        };
+        );
+        // The gap row above the chat input used to host the scroll-to-bottom
+        // "▼" indicator. It is now reclaimed by the scrollback so messages get
+        // every available row (the indicator rendering is commented out above).
+        let prompt_gap = 0u16;
         let voice_recording_height = if voice_listening { 1 } else { 0 };
         let _tool_usage_height = 0u16;
         let btw_height =
@@ -1176,14 +1351,14 @@ impl AgentView {
             todo_height,
             queue_height,
             btw_height,
-            turn_status_height,
+            u16::from(_turn_status_active),
             banner_height,
             cta_height,
             follow_ups_height,
             0,
             prompt_gap,
             voice_recording_height,
-            1,
+            0,
             compact,
         );
         let search_active =
@@ -1197,6 +1372,13 @@ impl AgentView {
                 .height
                 .saturating_sub(search_reserved_rows);
         }
+        // Short left minimap rail beside messages only; prompt stays full width.
+        let (scrollback_for_messages, mut dx_minimap_area) = crate::dx::minimap::split_scrollback(
+            layout.scrollback_content,
+            dx_minimap_visible,
+            self.scrollback.turn_count(),
+        );
+        layout.scrollback_content = scrollback_for_messages;
         let overlay_blocks_rail_hover = self.jump_state.is_some()
             || self.rewind_state.is_some()
             || self.question_view.is_some()
@@ -1252,14 +1434,14 @@ impl AgentView {
                         todo_height,
                         queue_height,
                         btw_height,
-                        turn_status_height,
+                        u16::from(_turn_status_active),
                         banner_height,
                         cta_height,
                         follow_ups_height,
                         0,
                         prompt_gap,
                         voice_recording_height,
-                        1,
+                        0,
                         compact,
                     );
                     if search_reserved_rows > 0 {
@@ -1269,6 +1451,13 @@ impl AgentView {
                             .height
                             .saturating_sub(search_reserved_rows);
                     }
+                    let (scrollback_for_messages, rail) = crate::dx::minimap::split_scrollback(
+                        layout.scrollback_content,
+                        dx_minimap_visible,
+                        self.scrollback.turn_count(),
+                    );
+                    layout.scrollback_content = scrollback_for_messages;
+                    dx_minimap_area = rail;
                     self.scrollback.prepare_layout(
                         layout.scrollback_content.width,
                         layout.scrollback_content.height,
@@ -1407,6 +1596,24 @@ impl AgentView {
         ) {
             status.push("badge", Line::from(badge_spans));
         }
+        self.dx_ui.diff.poll_refresh();
+        if self.dx_ui.diff.last_refresh.is_none() && !self.dx_ui.diff.is_loading() {
+            self.dx_ui.diff.refresh();
+        }
+        status.push(
+            "dx_diff_stats",
+            Line::from(vec![
+                Span::styled(
+                    format!("+{}", self.dx_ui.diff.total_additions),
+                    Style::default().fg(theme.diff_insert_fg),
+                ),
+                Span::raw(", "),
+                Span::styled(
+                    format!("-{}", self.dx_ui.diff.total_deletions),
+                    Style::default().fg(theme.diff_delete_fg),
+                ),
+            ]),
+        );
         let areas = status.render(buf, layout.status_bar);
         self.hit_bg_status.rect = areas.get("bg_tasks").copied();
         self.hit_goal_status.rect = areas.get("goal").copied();
@@ -1415,131 +1622,48 @@ impl AgentView {
         self.hit_plan_button.rect = areas.get("plan").copied();
         self.hit_queue_badge.rect = areas.get("queue").copied();
         self.hit_badge.rect = areas.get("badge").copied();
-        let home = std::env::var("HOME").ok();
-        let display = self.session.cwd.display().to_string();
-        let short = match &home {
-            Some(h) if display.starts_with(h.as_str()) => {
-                format!("~{}", &display[h.len()..])
+        self.hit_diff_stats.rect = areas.get("dx_diff_stats").copied();
+        // Render CWD/path/branch on the left side of the bottom bar
+        let cwd_home = std::env::var("HOME").ok();
+        let cwd_display = self.session.cwd.display().to_string();
+        let cwd_short = match &cwd_home {
+            Some(h) if cwd_display.starts_with(h.as_str()) => {
+                format!("~{}", &cwd_display[h.len()..])
             }
-            _ => display,
+            _ => cwd_display,
         };
-        let cwd_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
-        use unicode_width::UnicodeWidthStr;
-        let mut parts: Vec<Span> = Vec::new();
-        let mut path_offset: u16 = 0;
-        let lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
-        let branch = self
+        let cwd_lazy_git = crate::git_info::cwd_git_info_lazy(&self.session.cwd);
+        let cwd_branch = self
             .current_branch
             .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.branch.clone()));
-        let git_text = branch.map(|b| {
-            let icon = crate::git_info::branch_icon();
-            if b.is_empty() {
-                format!("{icon} detached")
-            } else {
-                format!("{icon} {b}")
-            }
-        });
-        if let Some(git_text) = git_text {
+            .or_else(|| cwd_lazy_git.as_ref().and_then(|i| i.branch.clone()));
+        let mut cwd_spans: Vec<Span> = Vec::new();
+        let mut branch_width = 0u16;
+        if let Some(b) = cwd_branch {
+            // The branch glyph (⎇ / ≡) read as a stray "hamburger" symbol, so
+            // it is commented out for now — only the branch name is shown.
+            // let icon = crate::git_info::branch_icon();
             let git_style = Style::default()
                 .fg(theme.text_primary)
                 .bg(theme.bg_base)
                 .add_modifier(ratatui::style::Modifier::DIM);
-            path_offset += git_text.width() as u16;
-            parts.push(Span::styled(git_text, git_style));
-            path_offset += 1;
-            parts.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
+            let branch_label = b;
+            branch_width = branch_label.width() as u16;
+            cwd_spans.push(Span::styled(branch_label, git_style));
+            cwd_spans.push(Span::styled(" ", Style::default().bg(theme.bg_base)));
         }
-        let show_worktree_label = self.is_worktree
+        let cwd_show_worktree = self.is_worktree
             || self.session.is_worktree
-            || lazy_git.as_ref().is_some_and(|i| i.is_worktree);
-        if show_worktree_label {
-            let label_style = Style::default().fg(theme.accent_user).bg(theme.bg_base);
-            path_offset += "worktree ".width() as u16;
-            parts.push(Span::styled("worktree ", label_style));
-        }
-        if let Some(profile) = xai_grok_sandbox::profile_name() {
-            let sandbox_text = format!("sandbox:{profile} ");
-            let sandbox_style = Style::default().fg(theme.warning).bg(theme.bg_base);
-            path_offset += sandbox_text.width() as u16;
-            parts.push(Span::styled(sandbox_text, sandbox_style));
-        }
-        let path_width = short.width() as u16;
-        let path_style = if self.hit_cwd.hovered {
-            Style::default().fg(theme.text_primary).bg(theme.bg_base)
-        } else {
-            cwd_style
-        };
-        parts.push(Span::styled(short, path_style));
-        let main_repo_display = self
-            .main_repo
-            .clone()
-            .or_else(|| lazy_git.as_ref().and_then(|i| i.main_repo.clone()));
-        if let Some(main_repo) = main_repo_display {
-            parts.push(Span::styled(
-                format!(" (worktree of {main_repo})"),
-                cwd_style,
+            || cwd_lazy_git.as_ref().is_some_and(|i| i.is_worktree);
+        if cwd_show_worktree {
+            cwd_spans.push(Span::styled(
+                "worktree ",
+                Style::default().fg(theme.accent_user).bg(theme.bg_base),
             ));
         }
-        let cwd_line = Line::from(parts);
-        let max_cwd_width = areas
-            .values()
-            .map(|r| r.x)
-            .min()
-            .map(|min_x| min_x.saturating_sub(layout.status_bar.x).saturating_sub(1))
-            .unwrap_or(layout.status_bar.width);
-        let upgrade_cta =
-            crate::views::announcements::promo_cta(banner_announcements, hidden_announcement_ids);
-        let upgrade_reserve = upgrade_cta.map_or(0u16, |(_, label, _)| {
-            1 + crate::views::announcements::upgrade_cta_reserve(label, None)
-        });
-        let cwd_line = truncate_line(
-            cwd_line,
-            max_cwd_width.saturating_sub(upgrade_reserve) as usize,
-        );
-        let cwd_width = cwd_line.width() as u16;
-        buf.set_line_safe(
-            layout.status_bar.x,
-            layout.status_bar.y,
-            &cwd_line,
-            cwd_width,
-        );
-        let path_x = layout.status_bar.x + path_offset;
-        let visible_path_width = path_width.min(cwd_width.saturating_sub(path_offset));
-        self.hit_cwd.rect = (visible_path_width > 0).then_some(Rect {
-            x: path_x,
-            y: layout.status_bar.y,
-            width: visible_path_width,
-            height: 1,
-        });
-        let mut upgrade_cta_rect = None;
-        if let Some((_owner, label, _url)) = upgrade_cta {
-            let avail = max_cwd_width.saturating_sub(cwd_width);
-            if avail > 1 {
-                let cta_x = layout.status_bar.x + cwd_width;
-                buf.set_span(
-                    cta_x,
-                    layout.status_bar.y,
-                    &Span::styled(" ", Style::default().bg(theme.bg_base)),
-                    1,
-                );
-                upgrade_cta_rect = crate::views::announcements::render_cta_button(
-                    buf,
-                    &theme,
-                    cta_x + 1,
-                    layout.status_bar.y,
-                    avail - 1,
-                    label,
-                    None,
-                    self.hit_upgrade_cta.hovered,
-                );
-            }
-        }
-        let dropdown_open = self.prompt.any_dropdown_open();
-        self.hit_upgrade_cta
-            .set_unless_dropdown(upgrade_cta_rect, dropdown_open);
+        let cwd_path_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+        cwd_spans.push(Span::styled(cwd_short, cwd_path_style));
         let mut inline_edit_cursor: Option<(u16, u16)> = None;
-        let sticky_gap_row: Option<u16>;
         {
             self.sync_pending_user_input_marks();
             self.scrollback.set_cwd(Some(self.session.cwd.clone()));
@@ -1573,7 +1697,6 @@ impl AgentView {
                     scratch,
                 );
             let sb_output = sb_rendered.output;
-            sticky_gap_row = sb_output.sticky_gap_row;
             self.update_scrollback_selection_state(
                 sb_output.selection_model.clone(),
                 sb_rendered.selection_boundaries,
@@ -1588,6 +1711,7 @@ impl AgentView {
             if search_reserved_rows > 0
                 && let Some(search) = self.scrollback_search.as_ref()
             {
+                use unicode_width::UnicodeWidthStr;
                 let reserved_top = layout.scrollback.y + layout.scrollback.height;
                 let bar_y = reserved_top + (search_reserved_rows - 1);
                 if search_reserved_rows >= 2 {
@@ -1768,63 +1892,65 @@ impl AgentView {
                 }
             }
         }
-        let mut follow_indicator_y: Option<u16> = None;
-        let mut response_top_indicator_y: Option<u16> = None;
-        if self.block_viewer.is_none() && !search_active {
-            use crate::appearance::FollowIndicator;
-            let gap_y = layout.scrollback.y + layout.scrollback.height;
-            let gap_x = layout.scrollback.x;
-            let gap_w = layout.scrollback.width;
-            let mut content_line_y: Option<u16> = None;
-            if appearance.scrollback.display.line_under_last_entry && !self.scrollback.is_empty() {
-                let (scroll_offset, _, total_height) = self.scrollback.scroll_info();
-                let content_end_screen = u16::try_from(
-                    layout.scrollback.y as usize + total_height.saturating_sub(scroll_offset),
-                )
-                .unwrap_or(u16::MAX);
-                if content_end_screen <= gap_y && content_end_screen >= layout.scrollback.y {
-                    let line_y = content_end_screen;
-                    content_line_y = Some(line_y);
-                    let line_x = gap_x + 3;
-                    let line_end = (gap_x + gap_w).saturating_sub(2);
-                    let line_style = ratatui::style::Style::default().fg(theme.bg_light);
-                    for x in line_x..line_end {
-                        if let Some(cell) = buf.cell_mut((x, line_y)) {
-                            cell.set_symbol("╌");
-                            cell.set_style(line_style);
-                        }
-                    }
-                }
-            }
-            if appearance.scrollback.scroll.follow_indicator != FollowIndicator::None {
-                if !self.scrollback.is_follow_mode()
-                    && self.scrollback.has_content_below()
-                    && content_line_y.is_none()
-                {
-                    follow_indicator_y = Some(gap_y);
-                }
-                if self.scrollback.has_response_top_above() {
-                    response_top_indicator_y = sticky_gap_row.map(|row| layout.scrollback.y + row);
-                }
-            }
-        }
-        let indicator_center_x = layout.scrollback.x + layout.scrollback.width / 2;
-        draw_scroll_arrow(
-            buf,
-            &theme,
-            indicator_center_x,
-            follow_indicator_y,
-            "▼",
-            &mut self.hit_follow_indicator,
-        );
-        draw_scroll_arrow(
-            buf,
-            &theme,
-            indicator_center_x,
-            response_top_indicator_y,
-            "▲",
-            &mut self.hit_response_top_indicator,
-        );
+        // The scroll-to-bottom "▼" indicator (and the "╌" content-end line) used
+        // to occupy the gap row above the chat input. Commented out: the row is
+        // now reclaimed by the scrollback (`prompt_gap` is forced to 0 below) so
+        // every column is used for rendering messages. Clicking still scrolls to
+        // bottom via keys; the stale hit rect is cleared each frame.
+        // if self.block_viewer.is_none() && !search_active {
+        //     use crate::appearance::FollowIndicator;
+        //     let gap_y = layout.scrollback.y + layout.scrollback.height;
+        //     let gap_x = layout.scrollback.x;
+        //     let gap_w = layout.scrollback.width;
+        //     let mut content_line_y: Option<u16> = None;
+        //     if appearance.scrollback.display.line_under_last_entry && !self.scrollback.is_empty() {
+        //         let (scroll_offset, _, total_height) = self.scrollback.scroll_info();
+        //         let content_end_screen = u16::try_from(
+        //             layout.scrollback.y as usize + total_height.saturating_sub(scroll_offset),
+        //         )
+        //         .unwrap_or(u16::MAX);
+        //         if content_end_screen <= gap_y && content_end_screen >= layout.scrollback.y {
+        //             let line_y = content_end_screen;
+        //             content_line_y = Some(line_y);
+        //             let line_x = gap_x + 3;
+        //             let line_end = (gap_x + gap_w).saturating_sub(2);
+        //             let line_style = ratatui::style::Style::default().fg(theme.bg_light);
+        //             for x in line_x..line_end {
+        //                 if let Some(cell) = buf.cell_mut((x, line_y)) {
+        //                     cell.set_symbol("╌");
+        //                     cell.set_style(line_style);
+        //                 }
+        //             }
+        //         }
+        //     }
+        //     let show_indicator = appearance.scrollback.scroll.follow_indicator
+        //         != FollowIndicator::None
+        //         && !self.scrollback.is_follow_mode()
+        //         && self.scrollback.has_content_below()
+        //         && content_line_y.is_none();
+        //     if show_indicator {
+        //         let center_x = gap_x + gap_w / 2;
+        //         let indicator_style =
+        //             ratatui::style::Style::default().fg(if self.hit_follow_indicator.hovered {
+        //                 theme.gray_bright
+        //             } else {
+        //                 theme.gray
+        //             });
+        //         if let Some(cell) = buf.cell_mut((center_x, gap_y)) {
+        //             cell.set_symbol("▼");
+        //             cell.set_style(indicator_style);
+        //         }
+        //         self.hit_follow_indicator.set(Some(Rect::new(
+        //             center_x.saturating_sub(1),
+        //             gap_y,
+        //             3,
+        //             1,
+        //         )));
+        //     } else {
+        //         self.hit_follow_indicator.clear();
+        //     }
+        // }
+        self.hit_follow_indicator.clear();
         if let Some(msg) = self.active_toast_message() {
             let sb = layout.scrollback;
             if let Some(toast_text) = fit_toast_text(msg, sb.width) {
@@ -1983,133 +2109,53 @@ impl AgentView {
         {
             self.hovered_link_idx = None;
         }
-        if turn_status_height > 0 {
-            let pad_left = HorizontalLayout::ACCENT + layout_cfg.block_pad_left.saturating_sub(1);
-            let turn_area = Rect {
-                x: layout.turn_status.x + pad_left,
-                y: layout.turn_status.y,
-                width: layout.turn_status.width.saturating_sub(pad_left),
-                height: layout.turn_status.height,
-            };
-            let tick = self.scrollback.animation_tick();
-            let activity = self.resolve_turn_activity();
-            if activity != self.last_activity {
-                if let Some(prev) = &self.last_activity {
-                    let phase_ms = self
-                        .activity_started_at
-                        .map(|t| t.elapsed().as_millis() as u64)
-                        .unwrap_or(0);
-                    let prev_label = prev.as_label();
-                    let next_label = activity.as_ref().map(|a| a.as_label()).unwrap_or("idle");
-                    let sid = self.session.session_id.as_ref().map(|s| s.0.as_ref());
-                    crate::unified_log::debug(
-                        "turn.phase_transition",
-                        sid,
-                        Some(serde_json::json!({
-                            "from": prev_label,
-                            "to": next_label,
-                            "phase_elapsed_ms": phase_ms,
-                        })),
-                    );
-                }
-                self.activity_started_at = Some(Instant::now());
-                self.last_activity = activity.clone();
-            }
-            self.hit_plan_approval_status.clear();
-            if let Some(ref pav) = self.plan_approval_view {
-                let diamond_color = crate::views::turn_status::pending_diamond_color(
-                    &theme,
-                    theme.accent_plan,
-                    tick,
-                );
-                let text_style = if self.hit_plan_approval_status.hovered {
-                    Style::default()
-                        .fg(theme.text_primary)
-                        .add_modifier(ratatui::style::Modifier::UNDERLINED)
-                } else {
-                    Style::default().fg(theme.gray)
-                };
-                let status_label =
-                    crate::views::plan_approval_view::plan_approval_status_label(pav.has_plan);
-                let spans = vec![
-                    Span::styled(
-                        format!("{} ", crate::glyphs::diamond_filled()),
-                        Style::default().fg(diamond_color),
-                    ),
-                    Span::styled(status_label, text_style),
-                ];
-                buf.set_line_safe(
-                    turn_area.x,
-                    turn_area.y,
-                    &Line::from(spans),
-                    turn_area.width,
-                );
-                let item_width: u16 = 2u16.saturating_add(status_label.len() as u16);
-                self.hit_plan_approval_status.rect = Some(Rect::new(
-                    turn_area.x,
-                    turn_area.y,
-                    item_width.min(turn_area.width),
-                    1,
-                ));
-                self.hit_cancel_button.rect = None;
-                self.hit_bg_button.rect = None;
-                self.hit_watching_cue.rect = None;
+        let dropdown_open = self.prompt.any_dropdown_open();
+        // Render bottom bar left side: status text first, then CWD
+        {
+            let status_text = if _turn_status_active {
+                "Working…"
             } else {
-                let has_running_execute = !self.is_subagent_view
-                    && self
-                        .session
-                        .tracker
-                        .running_execute_tool_call_id()
-                        .is_some();
-                let is_pending_user_input =
-                    !self.permission_queue.is_empty() || self.question_view.is_some();
-                let goal_verifying = self
-                    .goal_state
-                    .as_ref()
-                    .is_some_and(|g| g.verifying_completion);
-                let held_queue = self.held_queue_count();
-                let held_queue_top_sendable = self.held_queue_top_sendable();
-                let turn_output = turn_status::render_turn_status(
-                    buf,
-                    turn_area,
-                    turn_status::TurnStatusArgs {
-                        state: &self.session.state,
-                        activity: &activity,
-                        turn_elapsed: self.turn_elapsed(),
-                        activity_started_at: self.activity_started_at,
-                        tick,
-                        drain_blocked,
-                        buttons: Some(turn_status::MouseButtons {
-                            cancel_hovered: self.hit_cancel_button.hovered,
-                            bg_hovered: self.hit_bg_button.hovered,
-                            watching_hovered: self.hit_watching_cue.hovered,
-                        }),
-                        has_running_execute,
-                        total_tokens: self.context_state.as_ref().map(|c| c.used),
-                        mcp_init_progress: self.mcp_init_progress.as_ref(),
-                        is_bash_turn: self.bash_turn,
-                        is_pending_user_input,
-                        goal_verifying,
-                        watchers,
-                        parked,
-                        flat_background: false,
-                        held_queue,
-                        held_queue_top_sendable,
-                    },
-                );
-                self.hit_cancel_button
-                    .set_unless_dropdown(turn_output.cancel_button, dropdown_open);
-                self.hit_bg_button
-                    .set_unless_dropdown(turn_output.bg_button, dropdown_open);
-                self.hit_watching_cue
-                    .set_unless_dropdown(turn_output.watching_cue, dropdown_open);
+                "Not working"
+            };
+            let s_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let sep_style = Style::default().fg(theme.gray_dim).bg(theme.bg_base);
+            let mut left_spans: Vec<Span> = Vec::new();
+            left_spans.push(Span::styled(status_text, s_style));
+            left_spans.push(Span::styled(" · ", sep_style));
+            for s in &cwd_spans {
+                left_spans.push(Span::styled(s.content.clone(), s.style));
             }
-        } else {
-            self.hit_cancel_button.clear();
-            self.hit_bg_button.clear();
-            self.hit_watching_cue.clear();
-            self.hit_plan_approval_status.clear();
+            let left_line = Line::from(left_spans);
+            let left_w = left_line.width() as u16;
+            let x = layout.status_bar.x;
+            buf.set_line_safe(x, layout.status_bar.y, &left_line, left_w);
+            let location_x = x.saturating_add(status_text.width() as u16 + 3);
+            self.hit_branch.rect = (branch_width > 0).then_some(Rect {
+                x: location_x,
+                y: layout.status_bar.y,
+                width: branch_width,
+                height: 1,
+            });
+            let path_x = location_x.saturating_add(branch_width);
+            let path_x = path_x.saturating_add(u16::from(branch_width > 0));
+            self.hit_cwd.rect = Some(Rect {
+                x: path_x,
+                y: layout.status_bar.y,
+                width: left_w.saturating_sub(path_x.saturating_sub(x)),
+                height: 1,
+            });
+            let fill = Rect {
+                x,
+                y: layout.status_bar.y,
+                width: left_w,
+                height: 1,
+            };
+            buf.set_style(fill, Style::default().bg(theme.bg_base));
         }
+        self.hit_cancel_button.clear();
+        self.hit_bg_button.clear();
+        self.hit_watching_cue.clear();
+        self.hit_plan_approval_status.clear();
         let privacy_banner_owns_slot =
             privacy_banner && layout.banner.height >= crate::views::privacy_banner::MIN_HEIGHT;
         if !privacy_banner_owns_slot {
@@ -2264,14 +2310,16 @@ impl AgentView {
             }
         };
         let editing_label;
-        let commenting_label;
+        let commenting_label: String;
         let theme = Theme::current();
         let mut mode_flags_vec: Vec<PromptFlag> = Vec::new();
         let approval_is_commenting = self
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
-        if effective_plan || casual_commenting {
+        // The composer mode is already shown via `mode_name` ("Plan" / "Build");
+        // don't push a duplicate "plan" / "plan approval" flag.
+        if approval_is_commenting || casual_commenting {
             let commenting_range: Option<&std::ops::Range<usize>> = if approval_is_commenting {
                 self.plan_approval_view
                     .as_ref()
@@ -2281,28 +2329,14 @@ impl AgentView {
             } else {
                 None
             };
-            let plan_label: &str = if approval_is_commenting || casual_commenting {
-                commenting_label = match commenting_range {
-                    Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
-                    Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
-                    None => "commenting".to_string(),
-                };
-                commenting_label.as_str()
-            } else if self.plan_approval_view.is_some() {
-                "plan approval"
-            } else {
-                "plan"
+            commenting_label = match commenting_range {
+                Some(r) if r.len() == 1 => format!("commenting L{}", r.start),
+                Some(r) => format!("commenting L{}-{}", r.start, r.end - 1),
+                None => "commenting".to_string(),
             };
             mode_flags_vec.push(PromptFlag {
-                text: plan_label,
+                text: commenting_label.as_str(),
                 color: Some(theme.accent_plan),
-                bold: false,
-            });
-        }
-        if self.session.is_yolo() && !effective_plan {
-            mode_flags_vec.push(PromptFlag {
-                text: "always-approve",
-                color: None,
                 bold: false,
             });
         }
@@ -2315,24 +2349,37 @@ impl AgentView {
         }
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
-        let warning = self.credit_balance.as_ref().and_then(|bal| {
-            crate::views::credit_bar::usage_warning_for_session(
-                bal,
-                self.auto_topup.as_ref(),
-                self.billing_surface_visible,
-                self.chat_kind,
-            )
-        });
+        let is_grok_model = self
+            .session
+            .models
+            .current_model_id_str()
+            .map(|id| id.contains("grok"))
+            .unwrap_or(false);
+        let warning = if is_grok_model {
+            self.credit_balance.as_ref().and_then(|bal| {
+                crate::views::credit_bar::usage_warning_for_session(
+                    bal,
+                    self.auto_topup.as_ref(),
+                    self.billing_surface_visible,
+                    self.chat_kind,
+                )
+            })
+        } else {
+            None
+        };
         let usage_warning_text: Option<String> = warning.as_ref().map(|(t, _)| t.clone());
         let usage_warning = usage_warning_text.as_deref();
         let usage_warning_critical = warning.is_some_and(|(_, critical)| critical);
-        let model_label = match self.session.models.reasoning_effort {
-            Some(eff) => format!("{model_id} ({eff})"),
-            None => model_id,
+        let model_label_base = match self.session.models.reasoning_effort {
+            Some(eff) => format!("{} ({eff})", model_id.replace('-', " ")),
+            None => model_id.replace('-', " "),
         };
+        let model_label = model_label_base;
+        let composer_mode = if effective_plan { "Plan" } else { "Build" };
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {
                 model_name: &model_label,
+                mode_name: Some(composer_mode),
                 flags: mode_flags,
                 multiline,
                 usage_warning,
@@ -2343,6 +2390,7 @@ impl AgentView {
                 editing_label = format!("editing queued #{pos}");
                 PromptInfo {
                     model_name: &editing_label,
+                    mode_name: Some(composer_mode),
                     flags: mode_flags,
                     multiline,
                     usage_warning,
@@ -2353,6 +2401,7 @@ impl AgentView {
         let info = if let Some(label) = self.prompt_input_mode.prompt_info_override() {
             PromptInfo {
                 model_name: label,
+                mode_name: None,
                 flags: &[],
                 multiline: false,
                 usage_warning,
@@ -2372,7 +2421,6 @@ impl AgentView {
                     perm_area,
                     perm,
                     followup_text,
-                    self.permission_pattern_edit.as_ref(),
                     self.hovered_permission_item,
                     &theme,
                     prompt_focused,
@@ -2383,7 +2431,7 @@ impl AgentView {
                     let perm_followup_style = PromptStyle {
                         focused: true,
                         show_prefix: false,
-                        vpad_top: 0,
+                        vpad_top: 1,
                         chrome: false,
                         chrome_pad_left: 0,
                         chrome_pad_right: 0,
@@ -3199,12 +3247,6 @@ impl AgentView {
                             HintItem::new(key!(Esc), "back"),
                         ]
                     }
-                    PermissionFocus::PatternEdit => {
-                        vec![
-                            HintItem::new(key!(Enter), "save"),
-                            HintItem::new(key!(Esc), "cancel"),
-                        ]
-                    }
                     PermissionFocus::Options => {
                         use crate::input::key::KeyShortcut;
                         use crossterm::event::{KeyCode, KeyModifiers};
@@ -3214,9 +3256,6 @@ impl AgentView {
                         let mut hints = vec![HintItem::paired(key!('1'), last_key, "select")];
                         if perm.has_adjustable_scope() {
                             hints.push(HintItem::paired(key!(Left), key!(Right), "scope"));
-                        }
-                        if perm.has_editable_bash_pattern() {
-                            hints.push(HintItem::new(key!('e'), "edit pattern"));
                         }
                         if !perm.description.is_empty() {
                             let label = if perm.args_expanded {
@@ -3273,7 +3312,32 @@ impl AgentView {
                     .render(layout.shortcuts, buf);
             }
         } else if let Some(ref qv) = self.question_view {
-            let hints = self.question_shortcut_hints(qv);
+            use crate::views::question_view::QuestionFocus;
+            use crate::views::shortcuts_bar::HintItem;
+            let hints = match qv.focus {
+                QuestionFocus::InputMode => {
+                    if self.prompt.file_search_visible() {
+                        vec![
+                            HintItem::paired(key!(Up), key!(Down), "nav"),
+                            HintItem::new(key!(Tab), "accept"),
+                            HintItem::new(key!(Right), "drill"),
+                            HintItem::new(key!(Esc), "dismiss"),
+                        ]
+                    } else {
+                        vec![
+                            HintItem::new(key!(Enter), "submit"),
+                            HintItem::new(key!(Esc), "back"),
+                        ]
+                    }
+                }
+                QuestionFocus::Navigation => {
+                    vec![
+                        HintItem::new(key!(Esc), "unselect"),
+                        HintItem::new(key!(Tab), "scrollback"),
+                        HintItem::new(key!('X'), "dismiss"),
+                    ]
+                }
+            };
             ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
         } else if self.cancel_turn_view.is_some() {
             use crate::views::shortcuts_bar::HintItem;
@@ -3300,12 +3364,16 @@ impl AgentView {
                         "stop",
                     ),
                 );
-                if overlay_can_cycle {
-                    hints.insert(
-                        0,
-                        HintItem::paired(key!('[', CONTROL), key!(']', CONTROL), "prev/next agent"),
-                    );
-                }
+                hints.insert(
+                    0,
+                    HintItem {
+                        keys: vec![key!('[', CONTROL), key!(']', CONTROL)],
+                        label: "agents".into(),
+                        custom_display: Some("Ctrl+[/]"),
+                        description: None,
+                        pinned: false,
+                    },
+                );
                 hints.insert(0, HintItem::new(key!('\\', CONTROL), "dashboard"));
             }
             let help_hint = registry.find(ActionId::ShortcutsHelp).map(|def| {
@@ -3327,7 +3395,7 @@ impl AgentView {
         let is_plan_viewer = self.is_plan_viewer();
         let has_plan_comments = !self.plan_comments.is_empty();
         let casual_commenting = self.is_casual_commenting();
-        if self.line_viewer.is_some() {
+        if let Some(ref mut viewer) = self.line_viewer {
             use crate::views::file_search::line_viewer::render_line_viewer;
             use crate::views::shortcuts_bar::HintItem;
             let plan_prompt_focused = self
@@ -3357,35 +3425,19 @@ impl AgentView {
             } else {
                 self.plan_comments.len()
             };
-            let mermaid_placements = self
-                .line_viewer
-                .as_mut()
-                .map(|viewer| {
-                    if let Some(ref pav) = self.plan_approval_view {
-                        viewer.plan_mut().active_commenting_range = pav.commenting_range.clone();
-                    } else {
-                        viewer.plan_mut().active_commenting_range =
-                            self.casual_commenting_range.clone();
-                    }
-                    render_line_viewer(
-                        buf,
-                        overlay_area,
-                        viewer,
-                        &self.session.cwd,
-                        &theme,
-                        effective_comment_count,
-                    );
-                    viewer
-                        .last_popup_area
-                        .map(|area| viewer.diagram_affordance_placements(area))
-                        .unwrap_or_default()
-                })
-                .unwrap_or_default();
-            self.inline_media_hits = super::InlineMediaHitAreas::default();
-            self.paint_diagram_affordances(buf, mermaid_placements, &theme);
-            let Some(viewer) = self.line_viewer.as_mut() else {
-                return (prompt_cursor_pos, prompt_post_flush);
-            };
+            if let Some(ref pav) = self.plan_approval_view {
+                viewer.plan_mut().active_commenting_range = pav.commenting_range.clone();
+            } else {
+                viewer.plan_mut().active_commenting_range = self.casual_commenting_range.clone();
+            }
+            render_line_viewer(
+                buf,
+                overlay_area,
+                viewer,
+                &self.session.cwd,
+                &theme,
+                effective_comment_count,
+            );
             let toast_area = viewer
                 .last_popup_area
                 .or(viewer.last_modal_area)
@@ -3970,25 +4022,31 @@ impl AgentView {
             self.pane_areas = layout.pane_areas();
             return (None, crate::terminal::overlay::clear().map(Into::into));
         }
+        if self.extensions_modal.is_some()
+            && let Some(sidebar_area) = dx_sidebar_area
+        {
+            let sidebar_model = self.dx_sidebar_view_model();
+            crate::dx::sidebar::render(
+                &mut self.dx_ui.sidebar,
+                &sidebar_model,
+                sidebar_area,
+                buf,
+                &theme,
+            );
+        }
         if let Some(ref mut modal_state) = self.extensions_modal {
             use crate::views::extensions_modal::render_extensions_modal;
             use crate::views::shortcuts_bar::HintItem;
-            let is_fullscreen = matches!(
-                modal_state.picker_state.mode,
-                crate::views::picker::PickerMode::FullScreen
-            );
-            let overlay_area = if is_fullscreen {
-                area
-            } else {
-                Rect {
-                    x: area.x,
-                    y: area.y,
-                    width: area.width,
-                    height: layout.shortcuts.y.saturating_sub(area.y).saturating_sub(1),
-                }
-            };
+            // DX chrome changes the chat layout, while Grok's menus are
+            // terminal-level surfaces. Give them the unsplit frame so their
+            // window can never collapse to a zero-height retained-buffer
+            // region or be clipped behind the right sidebar.
+            let overlay_area = full_area;
             let compact = self.scrollback.appearance().prompt.compact;
             let tick = self.scrollback.animation_tick();
+            // Paint the chat sidebar first, then place the modal above it.
+            // This preserves context without allowing sidebar pixels or input
+            // to bleed through the modal surface.
             render_extensions_modal(
                 buf,
                 overlay_area,
@@ -4382,36 +4440,289 @@ impl AgentView {
         } else {
             prompt_cursor_pos
         };
+        let carousel_content_bottom = [
+            self.slash_dropdown_items_area,
+            self.dropdown_items_area,
+            self.completion_dropdown_items_area,
+            self.history_dropdown_area,
+        ]
+        .into_iter()
+        .flatten()
+        .map(|rect| rect.y)
+        .min()
+        .unwrap_or(layout.prompt.y);
+        if dx_animation_mode {
+            // Input dropdowns are painted before the carousel. Stop
+            // the animation above their top edge so `/`, `@`, completion, and
+            // history menus remain visible and interactive over every screen.
+            // Message intro animation: reveal Chat after the deadline.
+            if self.dx_ui.view == crate::dx::DxView::Animation
+                && let Some(dl) = self.dx_ui.intro_deadline
+                && std::time::Instant::now() >= dl
+            {
+                self.dx_ui.intro_deadline = None;
+                self.dx_ui.sound.stop_animation_loop();
+                self.dx_ui.view = crate::dx::DxView::Chat;
+            }
+            // Carousel uses only the left column so the sidebar stays
+            // alongside; content is centered within that panel.
+            let animation_area = Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width,
+                height: carousel_content_bottom.saturating_sub(area.y),
+            };
+            self.dx_ui.animation.render(animation_area, buf, &theme);
+        }
+        if let Some(sidebar_area) = dx_sidebar_area {
+            let sidebar_model = self.dx_sidebar_view_model();
+            crate::dx::sidebar::render(
+                &mut self.dx_ui.sidebar,
+                &sidebar_model,
+                sidebar_area,
+                buf,
+                &theme,
+            );
+        }
+        if let Some(minimap_area) = dx_minimap_area {
+            // Update hovered turn from the current mouse position each frame
+            // so the hover card appears reliably without depending on the
+            // Moved-event handler's timing.
+            let (mx, my) = self.last_mouse_pos;
+            if minimap_area.contains(ratatui::layout::Position::new(mx, my)) {
+                let row = my.saturating_sub(minimap_area.y) as usize;
+                let turn = self.dx_ui.minimap.scroll as usize + row;
+                if turn < self.scrollback.turn_count() {
+                    if self.dx_ui.minimap.hovered_turn != Some(turn) {
+                        self.dx_ui.minimap.hovered_turn = Some(turn);
+                        self.dx_ui.minimap.hovered_since = Some(std::time::Instant::now());
+                    }
+                }
+            } else {
+                self.dx_ui.minimap.hovered_turn = None;
+                self.dx_ui.minimap.hovered_since = None;
+            }
+            let hover_content = self.dx_minimap_hover_content();
+            self.dx_ui.minimap.active_turn = self.scrollback.active_turn_for_viewport();
+            crate::dx::minimap::render(
+                &mut self.dx_ui.minimap,
+                self.scrollback.turn_count(),
+                minimap_area,
+                buf,
+                &theme,
+            );
+            if let Some((title, response)) = hover_content {
+                crate::dx::minimap::render_hover_card(
+                    &self.dx_ui.minimap,
+                    &title,
+                    &response,
+                    full_area,
+                    buf,
+                    &theme,
+                );
+            }
+        } else {
+            self.dx_ui.minimap.area = Rect::default();
+            self.dx_ui.minimap.top_indicator = Rect::default();
+            self.dx_ui.minimap.bottom_indicator = Rect::default();
+        }
+        if self.dx_ui.palette_visible {
+            if self.dx_ui.menu.is_none() {
+                self.dx_ui.menu = Some(crate::dx::menu::Menu::new(crate::theme::ChatTheme::from(
+                    &theme,
+                )));
+            }
+            if let Some(menu) = self.dx_ui.menu.as_mut() {
+                menu.render_in_area(full_area, buf, &crate::theme::ThemeVariant::Dark);
+            }
+        }
+        if let Some((x, y)) = cursor
+            && let Some(cell) = buf.cell_mut((x, y))
+        {
+            let color = self.dx_ui.cursor_rainbow.current_color();
+            if cell.symbol().trim().is_empty() {
+                cell.set_char('▎');
+                cell.set_style(Style::default().fg(color));
+            } else {
+                cell.set_style(Style::default().fg(theme.bg_base).bg(color));
+            }
+        }
         (cursor, prompt_post_flush)
     }
-}
-/// Draw one ▼/▲ scroll-indicator arrow centered on row `y`, or clear its
-/// hit area when hidden (`y: None`). The unconditional set-or-clear is the
-/// point: a hit rect must never outlive the frame that painted its arrow,
-/// or an invisible click target keeps firing under whatever covers it
-/// (e.g. an open block viewer).
-fn draw_scroll_arrow(
-    buf: &mut Buffer,
-    theme: &Theme,
-    center_x: u16,
-    y: Option<u16>,
-    symbol: &str,
-    hit: &mut super::HitArea,
-) {
-    let Some(y) = y else {
-        hit.clear();
-        return;
-    };
-    let style = Style::default().fg(if hit.hovered {
-        theme.gray_bright
-    } else {
-        theme.gray
-    });
-    if let Some(cell) = buf.cell_mut((center_x, y)) {
-        cell.set_symbol(symbol);
-        cell.set_style(style);
+
+    fn dx_sidebar_view_model(&self) -> crate::dx::sidebar::SidebarViewModel {
+        use crate::dx::sidebar::{SECTION_NAMES, SidebarSection, SidebarViewModel};
+        use xai_grok_shell::tools::TodoStatus;
+
+        let mut tasks: Vec<String> = self
+            .todo
+            .todos()
+            .iter()
+            .map(|todo| {
+                let (glyph, status) = match todo.status {
+                    TodoStatus::Pending => ("☐", "pending"),
+                    TodoStatus::InProgress => ("◐", "active"),
+                    TodoStatus::Completed => ("☑", "done"),
+                    TodoStatus::Cancelled => ("☒", "cancelled"),
+                };
+                format!("{glyph} [{status}] {}", todo.content)
+            })
+            .collect();
+        tasks.extend(self.session.bg_tasks.values().map(|task| {
+            let status = match task.status {
+                crate::app::agent::BgTaskStatus::Running => "active",
+                crate::app::agent::BgTaskStatus::Done => "done",
+                crate::app::agent::BgTaskStatus::Failed => "failed",
+            };
+            let label = task
+                .description
+                .as_deref()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or(task.command.as_str());
+            format!("● [{status}] {}", label.replace('\n', " "))
+        }));
+        tasks.extend(self.session.scheduled_tasks.values().map(|task| {
+            format!(
+                "◷ [active] {} · {}",
+                task.prompt.replace('\n', " "),
+                task.human_schedule
+            )
+        }));
+        if tasks.is_empty() {
+            tasks.push("No Tasks Yet".to_string());
+        }
+        let workflows = if self.workflow_runs.is_empty() {
+            vec!["No Workflows Yet".to_string()]
+        } else {
+            self.workflow_runs
+                .iter()
+                .rev()
+                .take(12)
+                .map(|run| {
+                    let phase = run
+                        .current_phase
+                        .as_deref()
+                        .filter(|phase| !phase.is_empty())
+                        .map(|phase| format!(" · {phase}"))
+                        .unwrap_or_default();
+                    format!("◆ [{}] {}{phase}", run.status, run.name)
+                })
+                .collect()
+        };
+        let prompts = if self.session.pending_prompts.is_empty() {
+            vec!["No Prompts Yet".to_string()]
+        } else {
+            self.session
+                .pending_prompts
+                .iter()
+                .map(|prompt| prompt.text.replace('\n', " "))
+                .collect()
+        };
+        let subagents = if self.subagent_views.is_empty() {
+            vec!["No Subagents Yet".to_string()]
+        } else {
+            self.subagent_views
+                .keys()
+                .take(12)
+                .map(|id| format!("● {id}"))
+                .collect()
+        };
+        let plugins = self
+            .session
+            .available_tools
+            .as_ref()
+            .map(|tools| {
+                tools
+                    .iter()
+                    .take(12)
+                    .map(|tool| format!("● {tool}"))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|lines| !lines.is_empty())
+            .unwrap_or_else(|| vec!["No Plugins Yet".to_string()]);
+        let mcp = self
+            .mcp_init_progress
+            .as_ref()
+            .map(|progress| {
+                vec![format!(
+                    "● {}/{} connected",
+                    progress.connected, progress.total
+                )]
+            })
+            .unwrap_or_else(|| vec!["No MCP Servers Yet".to_string()]);
+        let bodies = [
+            tasks,
+            workflows,
+            prompts,
+            sidebar_notes_lines(),
+            subagents,
+            vec!["No LSP Servers Yet".to_string()],
+            plugins,
+            mcp,
+        ];
+        let sections = std::array::from_fn(|i| SidebarSection {
+            name: SECTION_NAMES[i],
+            lines: bodies[i].clone(),
+        });
+        let session_id = self
+            .session
+            .session_id
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| self.session.id.0.to_string());
+        SidebarViewModel {
+            title: if self.session.state.is_busy() {
+                "Generating".to_string()
+            } else {
+                self.display_name
+                    .clone()
+                    .or_else(|| self.generated_session_title.clone())
+                    .unwrap_or_else(|| "Dx".to_string())
+            },
+            session_id: session_id.chars().take(12).collect(),
+            cwd: self.session.cwd.display().to_string(),
+            version: format!("Dx · {}", env!("CARGO_PKG_VERSION")),
+            sections,
+        }
     }
-    hit.set(Some(Rect::new(center_x.saturating_sub(1), y, 3, 1)));
+
+    fn dx_minimap_hover_content(&self) -> Option<(String, String)> {
+        let turn_idx = self.dx_ui.minimap.hovered_turn?;
+        let title = self.scrollback.turn_preview(turn_idx)?;
+        let turn = self.scrollback.turn(turn_idx)?;
+        let response = self
+            .scrollback
+            .entries_in_range(turn.range())
+            .into_iter()
+            .find(|entry| entry.block.is_agent_message())
+            .and_then(|entry| entry.block.searchable_text())
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "Waiting for an assistant response…".to_string());
+        Some((title, response))
+    }
+}
+/// Memory notes for the right panel's Notes section: reads
+/// `<grok_home>/memory/MEMORY.md` and shows its first lines (up to a cap).
+/// Falls back to an empty-state message when the file is missing or blank.
+fn sidebar_notes_lines() -> Vec<String> {
+    const MAX_LINES: usize = 8;
+    let path = xai_grok_tools::util::grok_home::grok_home()
+        .join("memory")
+        .join("MEMORY.md");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return vec!["No Notes Yet".to_string()];
+    };
+    let mut lines: Vec<String> = content
+        .lines()
+        .map(str::trim_end)
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .take(MAX_LINES)
+        .collect();
+    if lines.is_empty() {
+        lines.push("No Notes Yet".to_string());
+    }
+    lines
 }
 /// Pad `msg` for the toast slot, truncating with a trailing ellipsis when it
 /// cannot fit in `avail_width` columns (long clipboard toasts embed backup
@@ -4448,6 +4759,59 @@ mod toast_fit_tests {
     fn zero_width_slot_yields_none() {
         assert_eq!(fit_toast_text("Copied!", 4), None);
         assert_eq!(fit_toast_text("Copied!", 0), None);
+    }
+}
+#[cfg(test)]
+mod dx_modal_layering_tests {
+    use super::super::test_fixtures::make_agent;
+    use super::*;
+    use crate::actions::ActionRegistry;
+    use crate::app::bundle::BundleState;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::views::extensions_modal::{ExtensionsModalState, ExtensionsTab};
+
+    #[test]
+    fn extensions_modal_keeps_sidebar_context_beneath_overlay() {
+        let mut agent = make_agent();
+        agent.dx_ui.sidebar_visible = true;
+        agent.dx_ui.minimap_visible = true;
+        agent.extensions_modal = Some(ExtensionsModalState::new(ExtensionsTab::McpServers));
+        let area = Rect::new(0, 0, 120, 40);
+        let mut buf = Buffer::empty(area);
+        agent.draw(
+            area,
+            &mut buf,
+            &ActionRegistry::defaults(),
+            &mut ScratchBuffer::new(),
+            None,
+            false,
+            crate::app::agent_view::BannerSlotParams::none(),
+            &BundleState::default(),
+            false,
+            &mut Vec::new(),
+            super::AppRenderParams::default(),
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+        }
+        assert!(
+            text.contains("MCP Servers"),
+            "MCP modal was not painted: {text}"
+        );
+        assert!(
+            text.contains("Dx ·"),
+            "Dx sidebar should remain visible behind the extensions modal: {text}"
+        );
+        assert_ne!(
+            buf[(area.right() - 1, area.y)].bg,
+            ratatui::style::Color::Reset,
+            "the modal must paint an opaque background through the right edge"
+        );
     }
 }
 #[cfg(test)]
@@ -4517,7 +4881,6 @@ mod voice_recording_overlay_tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
             false,
-            false,
             &mut Vec::new(),
             super::AppRenderParams {
                 voice_available: listening,
@@ -4560,64 +4923,6 @@ mod voice_recording_overlay_tests {
     }
 }
 #[cfg(test)]
-mod overlay_cycle_hint_tests {
-    use super::super::test_fixtures::make_agent;
-    use crate::actions::ActionRegistry;
-    use crate::app::bundle::BundleState;
-    use crate::scrollback::render::ScratchBuffer;
-    use ratatui::buffer::Buffer;
-    use ratatui::layout::Rect;
-    fn draw_overlay_footer(can_cycle: bool) -> String {
-        let mut agent = make_agent();
-        let reg = ActionRegistry::defaults();
-        let area = Rect::new(0, 0, 100, 30);
-        let mut buf = Buffer::empty(area);
-        let mut scratch = ScratchBuffer::new();
-        agent.draw(
-            area,
-            &mut buf,
-            &reg,
-            &mut scratch,
-            None,
-            false,
-            crate::app::agent_view::BannerSlotParams::none(),
-            &BundleState::default(),
-            true,
-            can_cycle,
-            &mut Vec::new(),
-            super::AppRenderParams::default(),
-        );
-        (0..area.height)
-            .map(|y| {
-                (0..area.width)
-                    .filter_map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()))
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-    #[test]
-    fn prev_next_hint_shown_when_overlay_can_cycle() {
-        let text = draw_overlay_footer(true);
-        assert!(
-            text.contains("prev/next agent"),
-            "footer must advertise cycle keys when can_cycle:\n{text}"
-        );
-    }
-    #[test]
-    fn prev_next_hint_hidden_when_overlay_cannot_cycle() {
-        let text = draw_overlay_footer(false);
-        assert!(
-            !text.contains("prev/next agent"),
-            "footer must not advertise cycle keys for a single agent:\n{text}"
-        );
-        assert!(
-            text.contains("dashboard"),
-            "back-to-dashboard hint still shown:\n{text}"
-        );
-    }
-}
-#[cfg(test)]
 mod overlay_post_flush_tests {
     use super::super::test_fixtures::make_agent;
     use crate::actions::ActionRegistry;
@@ -4639,7 +4944,6 @@ mod overlay_post_flush_tests {
                 false,
                 crate::app::agent_view::BannerSlotParams::none(),
                 &BundleState::default(),
-                false,
                 false,
                 &mut Vec::new(),
                 super::AppRenderParams::default(),

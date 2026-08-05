@@ -1,0 +1,32 @@
+// Feature Flags submenu
+pub fn get_submenu() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("1. Unified Exec", ""),
+        ("2. Shell Snapshot", ""),
+        ("3. Request Rule", ""),
+        ("4. Undo Support", ""),
+        ("5. Search Tool", ""),
+        ("6. Git Commit", ""),
+        ("7. Runtime Metrics", ""),
+        ("8. SQLite State", ""),
+        ("9. Child Agents MD", ""),
+        ("10. Image Detail Original", ""),
+        ("11. Request Compression", ""),
+        ("12. Collaboration", ""),
+        ("13. Spawn CSV", ""),
+        ("14. Apps & Connectors", ""),
+        ("15. Tool Suggest", ""),
+        ("16. Plugins", ""),
+        ("17. Image Generation", ""),
+        ("18. MCP Dependency Install", ""),
+        ("19. Env Var Prompt", ""),
+        ("20. Steer Mode", ""),
+        ("21. PowerShell UTF8", ""),
+        ("22. Windows Sandbox", ""),
+        ("23. Windows Sandbox Elevated", ""),
+        ("24. JS REPL", ""),
+        ("25. Auto Approval Agent", ""),
+        ("26. Prevent Sleep", ""),
+        ("27. Suppress Warnings", ""),
+    ]
+}

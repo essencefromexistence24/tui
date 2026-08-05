@@ -1,0 +1,1711 @@
+//! Async message handlers for the Editor
+//!
+//! This module contains handlers for AsyncMessage variants, grouped by domain:
+//! - LSP diagnostics (push and pull models)
+//! - LSP feature responses (inlay hints, progress, status)
+//! - File system events
+//! - File explorer events
+//! - Plugin events
+
+use crate::model::buffer::Buffer;
+use crate::model::event::BufferId;
+use crate::services::async_bridge::{
+	LspMessageType, LspProgressValue, LspSemanticTokensResponse, LspServerStatus,
+};
+use crate::state::{SemanticTokenSpan, SemanticTokenStore};
+use crate::view::file_tree::{FileTreeView, NodeId};
+use lsp_types::{
+	Diagnostic, FoldingRange, InlayHint, SemanticToken, SemanticTokensEdit,
+	SemanticTokensFullDeltaResult, SemanticTokensLegend, SemanticTokensRangeResult,
+	SemanticTokensResult,
+};
+use rust_i18n::t;
+use serde_json::Value;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+use super::Editor;
+use super::types::{LspMessageEntry, LspProgressInfo};
+
+// =============================================================================
+// Shared Helpers
+// =============================================================================
+
+impl Editor {
+	/// Find a buffer by its LSP URI
+	///
+	/// This is a common pattern used by diagnostics, inlay hints, and other LSP handlers
+	pub(super) fn find_buffer_by_uri(&self, uri: &str) -> Option<BufferId> {
+		// The incoming URI string came over the LSP wire (e.g. a
+		// `publishDiagnostics` notification), so it's already in the
+		// server's coordinate space. `BufferMetadata.file_uri` is also
+		// wire-side ([`LspUri`]), so a string comparison is the right
+		// primitive here — both sides are translated identically and
+		// we never accidentally compare a host URI to a wire URI.
+		self
+			.active_window()
+			.buffer_metadata
+			.iter()
+			.find(|(_, m)| m.file_uri().map(|u| u.as_str() == uri).unwrap_or(false))
+			.map(|(buffer_id, _)| *buffer_id)
+	}
+
+	/// Collect `(buffer_id, uri)` pairs for every open buffer whose stored
+	/// language matches `language`.
+	///
+	/// This is the single correct way to enumerate buffers for sending a
+	/// per-URI LSP request (pull diagnostics, inlay hints, semantic tokens,
+	/// folding ranges, …) to a language-scoped server. Without the language
+	/// filter, a server configured only for e.g. "rust" ends up receiving
+	/// requests for every open URI regardless of type, and a responsible
+	/// server rejects unknown URIs with `file not found (code -32603)` —
+	/// polluting logs and wasting a round-trip per unrelated buffer.
+	///
+	/// Callers that need richer per-buffer info (line counts, content, file
+	/// paths) can still iterate themselves, but should use the same
+	/// `state.language == language` predicate this helper encodes.
+	pub(crate) fn buffers_for_language(
+		&self,
+		language: &str,
+	) -> Vec<(BufferId, crate::app::types::LspUri)> {
+		self
+			.windows
+			.get(&self.active_window)
+			.map(|w| &w.buffers)
+			.expect("active window present")
+			.iter()
+			.filter_map(|(buffer_id, state)| {
+				if state.language != language {
+					return None;
+				}
+				self
+					.active_window()
+					.buffer_metadata
+					.get(buffer_id)
+					.and_then(|m| m.file_uri().cloned())
+					.map(|uri| (*buffer_id, uri))
+			})
+			.collect()
+	}
+
+	/// Apply diagnostics to a buffer identified by URI.
+	/// Returns `(buffer_id, actually_updated)` if buffer was found, None otherwise.
+	/// `actually_updated` is false when the DIAG CACHE determined no overlay changes were needed.
+	fn apply_diagnostics_to_buffer(
+		&mut self,
+		uri: &str,
+		diagnostics: &[Diagnostic],
+	) -> Option<(BufferId, bool)> {
+		let buffer_id = self.find_buffer_by_uri(uri)?;
+		let state = self
+			.windows
+			.get_mut(&self.active_window)
+			.map(|w| &mut w.buffers)
+			.expect("active window present")
+			.get_mut(&buffer_id)?;
+		let updated = crate::services::lsp::diagnostics::apply_diagnostics_to_state_cached(
+			state,
+			diagnostics,
+			&self.theme.read().unwrap(),
+		);
+		Some((buffer_id, updated))
+	}
+}
+
+// =============================================================================
+// LSP Diagnostics Handlers
+// =============================================================================
+
+impl Editor {
+	/// Merge push + pull diagnostics for a URI and apply the combined set
+	fn merge_and_apply_diagnostics(&mut self, uri: &str) {
+		// Merge diagnostics from all servers (push model) and pull model
+		let mut merged = Vec::new();
+		if let Some(server_map) = self.active_window_mut().stored_push_diagnostics.get(uri) {
+			for diagnostics in server_map.values() {
+				merged.extend(diagnostics.iter().cloned());
+			}
+		}
+		if let Some(pull) = self.active_window_mut().stored_pull_diagnostics.get(uri) {
+			merged.extend(pull.iter().cloned());
+		}
+
+		// Update the merged view
+		if merged.is_empty() {
+			self.stored_diagnostics_mut().remove(uri);
+		} else {
+			self.stored_diagnostics_mut().insert(uri.to_string(), merged.clone());
+		}
+
+		if let Some((buffer_id, updated)) = self.apply_diagnostics_to_buffer(uri, &merged) {
+			if updated {
+				tracing::info!(
+					"Applied {} diagnostics to buffer {:?} (overlays updated)",
+					merged.len(),
+					buffer_id
+				);
+			} else {
+				tracing::debug!(
+					"Diagnostics unchanged for buffer {:?} ({} diagnostics, cache hit)",
+					buffer_id,
+					merged.len()
+				);
+			}
+		} else {
+			tracing::debug!("No buffer found for diagnostic URI: {}", uri);
+		}
+
+		// Emit diagnostics_updated hook for plugins
+		let count = merged.len();
+		self.plugin_manager.read().unwrap().run_hook(
+			"diagnostics_updated",
+			crate::services::plugins::hooks::HookArgs::DiagnosticsUpdated { uri: uri.to_string(), count },
+		);
+	}
+
+	/// Handle LSP diagnostics (push model — publishDiagnostics from flycheck/cargo)
+	pub(super) fn handle_lsp_diagnostics(
+		&mut self,
+		uri: String,
+		diagnostics: Vec<Diagnostic>,
+		server_name: String,
+	) {
+		// Discard diagnostics from servers that have been shut down.  The async
+		// bridge may still contain queued messages from a server that was stopped
+		// between the time it sent the notification and when we drain the channel.
+		if let Some(lsp) = self.lsp() {
+			if !lsp.has_server_named(&server_name) {
+				tracing::debug!("Dropping diagnostics from stopped server '{}' for {}", server_name, uri);
+				return;
+			}
+		}
+
+		tracing::debug!(
+			"Processing {} push diagnostics from '{}' for {}",
+			diagnostics.len(),
+			server_name,
+			uri
+		);
+
+		let server_map =
+			self.active_window_mut().stored_push_diagnostics.entry(uri.clone()).or_default();
+		if diagnostics.is_empty() {
+			server_map.remove(&server_name);
+			// Clean up empty outer entry
+			if server_map.is_empty() {
+				self.active_window_mut().stored_push_diagnostics.remove(&uri);
+			}
+		} else {
+			server_map.insert(server_name, diagnostics);
+		}
+
+		self.merge_and_apply_diagnostics(&uri);
+	}
+
+	/// Handle LSP pulled diagnostics (pull model — native RA diagnostics, LSP 3.17+)
+	pub(super) fn handle_lsp_pulled_diagnostics(
+		&mut self,
+		uri: String,
+		result_id: Option<String>,
+		diagnostics: Vec<Diagnostic>,
+		unchanged: bool,
+	) {
+		if unchanged {
+			tracing::debug!("Diagnostics unchanged for {} (result_id: {:?})", uri, result_id);
+			return;
+		}
+
+		tracing::debug!(
+			"Processing {} pulled diagnostics for {} (result_id: {:?})",
+			diagnostics.len(),
+			uri,
+			result_id
+		);
+
+		// Store result_id for incremental updates
+		if let Some(result_id) = result_id {
+			self.active_window_mut().diagnostic_result_ids.insert(uri.clone(), result_id);
+		}
+
+		if diagnostics.is_empty() {
+			self.active_window_mut().stored_pull_diagnostics.remove(&uri);
+		} else {
+			self.active_window_mut().stored_pull_diagnostics.insert(uri.clone(), diagnostics);
+		}
+
+		self.merge_and_apply_diagnostics(&uri);
+	}
+
+	/// Clear all diagnostics originating from a specific server.
+	///
+	/// Removes the server's entries from `stored_push_diagnostics`, then
+	/// re-merges and re-applies diagnostics for every affected URI so that
+	/// overlays on screen are updated immediately.
+	pub(crate) fn clear_diagnostics_for_server(&mut self, server_name: &str) {
+		// Collect URIs that have diagnostics from this server.
+		let affected_uris: Vec<String> = self
+			.active_window()
+			.stored_push_diagnostics
+			.iter()
+			.filter_map(
+				|(uri, server_map)| {
+					if server_map.contains_key(server_name) { Some(uri.clone()) } else { None }
+				},
+			)
+			.collect();
+
+		if affected_uris.is_empty() {
+			return;
+		}
+
+		tracing::info!(
+			"Clearing diagnostics from server '{}' for {} URIs",
+			server_name,
+			affected_uris.len()
+		);
+
+		for uri in &affected_uris {
+			if let Some(server_map) = self.active_window_mut().stored_push_diagnostics.get_mut(uri) {
+				server_map.remove(server_name);
+				if server_map.is_empty() {
+					self.active_window_mut().stored_push_diagnostics.remove(uri);
+				}
+			}
+
+			// Invalidate the diagnostic overlay cache so the re-merge actually
+			// updates on-screen overlays even if the resulting hash happens to
+			// match a previous state.
+			crate::services::lsp::diagnostics::invalidate_cache_for_file(uri);
+
+			self.merge_and_apply_diagnostics(uri);
+		}
+	}
+}
+
+// =============================================================================
+// LSP Feature Handlers
+// =============================================================================
+
+impl Editor {
+	/// Handle LSP inlay hints response — thin shim over
+	/// [`Window::handle_lsp_inlay_hints`]. The body is purely
+	/// window-state mutation.
+	pub(super) fn handle_lsp_inlay_hints(
+		&mut self,
+		request_id: u64,
+		uri: String,
+		hints: Vec<InlayHint>,
+	) {
+		self.active_window_mut().handle_lsp_inlay_hints(request_id, uri, hints);
+	}
+}
+
+impl crate::app::window::Window {
+	/// Handle LSP inlay hints response. Pure window-state
+	/// mutation — pulls the in-flight request from the per-window
+	/// pending map, version-checks against the current buffer
+	/// state, and applies hints as virtual text.
+	pub fn handle_lsp_inlay_hints(
+		&mut self,
+		request_id: u64,
+		uri: String,
+		hints: Vec<lsp_types::InlayHint>,
+	) {
+		let Some(request) = self.pending_inlay_hints_requests.remove(&request_id) else {
+			tracing::debug!("Ignoring stale inlay hints response (request_id={})", request_id);
+			return;
+		};
+
+		// Drop responses that raced behind a local edit — the hint
+		// positions reference stale byte offsets and would render at
+		// the wrong place. A fresh request was (or will be) scheduled
+		// by the debounced inlay-hints timer on every didChange.
+		let state_version = match self.buffers.get(&request.buffer_id) {
+			Some(s) => s.buffer.version(),
+			None => return, // Buffer was closed before the response arrived.
+		};
+		if state_version != request.version {
+			tracing::debug!(
+				"Ignoring stale inlay hints for {} (request_id={}, version={}, current={})",
+				uri,
+				request_id,
+				request.version,
+				state_version
+			);
+			return;
+		}
+
+		tracing::info!("Received {} inlay hints for {} (request_id={})", hints.len(), uri, request_id);
+
+		if let Some(state) = self.buffers.get_mut(&request.buffer_id) {
+			super::Editor::apply_inlay_hints_to_state(state, &hints);
+			tracing::info!(
+				"Applied {} inlay hints as virtual text to buffer {:?}",
+				hints.len(),
+				request.buffer_id
+			);
+		}
+	}
+}
+
+impl Editor {
+	/// Handle LSP folding ranges response. The Editor wrapper
+	/// orchestrates the URI-keyed `stored_folding_ranges` map
+	/// (Editor-global because URIs can map to buffers in any
+	/// window) and delegates the per-window buffer-state mutation
+	/// to [`Window::apply_folding_ranges_response`].
+	pub(super) fn handle_lsp_folding_ranges(
+		&mut self,
+		request_id: u64,
+		uri: String,
+		ranges: Vec<FoldingRange>,
+	) {
+		// First peek at the active window to check whether the
+		// request is still pending and whether the response is stale
+		// (buffer version moved on). Returns the buffer_id +
+		// up-to-date status so the editor-global stored_folding_ranges
+		// update can happen in this scope.
+		enum FoldingDispatch {
+			Stale { buffer_id: BufferId },
+			Apply { buffer_id: BufferId },
+			Skip,
+		}
+		let dispatch = {
+			let win = self.active_window_mut();
+			let Some(request) = win.pending_folding_range_requests.remove(&request_id) else {
+				tracing::debug!(
+					"Ignoring folding ranges response without pending request (request_id={})",
+					request_id
+				);
+				return;
+			};
+			win.folding_ranges_in_flight.remove(&request.buffer_id);
+			match win.buffers.get(&request.buffer_id) {
+				Some(state) if state.buffer.version() == request.version => {
+					FoldingDispatch::Apply { buffer_id: request.buffer_id }
+				}
+				Some(state) => {
+					tracing::debug!(
+						"Ignoring stale folding ranges for {} (request_id={}, version={}, current={})",
+						uri,
+						request_id,
+						request.version,
+						state.buffer.version()
+					);
+					FoldingDispatch::Stale { buffer_id: request.buffer_id }
+				}
+				None => FoldingDispatch::Skip,
+			}
+		};
+		let buffer_id = match dispatch {
+			FoldingDispatch::Apply { buffer_id } => buffer_id,
+			FoldingDispatch::Stale { buffer_id } => {
+				self.active_window_mut().schedule_folding_ranges_refresh(buffer_id);
+				return;
+			}
+			FoldingDispatch::Skip => return,
+		};
+
+		if ranges.is_empty() {
+			self.stored_folding_ranges_mut().remove(&uri);
+		} else {
+			self.stored_folding_ranges_mut().insert(uri.clone(), ranges);
+		}
+
+		let lsp_ranges =
+			self.active_window().stored_folding_ranges.get(&uri).cloned().unwrap_or_default();
+		self.active_window_mut().apply_folding_ranges_response(buffer_id, lsp_ranges);
+	}
+
+	/// Handle LSP semantic tokens response
+	pub(super) fn handle_lsp_semantic_tokens(
+		&mut self,
+		request_id: u64,
+		uri: String,
+		response: LspSemanticTokensResponse,
+	) {
+		let (
+			buffer_id,
+			target_version,
+			full_request_kind,
+			requested_range,
+			requested_start_line,
+			requested_end_line,
+		) = if let Some(range_request) =
+			self.active_window_mut().take_pending_semantic_token_range_request(request_id)
+		{
+			(
+				range_request.buffer_id,
+				range_request.version,
+				None,
+				Some(range_request.range),
+				Some(range_request.start_line),
+				Some(range_request.end_line),
+			)
+		} else if let Some(full_request) =
+			self.active_window_mut().take_pending_semantic_token_request(request_id)
+		{
+			(full_request.buffer_id, full_request.version, Some(full_request.kind), None, None, None)
+		} else {
+			tracing::debug!("Semantic tokens response {} for {} without pending entry", request_id, uri);
+			return;
+		};
+
+		// Get language from buffer's stored state
+		let Some(language) = self
+			.windows
+			.get(&self.active_window)
+			.map(|w| &w.buffers)
+			.expect("active window present")
+			.get(&buffer_id)
+			.map(|s| s.language.clone())
+		else {
+			return;
+		};
+
+		let legend = match self
+			.lsp()
+			.as_ref()
+			.and_then(|manager| manager.semantic_tokens_legend(&language).cloned())
+		{
+			Some(legend) => legend,
+			None => {
+				tracing::debug!("Semantic tokens legend missing for language {}", language);
+				return;
+			}
+		};
+
+		let Some(state) = self
+			.windows
+			.get_mut(&self.active_window)
+			.map(|w| &mut w.buffers)
+			.expect("active window present")
+			.get_mut(&buffer_id)
+		else {
+			return;
+		};
+
+		let current_version = state.buffer.version();
+		if current_version != target_version {
+			// Stale response - ignore; next render will request fresh tokens.
+			return;
+		}
+
+		match (requested_range, full_request_kind) {
+			(Some(range), None) => {
+				let result = match response {
+					LspSemanticTokensResponse::Range(result) => result,
+					_ => {
+						tracing::warn!(
+							"Semantic tokens range response {} for {} had mismatched type",
+							request_id,
+							uri
+						);
+						return;
+					}
+				};
+
+				match result {
+					Err(_) => {
+						// Error already logged at the appropriate level by the
+						// generic LSP response handler (debug for ContentModified/
+						// ServerCancelled, warn for real errors).
+					}
+					Ok(tokens_opt) => {
+						let spans = match tokens_opt {
+							Some(SemanticTokensRangeResult::Tokens(tokens)) => {
+								// LSP semantic tokens are always delta-encoded from document
+								// position (0,0), even for range requests. The range only
+								// filters which tokens are returned, not the encoding origin.
+								let decoded = decode_semantic_token_data(&state.buffer, &legend, &tokens.data, 0);
+								decoded.spans
+							}
+							Some(SemanticTokensRangeResult::Partial(partial)) => {
+								let decoded = decode_semantic_token_data(&state.buffer, &legend, &partial.data, 0);
+								decoded.spans
+							}
+							None => Vec::new(),
+						};
+
+						let applied =
+							crate::services::lsp::semantic_tokens::apply_semantic_tokens_range_to_state(
+								state,
+								range.clone(),
+								&spans,
+								&self.theme.read().unwrap(),
+							);
+						if applied {
+							self.active_window_mut().semantic_tokens_range_applied.insert(
+								buffer_id,
+								(
+									requested_start_line.unwrap_or(0),
+									requested_end_line.unwrap_or(0),
+									current_version,
+								),
+							);
+						}
+					}
+				}
+			}
+			(None, Some(super::SemanticTokensFullRequestKind::Full)) => {
+				let result = match response {
+					LspSemanticTokensResponse::Full(result) => result,
+					_ => {
+						tracing::warn!(
+							"Semantic tokens response {} for {} had mismatched type",
+							request_id,
+							uri
+						);
+						return;
+					}
+				};
+
+				match result {
+					Err(_) => {
+						// Error already logged by the generic LSP response handler.
+					}
+					Ok(tokens_opt) => {
+						let decoded = match tokens_opt {
+							Some(SemanticTokensResult::Tokens(tokens)) => {
+								let decoded = decode_semantic_token_data(&state.buffer, &legend, &tokens.data, 0);
+								SemanticTokensFullDecode {
+									result_id: tokens.result_id.clone(),
+									raw_data: decoded.raw,
+									spans: decoded.spans,
+								}
+							}
+							Some(SemanticTokensResult::Partial(partial)) => {
+								let decoded = decode_semantic_token_data(&state.buffer, &legend, &partial.data, 0);
+								SemanticTokensFullDecode {
+									result_id: None,
+									raw_data: decoded.raw,
+									spans: decoded.spans,
+								}
+							}
+							None => SemanticTokensFullDecode {
+								result_id: None,
+								raw_data: Vec::new(),
+								spans: Vec::new(),
+							},
+						};
+
+						crate::services::lsp::semantic_tokens::apply_semantic_tokens_to_state(
+							state,
+							&decoded.spans,
+							&self.theme.read().unwrap(),
+						);
+
+						state.set_semantic_tokens(SemanticTokenStore {
+							version: current_version,
+							result_id: decoded.result_id,
+							data: decoded.raw_data,
+							tokens: decoded.spans,
+						});
+					}
+				}
+			}
+			(None, Some(super::SemanticTokensFullRequestKind::FullDelta)) => {
+				let result = match response {
+					LspSemanticTokensResponse::FullDelta(result) => result,
+					_ => {
+						tracing::warn!(
+							"Semantic tokens delta response {} for {} had mismatched type",
+							request_id,
+							uri
+						);
+						return;
+					}
+				};
+
+				match result {
+					Err(_) => {
+						// Error already logged by the generic LSP response handler.
+					}
+					Ok(tokens_opt) => {
+						let existing_store = state.semantic_tokens.as_ref();
+						let existing_result_id = existing_store.and_then(|store| store.result_id.clone());
+						let existing_data = existing_store.map(|store| store.data.clone());
+
+						let decoded = match tokens_opt {
+							Some(SemanticTokensFullDeltaResult::Tokens(tokens)) => SemanticTokensDeltaDecode {
+								result_id: tokens.result_id.clone(),
+								raw_data: semantic_tokens_to_raw(&tokens.data),
+							},
+							Some(SemanticTokensFullDeltaResult::TokensDelta(delta)) => {
+								let Some(existing) = existing_data else {
+									tracing::warn!(
+										"Semantic tokens delta response {} for {} missing baseline",
+										request_id,
+										uri
+									);
+									return;
+								};
+								let updated = match apply_semantic_token_edits(existing, &delta.edits) {
+									Some(data) => data,
+									None => {
+										tracing::warn!(
+											"Semantic tokens delta response {} for {} had invalid edits",
+											request_id,
+											uri
+										);
+										return;
+									}
+								};
+								SemanticTokensDeltaDecode {
+									result_id: delta.result_id.clone().or(existing_result_id),
+									raw_data: updated,
+								}
+							}
+							Some(SemanticTokensFullDeltaResult::PartialTokensDelta { edits }) => {
+								let Some(existing) = existing_data else {
+									tracing::warn!(
+										"Semantic tokens delta response {} for {} missing baseline",
+										request_id,
+										uri
+									);
+									return;
+								};
+								let updated = match apply_semantic_token_edits(existing, &edits) {
+									Some(data) => data,
+									None => {
+										tracing::warn!(
+											"Semantic tokens delta response {} for {} had invalid edits",
+											request_id,
+											uri
+										);
+										return;
+									}
+								};
+								SemanticTokensDeltaDecode { result_id: existing_result_id, raw_data: updated }
+							}
+							None => SemanticTokensDeltaDecode { result_id: None, raw_data: Vec::new() },
+						};
+
+						let spans =
+							decode_semantic_token_raw_data(&state.buffer, &legend, &decoded.raw_data, 0);
+
+						crate::services::lsp::semantic_tokens::apply_semantic_tokens_to_state(
+							state,
+							&spans,
+							&self.theme.read().unwrap(),
+						);
+
+						state.set_semantic_tokens(SemanticTokenStore {
+							version: current_version,
+							result_id: decoded.result_id,
+							data: decoded.raw_data,
+							tokens: spans,
+						});
+					}
+				}
+			}
+			_ => {
+				tracing::warn!(
+					"Semantic tokens response {} for {} had mismatched pending state",
+					request_id,
+					uri
+				);
+			}
+		}
+	}
+
+	/// Handle LSP server quiescent notification (rust-analyzer project fully loaded)
+	pub(super) fn handle_lsp_server_quiescent(&mut self, language: String) {
+		tracing::info!(
+			"LSP ({}) project fully loaded, re-requesting diagnostics and inlay hints",
+			language
+		);
+
+		// Re-pull diagnostics for all open buffers — the initial pull likely
+		// returned empty results because the server hadn't loaded the project yet
+		self.pull_diagnostics_for_language(&language);
+
+		// Skip inlay hints if disabled
+		if !self.config.editor.enable_inlay_hints {
+			// Folding ranges may improve after project is fully loaded
+			self.request_folding_ranges_for_language(&language);
+			return;
+		}
+
+		// Collect only buffers whose language matches this server's
+		// scope, before mutably borrowing `self.lsp`. Previously this
+		// iterated every open buffer regardless of language, so the
+		// rust handle was asked for inlay hints on `.json` / `.nix`
+		// URIs and replied `file not found (-32603)`.
+		let buffer_infos: Vec<_> = self
+			.buffers_for_language(&language)
+			.into_iter()
+			.map(|(buffer_id, uri)| {
+				let (line_count, version) = self
+					.buffers()
+					.get(&buffer_id)
+					.map(|s| (s.buffer.line_count().unwrap_or(1000), s.buffer.version()))
+					.unwrap_or((1000, 0));
+				(buffer_id, uri, line_count, version)
+			})
+			.collect();
+
+		let __active_id = self.active_window;
+
+		let Some(__win) = self.windows.get_mut(&__active_id) else {
+			return;
+		};
+		let lsp = &mut __win.lsp;
+
+		// LSP should already be running since we got a quiescent notification
+		let Some(sh) = lsp.handle_for_feature_mut(&language, crate::types::LspFeature::InlayHints)
+		else {
+			return;
+		};
+		let client = &mut sh.handle;
+
+		let __next_id = &mut __win.next_lsp_request_id;
+		let __pending = &mut __win.pending_inlay_hints_requests;
+
+		// Request inlay hints for each buffer. Each request is keyed in
+		// the pending map by its own id (and carries buffer_id + version)
+		// so responses across all buffers are matched individually — a
+		// single Option used to be overwritten by each iteration, dropping
+		// every response except the last.
+		for (buffer_id, uri, line_count, version) in buffer_infos {
+			let request_id = *__next_id;
+			*__next_id += 1;
+
+			let last_line = line_count.saturating_sub(1) as u32;
+			if let Err(e) = client.inlay_hints(request_id, uri.as_uri().clone(), 0, 0, last_line, 10000) {
+				tracing::debug!("Failed to re-request inlay hints for {}: {}", uri.as_str(), e);
+			} else {
+				__pending.insert(request_id, super::InlayHintsRequest { buffer_id, version });
+				tracing::info!("Re-requested inlay hints for {} (request_id={})", uri.as_str(), request_id);
+			}
+		}
+
+		// Folding ranges may improve after project is fully loaded
+		self.request_folding_ranges_for_language(&language);
+	}
+
+	/// Handle workspace/diagnostic/refresh request from the LSP server.
+	/// Re-pulls diagnostics for all open documents of the given language.
+	pub(super) fn handle_lsp_diagnostic_refresh(&mut self, language: String) {
+		tracing::info!("LSP ({}) diagnostic refresh requested, re-pulling diagnostics", language);
+		self.pull_diagnostics_for_language(&language);
+	}
+
+	pub(super) fn handle_lsp_inlay_hint_refresh(&mut self, language: String) {
+		tracing::info!("LSP ({}) inlay-hint refresh requested, re-pulling inlay hints", language);
+		self.request_inlay_hints_for_language(&language);
+	}
+
+	pub(super) fn handle_lsp_semantic_tokens_refresh(&mut self, language: String) {
+		tracing::info!(
+			"LSP ({}) semantic-tokens refresh requested, re-pulling semantic tokens",
+			language
+		);
+		self.request_semantic_tokens_for_language(&language);
+	}
+
+	/// Apply a dynamic capability (un)registration from the server, then — when
+	/// a capability newly turned on — kick off the corresponding requests for
+	/// buffers that were already open before the registration arrived (they
+	/// would otherwise never be requested, mirroring `LspInitialized`).
+	pub(super) fn handle_lsp_dynamic_capabilities(
+		&mut self,
+		language: String,
+		server_name: String,
+		register: bool,
+		registrations: Vec<(String, Option<serde_json::Value>)>,
+	) {
+		tracing::info!(
+			"LSP ({}) server '{}' {} {} capability registration(s)",
+			language,
+			server_name,
+			if register { "registered" } else { "unregistered" },
+			registrations.len()
+		);
+
+		let __active_id = self.active_window;
+		let changed = self
+			.windows
+			.get_mut(&__active_id)
+			.map(|w| &mut w.lsp)
+			.is_some_and(|lsp| lsp.apply_dynamic_capabilities(&server_name, register, &registrations));
+
+		// Only re-issue requests on a net-new capability; an unregister or a
+		// no-op registration should not trigger a fresh round of requests.
+		if changed && register {
+			self.request_semantic_tokens_for_language(&language);
+			self.request_folding_ranges_for_language(&language);
+			self.request_inlay_hints_for_language(&language);
+			self.pull_diagnostics_for_language(&language);
+		}
+	}
+
+	/// Re-pull diagnostics for all open buffers associated with the given language.
+	pub(super) fn pull_diagnostics_for_language(&mut self, language: &str) {
+		// Use the shared language-filtered buffer enumeration so requests
+		// never leak out to a server with a different scope.
+		let uris: Vec<_> =
+			self.buffers_for_language(language).into_iter().map(|(_, uri)| uri).collect();
+
+		if uris.is_empty() {
+			return;
+		}
+
+		let __active_id = self.active_window;
+		let Some(__win) = self.windows.get_mut(&__active_id) else {
+			return;
+		};
+		let diagnostic_result_ids = &__win.diagnostic_result_ids;
+		let lsp = &mut __win.lsp;
+		let Some(sh) = lsp.handle_for_feature_mut(language, crate::types::LspFeature::Diagnostics)
+		else {
+			return;
+		};
+		let client = &mut sh.handle;
+		let __next_id = &mut __win.next_lsp_request_id;
+
+		for uri in uris {
+			let request_id = *__next_id;
+			*__next_id += 1;
+			let previous_result_id = diagnostic_result_ids.get(uri.as_str()).cloned();
+			if let Err(e) =
+				client.document_diagnostic(request_id, uri.as_uri().clone(), previous_result_id)
+			{
+				tracing::debug!("Failed to re-pull diagnostics for {}: {}", uri.as_str(), e);
+			} else {
+				tracing::info!("Re-pulling diagnostics for {} (request_id={})", uri.as_str(), request_id);
+			}
+		}
+	}
+
+	/// Handle LSP progress notification ($/progress)
+	pub(super) fn handle_lsp_progress(
+		&mut self,
+		language: String,
+		token: String,
+		value: LspProgressValue,
+	) {
+		match value {
+			LspProgressValue::Begin { title, message, percentage } => {
+				self
+					.active_window_mut()
+					.lsp_progress
+					.insert(token.clone(), LspProgressInfo { language, title, message, percentage });
+			}
+			LspProgressValue::Report { message, percentage } => {
+				if let Some(info) = self.active_window_mut().lsp_progress.get_mut(&token) {
+					info.message = message;
+					info.percentage = percentage;
+				}
+			}
+			LspProgressValue::End { .. } => {
+				self.active_window_mut().lsp_progress.remove(&token);
+			}
+		}
+		// If the LSP status popup is open, rebuild it so the progress line
+		// inside reflects the new title / message / percentage.  The
+		// status-bar indicator itself only shows a spinner, so the popup
+		// is the user's only window into the live progress text.
+		self.refresh_lsp_status_popup_if_open();
+	}
+
+	/// Handle LSP window message (window/showMessage)
+	pub(super) fn handle_lsp_window_message(
+		&mut self,
+		language: String,
+		message_type: LspMessageType,
+		message: String,
+	) {
+		// Add to window messages list
+		self.active_window_mut().lsp_window_messages.push(LspMessageEntry {
+			language: language.clone(),
+			message_type,
+			message: message.clone(),
+			timestamp: Instant::now(),
+		});
+
+		// Keep only last 100 messages
+		if self.active_window_mut().lsp_window_messages.len() > 100 {
+			self.active_window_mut().lsp_window_messages.remove(0);
+		}
+
+		// Show important messages in status bar
+		match message_type {
+			LspMessageType::Error | LspMessageType::Warning => {
+				self.active_window_mut().status_message = Some(format!("LSP ({}): {}", language, message));
+			}
+			_ => {
+				// Info and Log messages are not shown in status bar
+			}
+		}
+	}
+
+	/// Handle LSP log message (window/logMessage)
+	pub(super) fn handle_lsp_log_message(
+		&mut self,
+		language: String,
+		message_type: LspMessageType,
+		message: String,
+	) {
+		self.active_window_mut().lsp_log_messages.push(LspMessageEntry {
+			language,
+			message_type,
+			message,
+			timestamp: Instant::now(),
+		});
+
+		// Keep only last 500 log messages
+		if self.active_window_mut().lsp_log_messages.len() > 500 {
+			self.active_window_mut().lsp_log_messages.remove(0);
+		}
+	}
+
+	/// Handle LSP server status update
+	pub(super) fn handle_lsp_status_update(
+		&mut self,
+		language: String,
+		server_name: String,
+		status: LspServerStatus,
+	) {
+		use crate::services::async_bridge::LspServerStatus;
+
+		let server_name_ref = server_name.clone();
+		let key = (language.clone(), server_name);
+
+		// Get old status for event
+		let old_status = self.active_window_mut().lsp_server_statuses.get(&key).cloned();
+
+		// Update server status
+		self.active_window_mut().lsp_server_statuses.insert(key, status);
+
+		// Update warning domain for LSP status indicator
+		self.active_window_mut().update_lsp_warning_domain();
+
+		// When a server becomes ready, send didOpen for all open buffers of
+		// that language so the server can start providing diagnostics, etc.
+		// without waiting for the next user edit.
+		if status == LspServerStatus::Running {
+			let was_already_running =
+				old_status.as_ref().is_some_and(|s| matches!(s, LspServerStatus::Running));
+			if !was_already_running {
+				let scope = self.lsp().as_ref().and_then(|lsp| lsp.server_scope(&server_name_ref).cloned());
+				match scope {
+					Some(scope) if scope.is_universal() => {
+						let languages: Vec<String> = self.buffers().languages().into_iter().collect();
+						for lang in languages {
+							self.reopen_buffers_for_language(&lang);
+						}
+					}
+					Some(scope) => {
+						for lang in scope.languages() {
+							self.reopen_buffers_for_language(lang);
+						}
+					}
+					None => {
+						// Per-language server — language comes from the status message
+						self.reopen_buffers_for_language(&language);
+					}
+				}
+			}
+		}
+
+		// Handle server crash - trigger auto-restart
+		if status == LspServerStatus::Error {
+			let was_running = old_status
+				.as_ref()
+				.map(|s| matches!(s, LspServerStatus::Running | LspServerStatus::Initializing))
+				.unwrap_or(false);
+
+			if was_running {
+				// Clear stale diagnostics from the crashed server so they
+				// don't linger on screen while we wait for a restart.
+				self.clear_diagnostics_for_server(&server_name_ref);
+
+				let __active_id = self.active_window;
+
+				if let Some(lsp) = self.windows.get_mut(&__active_id).map(|w| &mut w.lsp) {
+					let message = lsp.handle_server_crash(&language, &server_name_ref);
+					self.active_window_mut().status_message = Some(message);
+				}
+			}
+		}
+
+		// When a server transitions to Error or Shutdown, drop any
+		// `$/progress` entries for this language if no other server is
+		// still alive for it. The dead server will never emit the
+		// matching `end` notification, so without this prune the
+		// status-bar spinner stays stuck on the rotating braille glyph
+		// (and the status popup keeps showing "Indexing …") even
+		// though the process is gone — that's the "popup still says
+		// indexing after external kill" user report.
+		if matches!(status, LspServerStatus::Error | LspServerStatus::Shutdown) {
+			let any_running_for_lang =
+				self.active_window().lsp_server_statuses.iter().any(|((lang, _), s)| {
+					lang == &language && !matches!(s, LspServerStatus::Error | LspServerStatus::Shutdown,)
+				});
+			if !any_running_for_lang {
+				let lang_owned = language.clone();
+				self.active_window_mut().lsp_progress.retain(|_, info| info.language != lang_owned);
+			}
+			// Refresh the popup so any in-progress "(ready) ⏳ Indexing"
+			// rows for this server flip to "(not running)" right away.
+			self.refresh_lsp_status_popup_if_open();
+		}
+
+		// Emit control event
+		let status_str = match status {
+			LspServerStatus::Starting => "starting",
+			LspServerStatus::Initializing => "initializing",
+			LspServerStatus::Running => "running",
+			LspServerStatus::Error => "error",
+			LspServerStatus::Shutdown => "shutdown",
+		};
+		let old_status_str = old_status
+			.map(|s| match s {
+				LspServerStatus::Starting => "starting",
+				LspServerStatus::Initializing => "initializing",
+				LspServerStatus::Running => "running",
+				LspServerStatus::Error => "error",
+				LspServerStatus::Shutdown => "shutdown",
+			})
+			.unwrap_or("none");
+
+		self.emit_event(
+			crate::model::control_event::events::LSP_STATUS_CHANGED.name,
+			serde_json::json!({
+					"language": language,
+					"old_status": old_status_str,
+					"status": status_str
+			}),
+		);
+	}
+
+	/// Handle custom LSP notification
+	#[allow(dead_code)] // Prepared for future use when AsyncMessage::LspCustomNotification is added
+	pub(super) fn handle_custom_notification(
+		&mut self,
+		language: String,
+		method: String,
+		params: Option<Value>,
+	) {
+		tracing::debug!("Custom LSP notification {} from {}", method, language);
+		let payload = serde_json::json!({
+				"language": language,
+				"method": method,
+				"params": params,
+		});
+		self.emit_event("lsp/custom_notification", payload);
+	}
+
+	/// Handle LSP server request (server -> client)
+	/// These are requests from the LSP server that require handling, typically
+	/// custom/extension methods specific to certain language servers.
+	pub(super) fn handle_lsp_server_request(
+		&mut self,
+		language: String,
+		server_command: String,
+		method: String,
+		params: Option<Value>,
+	) {
+		tracing::debug!("LSP server request {} from {} ({})", method, language, server_command);
+
+		// Convert params to JSON string for the hook
+		let params_str = params.map(|p| p.to_string());
+
+		// Run the lsp_server_request hook for plugins
+		self.plugin_manager.read().unwrap().run_hook(
+			"lsp_server_request",
+			crate::services::plugins::hooks::HookArgs::LspServerRequest {
+				language,
+				method,
+				server_command,
+				params: params_str,
+			},
+		);
+	}
+
+	/// Handle plugin LSP response
+	pub(super) fn handle_plugin_lsp_response(
+		&mut self,
+		request_id: u64,
+		result: Result<Value, String>,
+	) {
+		use dx_core::api::JsCallbackId;
+		tracing::debug!("Received plugin LSP response (request_id={})", request_id);
+		let callback_id = JsCallbackId::from(request_id);
+		match result {
+			Ok(value) => {
+				self.plugin_manager.read().unwrap().resolve_callback(callback_id, value.to_string());
+			}
+			Err(err) => {
+				self.plugin_manager.read().unwrap().reject_callback(callback_id, err);
+			}
+		}
+	}
+
+	/// Handle generic plugin response (e.g., GetBufferText result)
+	pub(super) fn handle_plugin_response(&mut self, response: dx_core::api::PluginResponse) {
+		tracing::debug!("Received plugin response: {:?}", response);
+		self.send_plugin_response(response);
+	}
+}
+
+// =============================================================================
+// File System Event Handlers
+// =============================================================================
+
+impl Editor {
+	/// Handle file changed externally notification (from AsyncMessage)
+	///
+	/// Includes debounce logic to prevent rapid auto-reverts from overwhelming the editor.
+	/// This is different from `handle_file_changed` which actually reloads the file.
+	pub(super) fn handle_async_file_changed(&mut self, path: String) -> bool {
+		const DEBOUNCE_WINDOW: Duration = Duration::from_secs(10);
+		const RAPID_REVERT_THRESHOLD: u32 = 10; // Require 10 reverts in 10 seconds to disable
+
+		// Skip if auto-revert is disabled
+		if !self.active_window().auto_revert_enabled {
+			return false;
+		}
+
+		let path_buf = PathBuf::from(&path);
+
+		// Only track events for files that are actually open in the editor
+		let is_file_open =
+			self.buffers().iter().any(|(_, state)| state.buffer.file_path() == Some(&path_buf));
+
+		if !is_file_open {
+			tracing::trace!("Ignoring file change event for non-open file: {}", path);
+			return false;
+		}
+
+		// Track rapid file change events - only disable after many reverts in short window
+		let mut should_disable = false;
+		let now = self.time_source.now();
+		let elapsed_window_ok = if let Some((window_start, _)) =
+			self.active_window().file_rapid_change_counts.get(&path_buf)
+		{
+			self.time_source.elapsed_since(*window_start) < DEBOUNCE_WINDOW
+		} else {
+			false
+		};
+		if let Some((window_start, count)) =
+			self.active_window_mut().file_rapid_change_counts.get_mut(&path_buf)
+		{
+			if elapsed_window_ok {
+				*count += 1;
+
+				if *count >= RAPID_REVERT_THRESHOLD {
+					should_disable = true;
+					tracing::info!(
+						"Auto-revert disabled for {:?} ({} reverts in {:?})",
+						path_buf,
+						count,
+						DEBOUNCE_WINDOW
+					);
+				}
+			} else {
+				// Reset counter - start a new window
+				*count = 1;
+				*window_start = now;
+			}
+		} else {
+			// First event for this file
+			let now = self.time_source.now();
+			self.active_window_mut().file_rapid_change_counts.insert(path_buf.clone(), (now, 1));
+		}
+		if should_disable {
+			self.active_window_mut().auto_revert_enabled = false;
+			self.active_window_mut().status_message = Some(format!(
+				"Auto-revert disabled: {} is updating too frequently (use Ctrl+Shift+R to re-enable)",
+				path_buf.file_name().unwrap_or_default().to_string_lossy()
+			));
+			return false;
+		}
+
+		tracing::info!("File changed externally: {}", path);
+		self.handle_file_changed(&path);
+		true
+	}
+}
+
+// =============================================================================
+// File Explorer Handlers
+// =============================================================================
+
+impl Editor {
+	/// Handle file explorer initialized
+	pub(super) fn handle_file_explorer_initialized(
+		&mut self,
+		window: dx_core::WindowId,
+		view: FileTreeView,
+	) {
+		tracing::info!("File explorer initialized for window {window}");
+		let defaults = crate::app::file_explorer::FileExplorerViewDefaults {
+			show_hidden: self.config.file_explorer.show_hidden,
+			show_gitignored: self.config.file_explorer.show_gitignored,
+			compact_directories: self.config.file_explorer.compact_directories,
+			custom_ignore_patterns: self.config.file_explorer.custom_ignore_patterns.clone(),
+		};
+		let is_active = window == self.active_window_id();
+		// Route the result back to the window that asked for it. If that window
+		// is gone (closed before its tree finished building), drop it. The
+		// window applies the view to itself, so a background-built tree can
+		// never clobber a different (active) window's explorer.
+		let Some(win) = self.windows.get_mut(&window) else {
+			return;
+		};
+		win.install_initialized_file_explorer(view, defaults);
+		if is_active {
+			self.set_status_message(t!("status.file_explorer_ready").to_string());
+		}
+	}
+
+	/// Handle file explorer node toggle completed
+	pub(super) fn handle_file_explorer_toggle_node(&mut self, node_id: NodeId) {
+		tracing::debug!("File explorer toggle completed for node {:?}", node_id);
+	}
+
+	/// Handle file explorer node refresh completed
+	pub(super) fn handle_file_explorer_refresh_node(&mut self, node_id: NodeId) {
+		tracing::debug!("File explorer refresh completed for node {:?}", node_id);
+		self.set_status_message(t!("explorer.refreshed_default").to_string());
+	}
+
+	/// Handle file explorer expanded to path
+	pub(super) fn handle_file_explorer_expanded_to_path(
+		&mut self,
+		window: dx_core::WindowId,
+		view: FileTreeView,
+	) {
+		tracing::trace!(
+			"handle_file_explorer_expanded_to_path: restoring file_explorer for window {window}"
+		);
+		// Route to the requesting window (see `handle_file_explorer_initialized`).
+		if let Some(win) = self.windows.get_mut(&window) {
+			win.install_expanded_file_explorer(view);
+		}
+	}
+}
+
+// =============================================================================
+// Plugin Handlers
+// =============================================================================
+
+impl Editor {
+	/// Handle plugin process output completion
+	pub(super) fn handle_plugin_process_output(
+		&mut self,
+		callback_id: dx_core::api::JsCallbackId,
+		stdout: String,
+		stderr: String,
+		exit_code: i32,
+	) {
+		tracing::debug!(
+			"Process {} completed: exit_code={}, stdout_len={}, stderr_len={}",
+			callback_id,
+			exit_code,
+			stdout.len(),
+			stderr.len()
+		);
+		// Resolve the plugin callback with the process output
+		// Using SpawnResult struct ensures field names match TypeScript types
+		let result = dx_core::api::SpawnResult { stdout, stderr, exit_code };
+		self
+			.plugin_manager
+			.read()
+			.unwrap()
+			.resolve_callback(callback_id, serde_json::to_string(&result).unwrap());
+	}
+
+	/// Process TypeScript plugin commands
+	///
+	/// Returns true if any visual commands were processed (i.e. a re-render is needed).
+	/// No-op sentinels like `HookCompleted` do not count.
+	#[cfg(feature = "plugins")]
+	pub(super) fn process_plugin_commands(&mut self) -> bool {
+		let commands = self.plugin_manager.write().unwrap().process_commands();
+		if commands.is_empty() {
+			return false;
+		}
+
+		// Classify each command as visual (needs re-render) or not.
+		// `HookCompleted` is a pure ack. `SetStatusBarValue` is treated as
+		// visual only when the value actually differs from what's stored —
+		// many plugins (e.g. git_statusbar) re-publish the same value on
+		// every `render_start` hook, which would otherwise create a
+		// render → hook → ack → render feedback loop at ~13Hz forever.
+		//
+		// The remaining `=> false` arms are side-effecting commands that
+		// never touch the rendered buffer: scheduling a timer, spawning
+		// processes / HTTP, watching paths, and writing plugin-private
+		// state. Any *visual* result they eventually produce arrives as its
+		// own command (overlay, virtual text, status value, …) and is
+		// counted then. Treating these as visual forced a redraw on every
+		// debounce tick — e.g. live_diff's 75ms `editor.delay()` recompute
+		// repainted the screen twice per keystroke with no change. Invisible
+		// on a fast terminal, but real lag over a serial console (#2100).
+		use dx_core::api::PluginCommand as Pc;
+		let has_visual_commands = commands.iter().any(|c| match c {
+			Pc::HookCompleted { .. }
+			| Pc::Delay { .. }
+			| Pc::SpawnProcess { .. }
+			| Pc::SpawnBackgroundProcess { .. }
+			| Pc::KillBackgroundProcess { .. }
+			| Pc::SpawnProcessWait { .. }
+			| Pc::HttpFetch { .. }
+			| Pc::WatchPath { .. }
+			| Pc::UnwatchPath { .. }
+			| Pc::SetGlobalState { .. }
+			| Pc::SetWindowState { .. }
+			| Pc::SetViewState { .. } => false,
+			Pc::SetStatusBarValue { buffer_id, key, value } => {
+				self.current_status_bar_value(dx_core::BufferId(*buffer_id as usize), key)
+					!= Some(value.as_str())
+			}
+			_ => true,
+		});
+
+		for command in &commands {
+			match command {
+				dx_core::api::PluginCommand::RegisterGrammar { language, grammar_path, extensions } => {
+					tracing::info!(
+						"[SYNTAX DEBUG] processing RegisterGrammar: lang='{}', path='{}', ext={:?}",
+						language,
+						grammar_path,
+						extensions
+					);
+				}
+				dx_core::api::PluginCommand::ReloadGrammars { .. } => {
+					tracing::info!("[SYNTAX DEBUG] processing ReloadGrammars command");
+				}
+				_ => {}
+			}
+		}
+
+		for command in commands {
+			tracing::trace!(
+				"process_plugin_commands: handling command {:?}",
+				std::mem::discriminant(&command)
+			);
+			if let Err(e) = self.handle_plugin_command(command) {
+				tracing::error!("Error handling TypeScript plugin command: {}", e);
+			}
+		}
+
+		// Flush any deferred grammar rebuilds as a single batch
+		self.flush_pending_grammars();
+
+		has_visual_commands
+	}
+
+	/// Process pending plugin action completions
+	#[cfg(feature = "plugins")]
+	pub(super) fn process_pending_plugin_actions(&mut self) {
+		self.pending_plugin_actions.retain(|(action_name, receiver)| {
+			match receiver.try_recv() {
+				Ok(result) => {
+					match result {
+						Ok(()) => {
+							tracing::info!("Plugin action '{}' executed successfully", action_name);
+						}
+						Err(e) => {
+							tracing::error!("Plugin action '{}' error: {}", action_name, e);
+						}
+					}
+					false // Remove completed action
+				}
+				Err(std::sync::mpsc::TryRecvError::Empty) => {
+					true // Keep pending action
+				}
+				Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+					tracing::error!("Plugin thread disconnected during action '{}'", action_name);
+					false // Remove disconnected action
+				}
+			}
+		});
+	}
+
+	/// True iff no plugin actions are currently in-flight on the
+	/// plugin thread. Test harness helper — used by `send_key` to
+	/// know when async plugin work queued by the key has fully
+	/// settled before returning, so tests see synchronous-looking
+	/// behavior between sequential key presses (e.g. a mode-bound
+	/// `Home` followed by a synchronous-bypass `Shift+Right`).
+	/// Outside tests, the editor's main loop pumps these alongside
+	/// other async messages on every frame so there's nothing to
+	/// drain explicitly.
+	#[cfg(feature = "plugins")]
+	#[doc(hidden)]
+	pub fn pending_plugin_actions_is_empty(&self) -> bool {
+		self.pending_plugin_actions.is_empty()
+	}
+
+	/// Stub for builds without plugin support — there are no
+	/// plugin actions to track, so we're always "settled".
+	#[cfg(not(feature = "plugins"))]
+	#[doc(hidden)]
+	pub fn pending_plugin_actions_is_empty(&self) -> bool {
+		true
+	}
+
+	/// Process pending LSP server restarts (with exponential backoff)
+	pub(super) fn process_pending_lsp_restarts(&mut self) {
+		let __active_id = self.active_window;
+		let Some(lsp) = self.windows.get_mut(&__active_id).map(|w| &mut w.lsp) else {
+			return;
+		};
+
+		let restart_results = lsp.process_pending_restarts();
+
+		for (language, success, message) in restart_results {
+			self.active_window_mut().status_message = Some(message.clone());
+
+			if success {
+				self.resend_did_open_for_language(&language);
+			}
+		}
+	}
+
+	/// Re-send didOpen notifications for all buffers of a given language
+	pub(super) fn resend_did_open_for_language(&mut self, language: &str) {
+		// Find all open buffers for this language using stored buffer language
+		let buffers_for_language: Vec<_> = self
+			.buffers()
+			.iter()
+			.filter_map(|(buf_id, state)| {
+				if state.language == language {
+					self
+						.active_window()
+						.buffer_metadata
+						.get(buf_id)
+						.and_then(|meta| meta.file_path().map(|p| (*buf_id, p.clone())))
+				} else {
+					None
+				}
+			})
+			.collect();
+
+		// Re-send didOpen for each buffer
+		for (buffer_id, path) in buffers_for_language {
+			if let Some(state) = self
+				.windows
+				.get(&self.active_window)
+				.map(|w| &w.buffers)
+				.expect("active window present")
+				.get(&buffer_id)
+			{
+				let content = match state.buffer.to_string() {
+					Some(c) => c,
+					None => continue, // Skip buffers that aren't fully loaded
+				};
+				let uri: Option<lsp_types::Uri> = super::types::file_path_to_lsp_uri_with_translation(
+					&path,
+					self.authority().path_translation.as_ref(),
+				);
+
+				if let Some(uri) = uri {
+					let lang_id = state.language.clone();
+					let __active_id = self.active_window;
+					if let Some(__win) = self.windows.get_mut(&__active_id) {
+						{
+							let lsp = &mut __win.lsp;
+							// Send didOpen to ALL handles for this language,
+							// not just the first. Each server needs its own
+							// didOpen notification.
+							for sh in lsp.get_handles_mut(&lang_id) {
+								let handle_id = sh.handle.id();
+								if let Err(e) = sh.handle.did_open(uri.clone(), content.clone(), lang_id.clone()) {
+									tracing::warn!("LSP did_open failed for '{}' after restart: {}", sh.name, e);
+								} else if let Some(metadata) = __win.buffer_metadata.get_mut(&buffer_id) {
+									// Mark buffer as opened with this handle
+									// so send_lsp_changes_for_buffer doesn't
+									// re-send didOpen.
+									metadata.lsp_opened_with.insert(handle_id);
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	/// Request semantic tokens for all open buffers matching a language.
+	pub(super) fn request_semantic_tokens_for_language(&mut self, language: &str) {
+		let buffer_ids: Vec<_> =
+			self.buffers_for_language(language).into_iter().map(|(id, _)| id).collect();
+		for buffer_id in buffer_ids {
+			self.active_window_mut().schedule_semantic_tokens_full_refresh(buffer_id);
+		}
+	}
+
+	/// Request folding ranges for all open buffers matching a language.
+	pub(super) fn request_folding_ranges_for_language(&mut self, language: &str) {
+		let buffer_ids: Vec<_> =
+			self.buffers_for_language(language).into_iter().map(|(id, _)| id).collect();
+		for buffer_id in buffer_ids {
+			self.active_window_mut().schedule_folding_ranges_refresh(buffer_id);
+		}
+	}
+
+	/// Request inlay hints for all open buffers matching a language.
+	///
+	/// Used on `LspInitialized` so buffers that opened before the server
+	/// finished its `initialize` handshake still receive hints once
+	/// capabilities are known. Per-buffer requests route through
+	/// `handle_for_feature_mut(InlayHints)`, so servers that didn't
+	/// advertise `inlayHintProvider` are transparently skipped.
+	pub(super) fn request_inlay_hints_for_language(&mut self, language: &str) {
+		let buffer_ids: Vec<_> =
+			self.buffers_for_language(language).into_iter().map(|(id, _)| id).collect();
+		for buffer_id in buffer_ids {
+			self.request_inlay_hints_for_buffer(buffer_id);
+		}
+	}
+}
+
+fn semantic_tokens_to_raw(tokens: &[SemanticToken]) -> Vec<u32> {
+	let mut raw = Vec::with_capacity(tokens.len().saturating_mul(5));
+	for token in tokens {
+		raw.push(token.delta_line);
+		raw.push(token.delta_start);
+		raw.push(token.length);
+		raw.push(token.token_type);
+		raw.push(token.token_modifiers_bitset);
+	}
+	raw
+}
+
+fn decode_semantic_token_raw_data(
+	buffer: &Buffer,
+	legend: &SemanticTokensLegend,
+	data: &[u32],
+	base_line: usize,
+) -> Vec<SemanticTokenSpan> {
+	if !data.len().is_multiple_of(5) {
+		tracing::warn!("Semantic token data length {} is not divisible by 5", data.len());
+		return Vec::new();
+	}
+
+	let mut result = Vec::with_capacity(data.len() / 5);
+	let mut current_line = base_line as u32;
+	let mut current_start = 0u32;
+
+	for chunk in data.chunks_exact(5) {
+		let delta_line = chunk[0];
+		let delta_start = chunk[1];
+		let length = chunk[2];
+		let token_type = chunk[3];
+		let token_modifiers_bitset = chunk[4];
+
+		current_line += delta_line;
+		if delta_line == 0 {
+			current_start += delta_start;
+		} else {
+			current_start = delta_start;
+		}
+
+		let start_utf16 = current_start as usize;
+		let end_utf16 = start_utf16 + length as usize;
+		let start_byte = buffer.lsp_position_to_byte(current_line as usize, start_utf16);
+		let end_byte = buffer.lsp_position_to_byte(current_line as usize, end_utf16);
+
+		let token_type_name = legend
+			.token_types
+			.get(token_type as usize)
+			.map(|ty| ty.as_str().to_string())
+			.unwrap_or_else(|| "unknown".to_string());
+
+		let mut modifiers = Vec::new();
+		for (idx, modifier) in legend.token_modifiers.iter().enumerate() {
+			if (token_modifiers_bitset >> idx) & 1 == 1 {
+				modifiers.push(modifier.as_str().to_string());
+			}
+		}
+
+		result.push(SemanticTokenSpan {
+			range: start_byte..end_byte,
+			token_type: token_type_name,
+			modifiers,
+		});
+	}
+
+	result
+}
+
+struct SemanticTokenDecode {
+	raw: Vec<u32>,
+	spans: Vec<SemanticTokenSpan>,
+}
+
+struct SemanticTokensFullDecode {
+	result_id: Option<String>,
+	raw_data: Vec<u32>,
+	spans: Vec<SemanticTokenSpan>,
+}
+
+struct SemanticTokensDeltaDecode {
+	result_id: Option<String>,
+	raw_data: Vec<u32>,
+}
+
+fn decode_semantic_token_data(
+	buffer: &Buffer,
+	legend: &SemanticTokensLegend,
+	data: &[SemanticToken],
+	base_line: usize,
+) -> SemanticTokenDecode {
+	let raw = semantic_tokens_to_raw(data);
+	let spans = decode_semantic_token_raw_data(buffer, legend, &raw, base_line);
+	SemanticTokenDecode { raw, spans }
+}
+
+fn apply_semantic_token_edits(
+	mut data: Vec<u32>,
+	edits: &[SemanticTokensEdit],
+) -> Option<Vec<u32>> {
+	if edits.is_empty() {
+		return Some(data);
+	}
+
+	for edit in edits.iter().rev() {
+		let start = edit.start as usize;
+		let delete_count = edit.delete_count as usize;
+		if start > data.len() || start.saturating_add(delete_count) > data.len() {
+			return None;
+		}
+
+		let insert =
+			edit.data.as_ref().map(|tokens| semantic_tokens_to_raw(tokens)).unwrap_or_default();
+
+		data.splice(start..start + delete_count, insert);
+	}
+
+	Some(data)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn semantic_token_delta_edits_apply() {
+		let base = vec![0, 0, 2, 0, 0, 0, 3, 4, 1, 0];
+		let edit = SemanticTokensEdit {
+			start: 5,
+			delete_count: 5,
+			data: Some(vec![SemanticToken {
+				delta_line: 0,
+				delta_start: 5,
+				length: 1,
+				token_type: 2,
+				token_modifiers_bitset: 0,
+			}]),
+		};
+
+		let updated = apply_semantic_token_edits(base, &[edit]).expect("edit should apply");
+		assert_eq!(updated.len(), 10);
+		assert_eq!(&updated[5..10], &[0, 5, 1, 2, 0]);
+	}
+}

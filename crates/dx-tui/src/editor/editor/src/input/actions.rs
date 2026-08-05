@@ -1,0 +1,5410 @@
+//! Action to event conversion - translates high-level actions into buffer events
+
+use crate::input::keybindings::Action;
+use crate::input::line_move::{LineMoveDirection, move_lines};
+use crate::model::buffer::{Buffer, LineEnding};
+use crate::model::buffer_position::{byte_to_2d, pos_2d_to_byte};
+use crate::model::cursor::{Cursor, Cursors, Position2D, SelectionMode};
+use crate::model::event::{CursorId, Event};
+use crate::model::virtual_space::{
+	cursor_virtual_columns, cursor_virtual_lines, line_width_at_content_end,
+};
+use crate::primitives::display_width::{byte_offset_at_visual_column, str_width};
+use crate::primitives::highlighter::HighlightCategory;
+use crate::primitives::indent_pattern::PatternIndentCalculator;
+use crate::primitives::word_navigation::{
+	find_vi_word_end, find_word_end, find_word_end_right, find_word_start, find_word_start_left,
+	find_word_start_right,
+};
+use crate::state::EditorState;
+use std::ops::Range;
+
+/// Direction for block selection movement
+#[derive(Debug, Clone, Copy)]
+enum BlockDirection {
+	Left,
+	Right,
+	Up,
+	Down,
+}
+
+/// Calculate the visual column (display width) at the cursor position.
+/// Returns (visual_column, byte_column_within_line).
+fn calculate_visual_column(
+	buffer: &mut Buffer,
+	cursor_position: usize,
+	estimated_line_length: usize,
+) -> (usize, usize) {
+	let mut iter = buffer.line_iterator(cursor_position, estimated_line_length);
+	let current_line_start = iter.current_position();
+	let byte_column = cursor_position.saturating_sub(current_line_start);
+
+	if let Some((_, line_content)) = iter.next_line() {
+		if byte_column > 0 && byte_column <= line_content.len() {
+			(str_width(&line_content[..byte_column]), byte_column)
+		} else {
+			(byte_column, byte_column) // Fallback for edge cases
+		}
+	} else {
+		(byte_column, byte_column) // Fallback
+	}
+}
+
+/// Pattern for matching line ending characters (\r and \n)
+const LINE_ENDING_CHARS: &[char] = &['\r', '\n'];
+
+/// Get the length of line content excluding line ending characters (\r and \n).
+/// Handles CRLF, LF, and CR line endings.
+fn content_len_without_line_ending(content: &str) -> usize {
+	content.trim_end_matches(LINE_ENDING_CHARS).len()
+}
+
+/// In vi NORMAL mode the caret may not rest past a line's last character.
+///
+/// Given a destination line (its start offset and full content, line ending
+/// included) and a tentative byte position on that line, clamp the position to
+/// the start of the line's last character — or to the line start for an empty
+/// line. Used by the vi-aware vertical motions so `j`/`k` onto a shorter line
+/// land on the last char (like Vim) instead of one past it.
+fn clamp_to_last_char_on_line(line_start: usize, line_content: &str, pos: usize) -> usize {
+	let line_len = content_len_without_line_ending(line_content);
+	let last_char_pos = line_content[..line_len]
+		.char_indices()
+		.next_back()
+		.map(|(i, _)| line_start + i)
+		.unwrap_or(line_start);
+	pos.min(last_char_pos)
+}
+
+fn find_paragraph_up(buffer: &mut Buffer, pos: usize, estimated_line_length: usize) -> usize {
+	let mut iter = buffer.line_iterator(pos, estimated_line_length);
+	let mut found_pos = None;
+	while let Some((line_start, line_content)) = iter.prev() {
+		let trimmed = line_content.trim_end_matches(['\n', '\r']);
+		if trimmed.is_empty() {
+			found_pos = Some(line_start);
+			break;
+		}
+	}
+	found_pos.unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ParagraphDownTarget {
+	position: usize,
+	reached_eof: bool,
+}
+
+fn find_paragraph_down(buffer: &mut Buffer, pos: usize, estimated_line_length: usize) -> usize {
+	find_paragraph_down_target(buffer, pos, estimated_line_length).position
+}
+
+fn find_paragraph_down_target(
+	buffer: &mut Buffer,
+	pos: usize,
+	estimated_line_length: usize,
+) -> ParagraphDownTarget {
+	let buffer_len = buffer.len();
+	let mut iter = buffer.line_iterator(pos, estimated_line_length);
+	iter.next_line();
+	while let Some((line_start, line_content)) = iter.next_line() {
+		if is_virtual_trailing_line(buffer_len, line_start, &line_content) {
+			break;
+		}
+
+		let trimmed = line_content.trim_end_matches(['\n', '\r']);
+		if trimmed.is_empty() {
+			return ParagraphDownTarget { position: line_start, reached_eof: false };
+		}
+	}
+
+	ParagraphDownTarget { position: paragraph_down_eof_position(buffer), reached_eof: true }
+}
+
+fn is_virtual_trailing_line(buffer_len: usize, line_start: usize, line_content: &str) -> bool {
+	// Vim's findpar() never sees a synthetic line after a final newline: when
+	// curr moves past b_ml.ml_line_count it backs up to the last real line and
+	// then places the cursor on that line's final character. Dx's
+	// line_iterator intentionally emits that synthetic trailing line, so map it
+	// back to Vim's EOF branch here.
+	line_start == buffer_len && line_content.is_empty()
+}
+
+fn paragraph_down_eof_position(buffer: &Buffer) -> usize {
+	let len = buffer.len();
+	if len == 0 {
+		return 0;
+	}
+
+	let mut content_end = len;
+	if buffer.slice_bytes(content_end.saturating_sub(1)..content_end).first() == Some(&b'\n') {
+		content_end = content_end.saturating_sub(1);
+		if content_end > 0
+			&& buffer.slice_bytes(content_end.saturating_sub(1)..content_end).first() == Some(&b'\r')
+		{
+			content_end = content_end.saturating_sub(1);
+		}
+	} else if buffer.slice_bytes(content_end.saturating_sub(1)..content_end).first() == Some(&b'\r') {
+		content_end = content_end.saturating_sub(1);
+	}
+
+	if content_end == 0 { 0 } else { buffer.prev_grapheme_boundary(content_end) }
+}
+
+fn paragraph_down_selection_position(
+	buffer: &mut Buffer,
+	pos: usize,
+	estimated_line_length: usize,
+) -> usize {
+	let target = find_paragraph_down_target(buffer, pos, estimated_line_length);
+	if target.reached_eof {
+		return buffer.len();
+	}
+
+	let target = target.position;
+	if target < buffer.len()
+		&& !matches!(buffer.slice_bytes(target..target + 1).first(), Some(b'\n') | Some(b'\r'))
+	{
+		buffer.next_grapheme_boundary(target)
+	} else {
+		target
+	}
+}
+
+/// Adjust position after moving left in CRLF mode.
+/// If we land on \n that's preceded by \r, skip back to the \r.
+/// This ensures the cursor never sits between \r and \n.
+fn adjust_position_for_crlf_left(buffer: &Buffer, pos: usize) -> usize {
+	if buffer.line_ending() != LineEnding::CRLF || pos == 0 {
+		return pos;
+	}
+
+	let byte_at_pos = buffer.slice_bytes(pos..pos + 1);
+	if byte_at_pos.first() == Some(&b'\n') {
+		let prev_byte = buffer.slice_bytes(pos.saturating_sub(1)..pos);
+		if prev_byte.first() == Some(&b'\r') {
+			return pos - 1; // Skip back to \r
+		}
+	}
+	pos
+}
+
+/// Calculate next position when moving right, treating CRLF as a single unit.
+/// If cursor is on \r followed by \n, skip over both.
+/// Uses grapheme cluster boundaries for proper handling of combining characters.
+fn next_position_for_crlf(buffer: &Buffer, pos: usize, max_pos: usize) -> usize {
+	if buffer.line_ending() == LineEnding::CRLF {
+		let cur_byte = buffer.slice_bytes(pos..pos + 1);
+		let next_byte = buffer.slice_bytes(pos + 1..pos + 2);
+		if cur_byte.first() == Some(&b'\r') && next_byte.first() == Some(&b'\n') {
+			return (pos + 2).min(max_pos); // Skip both \r and \n
+		}
+	}
+	buffer.next_grapheme_boundary(pos).min(max_pos)
+}
+
+/// Convert deletion ranges to Delete events
+///
+/// This is a common pattern used across many deletion actions.
+/// It reads the text from each range and creates Delete events.
+fn apply_deletions(
+	state: &mut EditorState,
+	deletions: Vec<(CursorId, Range<usize>)>,
+	events: &mut Vec<Event>,
+) {
+	for (cursor_id, range) in deletions {
+		let deleted_text = state.get_text_range(range.start, range.end);
+		events.push(Event::Delete { range, deleted_text, cursor_id });
+	}
+}
+
+/// Collect all line start positions in a given byte range
+///
+/// This is used for indent/dedent operations to find all lines that need
+/// to be indented or dedented within a selection.
+fn collect_line_starts(
+	buffer: &mut Buffer,
+	start_pos: usize,
+	end_pos: usize,
+	estimated_line_length: usize,
+) -> Vec<usize> {
+	let buffer_len = buffer.len();
+	let mut line_starts = Vec::new();
+	let mut iter = buffer.line_iterator(start_pos, estimated_line_length);
+
+	// Collect all line starts by iterating through lines using a single iterator
+	// The iterator naturally handles the trailing empty line case without infinite loops
+	while let Some((line_start, _)) = iter.next_line() {
+		// If the selection ends exactly at a line's start (and spans at least one line),
+		// that line has no selected content and should not be included (fixes #1304).
+		// When start_pos == end_pos (no selection / single point), we still include the
+		// line the cursor is on.
+		if line_start > end_pos || line_start > buffer_len {
+			break;
+		}
+		if line_start == end_pos && line_start > start_pos {
+			break;
+		}
+		line_starts.push(line_start);
+	}
+
+	line_starts
+}
+
+/// Calculate how much leading whitespace to remove from a line for dedent
+///
+/// Returns (chars_to_remove, deleted_text) where chars_to_remove is the number
+/// of characters to delete, and deleted_text is the string being deleted.
+fn calculate_leading_whitespace_removal(
+	buffer: &Buffer,
+	line_start: usize,
+	tab_size: usize,
+) -> (usize, String) {
+	let buffer_len = buffer.len();
+	let line_bytes = buffer.slice_bytes(line_start..buffer_len.min(line_start + tab_size + 1));
+
+	if !line_bytes.is_empty() && line_bytes[0] == b'\t' {
+		(1, "\t".to_string())
+	} else {
+		let spaces_to_remove = line_bytes.iter().take(tab_size).take_while(|&&b| b == b' ').count();
+		(spaces_to_remove, " ".repeat(spaces_to_remove))
+	}
+}
+
+/// Add a MoveCursor event to restore cursor position after indent/dedent
+fn add_move_cursor_event(
+	events: &mut Vec<Event>,
+	cursor_id: CursorId,
+	old_position: usize,
+	new_position: usize,
+	old_anchor: Option<usize>,
+	new_anchor: Option<usize>,
+	old_sticky_column: Option<usize>,
+) {
+	events.push(Event::MoveCursor {
+		cursor_id,
+		old_position,
+		new_position,
+		old_anchor,
+		new_anchor,
+		old_sticky_column,
+		new_sticky_column: None,
+	});
+}
+
+/// Move each cursor to the position returned by `new_pos_fn`, respecting
+/// `deselect_on_move`: collapses any selection or preserves the anchor.
+fn move_each_cursor(
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	mut new_pos_fn: impl FnMut(&Cursor) -> usize,
+) {
+	for (cursor_id, cursor) in cursors.iter() {
+		let new_pos = new_pos_fn(cursor);
+		let new_anchor = if cursor.deselect_on_move { None } else { cursor.anchor };
+		add_move_cursor_event(
+			events,
+			cursor_id,
+			cursor.position,
+			new_pos,
+			cursor.anchor,
+			new_anchor,
+			cursor.sticky_column,
+		);
+	}
+}
+
+/// Like [`move_each_cursor`], but `new_pos_fn` also chooses the new sticky
+/// (goal) column. Used by horizontal movement into virtual space, where the
+/// byte position stays pinned at the line's content end and only the sticky
+/// column advances.
+fn move_each_cursor_with_sticky(
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	mut new_pos_fn: impl FnMut(&Cursor) -> (usize, Option<usize>),
+) {
+	for (cursor_id, cursor) in cursors.iter() {
+		let (new_pos, new_sticky) = new_pos_fn(cursor);
+		let new_anchor = if cursor.deselect_on_move { None } else { cursor.anchor };
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: cursor.position,
+			new_position: new_pos,
+			old_anchor: cursor.anchor,
+			new_anchor,
+			old_sticky_column: cursor.sticky_column,
+			new_sticky_column: new_sticky,
+		});
+	}
+}
+
+/// Move each cursor to the position returned by `new_pos_fn` while extending
+/// the selection (anchor stays fixed at its current location).
+fn select_each_cursor(
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	mut new_pos_fn: impl FnMut(&Cursor) -> usize,
+) {
+	for (cursor_id, cursor) in cursors.iter() {
+		let new_pos = new_pos_fn(cursor);
+		let anchor = cursor.anchor.unwrap_or(cursor.position);
+		add_move_cursor_event(
+			events,
+			cursor_id,
+			cursor.position,
+			new_pos,
+			cursor.anchor,
+			Some(anchor),
+			cursor.sticky_column,
+		);
+	}
+}
+
+/// Handle block selection movement
+fn block_select_action(
+	state: &mut EditorState,
+	cursors: &mut Cursors,
+	events: &mut Vec<Event>,
+	direction: BlockDirection,
+) {
+	// Get line count for bounds checking
+	let total_lines = {
+		let len = state.buffer.len();
+		if len == 0 { 1 } else { state.buffer.get_line_number(len.saturating_sub(1)) + 1 }
+	};
+
+	let vs_mode = state.buffer_settings.virtual_space;
+	let block_virtual = vs_mode.block_beyond_eol();
+	for (cursor_id, cursor) in cursors.iter() {
+		let mut current_2d = byte_to_2d(&state.buffer, cursor.position);
+		if block_virtual {
+			if cursor.selection_mode == SelectionMode::Block {
+				// In block mode the sticky column carries the block column,
+				// which may exceed the (clipped) byte-derived column.
+				if let Some(sticky) = cursor.sticky_column {
+					current_2d.column = current_2d.column.max(sticky);
+				}
+			} else {
+				// Entering block mode from a virtual-space cursor keeps the
+				// cursor's on-screen column (padding is 1 byte per column).
+				current_2d.column += cursor_virtual_columns(vs_mode, &state.buffer, cursor);
+			}
+		}
+
+		// If not in block mode, start block selection
+		let block_anchor = if cursor.selection_mode != SelectionMode::Block {
+			current_2d
+		} else {
+			cursor.block_anchor.unwrap_or(current_2d)
+		};
+
+		// Calculate new 2D position based on direction
+		let new_2d = match direction {
+			BlockDirection::Left => {
+				Position2D { line: current_2d.line, column: current_2d.column.saturating_sub(1) }
+			}
+			BlockDirection::Right => {
+				// Get current line length to bound the column
+				let line_content = state.buffer.get_line(current_2d.line).unwrap_or_default();
+				let line_len = if line_content.last() == Some(&b'\n') {
+					line_content.len().saturating_sub(1)
+				} else {
+					line_content.len()
+				};
+				// With virtual space for block selections, the rectangle may
+				// grow past the line end (true rectangles).
+				let column =
+					if block_virtual { current_2d.column + 1 } else { (current_2d.column + 1).min(line_len) };
+				Position2D { line: current_2d.line, column }
+			}
+			BlockDirection::Up => {
+				if current_2d.line > 0 {
+					Position2D { line: current_2d.line - 1, column: current_2d.column }
+				} else {
+					current_2d
+				}
+			}
+			BlockDirection::Down => {
+				if current_2d.line + 1 < total_lines {
+					Position2D { line: current_2d.line + 1, column: current_2d.column }
+				} else {
+					current_2d
+				}
+			}
+		};
+
+		// Convert new 2D position back to byte offset
+		let new_byte_pos = pos_2d_to_byte(&state.buffer, new_2d);
+
+		// Store the byte anchor for the event system (for undo/redo compatibility)
+		let byte_anchor = pos_2d_to_byte(&state.buffer, block_anchor);
+
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: cursor.position,
+			new_position: new_byte_pos,
+			old_anchor: cursor.anchor,
+			new_anchor: Some(byte_anchor),
+			old_sticky_column: cursor.sticky_column,
+			new_sticky_column: Some(new_2d.column),
+		});
+
+		// Note: We need to set block selection mode after the event is processed
+		// This will be done in a separate step
+	}
+
+	// Update selection mode for all cursors to Block mode
+	// We need to do this directly since Event::MoveCursor doesn't support selection mode changes
+	// Note: We update the cursors here to set block_anchor BEFORE the events are applied
+	// This way the events will move the cursor, but the anchor remains fixed
+	let buffer_ref = &state.buffer;
+	cursors.map(|cursor| {
+		if cursor.selection_mode != SelectionMode::Block || cursor.block_anchor.is_none() {
+			let mut current_2d = byte_to_2d(buffer_ref, cursor.position);
+			// Anchor the rectangle at the cursor's on-screen (possibly
+			// virtual) column, matching the entry handling above.
+			if block_virtual {
+				current_2d.column += cursor_virtual_columns(vs_mode, buffer_ref, cursor);
+			}
+			cursor.start_block_selection(current_2d.line, current_2d.column);
+		}
+	});
+}
+
+/// Clear block selection when performing normal operations
+/// This should be called when the user performs a non-block action
+pub fn clear_block_selection_if_active(cursors: &mut Cursors) {
+	cursors.map(|cursor| {
+		if cursor.selection_mode == SelectionMode::Block {
+			cursor.clear_block_selection();
+		}
+	});
+}
+
+/// Convert block selection to multiple cursors with normal selections.
+/// Each cursor will have a selection covering that line's portion of the block.
+/// This should be called before action processing so normal multi-cursor logic applies.
+/// Returns events to add the new cursors (if any).
+fn convert_block_selection_to_cursors(
+	state: &mut EditorState,
+	cursors: &mut Cursors,
+) -> (Vec<Event>, Vec<(CursorId, usize)>) {
+	let mut events = Vec::new();
+
+	// Check if any cursor has a block selection
+	let block_virtual = state.buffer_settings.virtual_space.block_beyond_eol();
+	let block_info: Option<(CursorId, Position2D, Position2D)> =
+		cursors.iter().find_map(|(cursor_id, cursor)| {
+			if cursor.has_block_selection() {
+				let block_anchor = cursor.block_anchor?;
+				let mut cursor_2d = byte_to_2d(&state.buffer, cursor.position);
+				// The block column (sticky) may extend past the clipped byte
+				// column when virtual space is enabled for block selections.
+				if block_virtual {
+					if let Some(sticky) = cursor.sticky_column {
+						cursor_2d.column = cursor_2d.column.max(sticky);
+					}
+				}
+				Some((cursor_id, block_anchor, cursor_2d))
+			} else {
+				None
+			}
+		});
+
+	let Some((primary_cursor_id, block_anchor, cursor_2d)) = block_info else {
+		return (events, Vec::new());
+	};
+
+	// Calculate block rectangle bounds
+	let min_line = block_anchor.line.min(cursor_2d.line);
+	let max_line = block_anchor.line.max(cursor_2d.line);
+	let min_col = block_anchor.column.min(cursor_2d.column);
+	let max_col = block_anchor.column.max(cursor_2d.column);
+
+	// Calculate cursor positions for each line. With virtual space, a line
+	// shorter than the rectangle's left edge gets a collapsed cursor at its
+	// content end plus a pending pad (spaces to the rectangle's edge) that a
+	// following character insertion materializes.
+	let mut cursor_positions: Vec<(usize, usize)> = Vec::new(); // (position, anchor)
+	let mut paddings: Vec<(usize, usize)> = Vec::new(); // (line_idx, spaces)
+
+	for line in min_line..=max_line {
+		let line_start = state.buffer.line_start_offset(line).unwrap_or(0);
+		let line_content = state.buffer.get_line(line).unwrap_or_default();
+
+		// Calculate line length excluding newline
+		let line_len = if line_content.last() == Some(&b'\n') {
+			line_content.len().saturating_sub(1)
+		} else {
+			line_content.len()
+		};
+
+		if block_virtual && min_col > line_len {
+			let line_end = line_start + line_len;
+			paddings.push((cursor_positions.len(), min_col - line_len));
+			cursor_positions.push((line_end, line_end));
+			continue;
+		}
+
+		// Clamp columns to actual line length
+		let actual_min_col = min_col.min(line_len);
+		let actual_max_col = max_col.min(line_len);
+
+		let anchor = line_start + actual_min_col;
+		let position = line_start + actual_max_col;
+
+		cursor_positions.push((position, anchor));
+	}
+
+	// Update the primary cursor to have a normal selection on the first line
+	if let Some((position, anchor)) = cursor_positions.first().copied() {
+		if let Some(cursor) = cursors.get_mut(primary_cursor_id) {
+			cursor.position = position;
+			cursor.anchor = if position != anchor { Some(anchor) } else { None };
+			cursor.clear_block_selection();
+		}
+	}
+
+	// Add new cursors for remaining lines, remembering each line's cursor id
+	// so the pending pads can be attributed to their line's cursor.
+	let mut line_cursor_ids: Vec<CursorId> = vec![primary_cursor_id];
+	for (next_cursor_id, (position, anchor)) in
+		(cursors.count()..).zip(cursor_positions.iter().copied().skip(1))
+	{
+		let cursor_id = CursorId(next_cursor_id);
+		line_cursor_ids.push(cursor_id);
+		events.push(Event::AddCursor {
+			cursor_id,
+			position,
+			anchor: if position != anchor { Some(anchor) } else { None },
+		});
+	}
+
+	let pads =
+		paddings.into_iter().map(|(line_idx, spaces)| (line_cursor_ids[line_idx], spaces)).collect();
+
+	(events, pads)
+}
+
+/// Get the matching close character for auto-pairing.
+pub fn get_auto_close_char(ch: char, auto_close: bool, language: &str) -> Option<char> {
+	if !auto_close {
+		return None;
+	}
+	// Disable auto-closing quotes in plain text files
+	if language == "text" && matches!(ch, '"' | '\'' | '`') {
+		return None;
+	}
+	// Disable auto-closing single quotes in markdown (used as apostrophes)
+	if matches!(language, "markdown" | "mdx") && ch == '\'' {
+		return None;
+	}
+	match ch {
+		'(' => Some(')'),
+		'[' => Some(']'),
+		'{' => Some('}'),
+		'"' => Some('"'),
+		'\'' => Some('\''),
+		'`' => Some('`'),
+		_ => None,
+	}
+}
+
+/// Is the byte at `pos` code (not inside a comment or string)?
+///
+/// Sourced from the syntax highlighter's render cache — no extra parse — so the
+/// indentation rules can ignore braces/keywords inside comments and strings.
+/// Returns `true` (treat as code) when no scope info is cached for `pos`.
+fn byte_is_code(state: &EditorState, pos: usize) -> bool {
+	!matches!(
+		state.highlighter.category_at_position(pos),
+		Some(
+			crate::primitives::highlighter::HighlightCategory::Comment
+				| crate::primitives::highlighter::HighlightCategory::String
+		)
+	)
+}
+
+/// Resolve the per-language regex indentation rules for a buffer that has no
+/// tree-sitter grammar.
+///
+/// A user-supplied `[languages.<id>.indent]` override is registered under the
+/// buffer's *config* language id (`state.language`), which the syntax-name
+/// lookup can never resolve for a config-only language with no grammar (e.g. a
+/// user-defined filetype). So those explicit overrides are consulted first, by
+/// config id. Everything else defers to the existing syntect-syntax-name path,
+/// which keeps built-in languages on their established tiering (notably letting
+/// curly-brace languages fall through to the C-style bracket scanner). Returns
+/// `None` when no rules exist either way so the caller can fall back.
+fn buffer_indent_rules(
+	state: &EditorState,
+) -> Option<std::sync::Arc<crate::primitives::indent_rules::IndentRules>> {
+	crate::primitives::indent_rules::user_rule_for_id(&state.language).or_else(|| {
+		crate::primitives::indent_rules::rules_for_syntax_name(state.highlighter.syntax_name()?)
+	})
+}
+
+/// Try the per-language regex indentation rules for a buffer that has no
+/// tree-sitter grammar. Returns `None` when no rules exist for the language so
+/// the caller can fall back.
+fn rules_indent(state: &EditorState, position: usize, tab_size: usize) -> Option<usize> {
+	let rules = buffer_indent_rules(state)?;
+	Some(rules.calculate_indent(&state.buffer, position, tab_size, |b| byte_is_code(state, b)))
+}
+
+/// Closing-delimiter variant of [`rules_indent`].
+fn rules_dedent(state: &EditorState, position: usize, ch: char, tab_size: usize) -> Option<usize> {
+	let rules = buffer_indent_rules(state)?;
+	rules.calculate_dedent_for_delimiter(&state.buffer, position, ch, tab_size, |b| {
+		byte_is_code(state, b)
+	})
+}
+
+/// Calculate the correct indent for a closing delimiter.
+///
+/// Tiering mirrors the Enter-indent path: a language with a *bundled*
+/// tree-sitter grammar (Go, JSON(C), TypeScript, JavaScript, Templ) uses the
+/// AST dedent; everything else uses the per-language regex rules tier
+/// (scope-masked, keyed by syntax name), then the generic C-style bracket
+/// scanner for unknown syntaxes.
+fn calculate_closing_delimiter_indent(
+	state: &mut EditorState,
+	insert_position: usize,
+	ch: char,
+	tab_size: usize,
+) -> usize {
+	if let Some(language) = state.highlighter.language() {
+		if language.ts_language().is_some() {
+			return state
+				.indent_calculator
+				.borrow_mut()
+				.calculate_dedent_for_delimiter(&state.buffer, insert_position, ch, language, tab_size)
+				.unwrap_or(0);
+		}
+	}
+	if let Some(indent) = rules_dedent(state, insert_position, ch, tab_size) {
+		return indent;
+	}
+	// No bundled grammar and no rules: language-agnostic bracket scanner.
+	PatternIndentCalculator::calculate_dedent_for_delimiter(
+		&state.buffer,
+		insert_position,
+		ch,
+		tab_size,
+	)
+	.unwrap_or(0)
+}
+
+/// Convert a visual indent width to actual indent characters.
+/// When `use_tabs` is true, uses tab characters; otherwise uses spaces.
+/// The `indent_width` is the visual width in columns, and `tab_size` is
+/// how many columns a tab character represents.
+fn indent_to_string(indent_width: usize, use_tabs: bool, tab_size: usize) -> String {
+	if use_tabs && tab_size > 0 {
+		let num_tabs = indent_width / tab_size;
+		let remaining_spaces = indent_width % tab_size;
+		let mut result = "\t".repeat(num_tabs);
+		if remaining_spaces > 0 {
+			result.push_str(&" ".repeat(remaining_spaces));
+		}
+		result
+	} else {
+		" ".repeat(indent_width)
+	}
+}
+
+/// Handle skip-over with dedent: when typing a closing delimiter that exists after cursor,
+/// and the line has incorrect indentation, fix the indent and skip over.
+/// Returns true if handled (caller should continue to next cursor).
+fn handle_skip_over_with_dedent(
+	state: &mut EditorState,
+	events: &mut Vec<Event>,
+	cursor_id: CursorId,
+	ch: char,
+	insert_position: usize,
+	line_start: usize,
+	tab_size: usize,
+) -> bool {
+	let correct_indent = calculate_closing_delimiter_indent(state, insert_position, ch, tab_size);
+	let use_tabs = state.buffer_settings.use_tabs;
+
+	// Calculate current visual indent width (tabs count as tab_size columns)
+	let mut current_visual_indent = 0;
+	let mut pos = line_start;
+	while pos < insert_position {
+		match state.buffer.slice_bytes(pos..pos + 1).first() {
+			Some(&b' ') => current_visual_indent += 1,
+			Some(&b'\t') => current_visual_indent += tab_size,
+			_ => break,
+		}
+		pos += 1;
+	}
+
+	if current_visual_indent != correct_indent {
+		// Delete incorrect spacing
+		let deleted_text = state.get_text_range(line_start, insert_position);
+		events.push(Event::Delete { range: line_start..insert_position, deleted_text, cursor_id });
+
+		// Insert correct spacing using tabs or spaces per language config
+		let indent_str = indent_to_string(correct_indent, use_tabs, tab_size);
+		let indent_byte_len = indent_str.len();
+		if indent_byte_len > 0 {
+			events.push(Event::Insert { position: line_start, text: indent_str, cursor_id });
+		}
+
+		// Move cursor to after the closing delimiter
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: line_start + indent_byte_len,
+			new_position: line_start + indent_byte_len + 1,
+			old_anchor: None,
+			new_anchor: None,
+			old_sticky_column: None,
+			new_sticky_column: None,
+		});
+		return true;
+	}
+	false
+}
+
+/// Handle simple skip-over: move cursor past existing closing bracket/quote.
+fn handle_skip_over(events: &mut Vec<Event>, cursor_id: CursorId, insert_position: usize) {
+	events.push(Event::MoveCursor {
+		cursor_id,
+		old_position: insert_position,
+		new_position: insert_position + 1,
+		old_anchor: None,
+		new_anchor: None,
+		old_sticky_column: None,
+		new_sticky_column: None,
+	});
+}
+
+/// Handle auto-dedent: when typing a closing delimiter on a line with only spaces,
+/// fix the indentation and insert the delimiter.
+fn handle_auto_dedent(
+	state: &mut EditorState,
+	events: &mut Vec<Event>,
+	cursor_id: CursorId,
+	ch: char,
+	insert_position: usize,
+	line_start: usize,
+	tab_size: usize,
+) {
+	let correct_indent = calculate_closing_delimiter_indent(state, insert_position, ch, tab_size);
+
+	// Delete the incorrect spacing
+	let spaces_to_delete = insert_position - line_start;
+	if spaces_to_delete > 0 {
+		let deleted_text = state.get_text_range(line_start, insert_position);
+		events.push(Event::Delete { range: line_start..insert_position, deleted_text, cursor_id });
+	}
+
+	// Insert correct spacing + the closing delimiter
+	// Use tabs or spaces per language config
+	let use_tabs = state.buffer_settings.use_tabs;
+	let mut text = indent_to_string(correct_indent, use_tabs, tab_size);
+	text.push(ch);
+	events.push(Event::Insert { position: line_start, text, cursor_id });
+}
+
+/// Check if auto-close should happen based on character after cursor.
+fn should_auto_close(char_after: Option<u8>) -> bool {
+	let is_alphanumeric_after =
+		char_after.map(|b| b.is_ascii_alphanumeric() || b == b'_').unwrap_or(false);
+	!is_alphanumeric_after
+}
+
+/// Handle auto-close: insert both opening and closing bracket/quote.
+fn handle_auto_close(
+	events: &mut Vec<Event>,
+	cursor_id: CursorId,
+	ch: char,
+	close_char: char,
+	insert_position: usize,
+) {
+	// Insert opening + closing character
+	let text = format!("{}{}", ch, close_char);
+	events.push(Event::Insert { position: insert_position, text, cursor_id });
+	// Move cursor between the brackets
+	events.push(Event::MoveCursor {
+		cursor_id,
+		old_position: insert_position + 2,
+		new_position: insert_position + 1,
+		old_anchor: None,
+		new_anchor: None,
+		old_sticky_column: None,
+		new_sticky_column: None,
+	});
+}
+
+/// Cursor context data collected before processing insertions.
+struct InsertCursorData {
+	cursor_id: CursorId,
+	selection: Option<Range<usize>>,
+	insert_position: usize,
+	line_start: usize,
+	only_spaces: bool,
+	char_after: Option<u8>,
+	deleted_text: Option<String>,
+	/// Text that materializes the cursor's virtual-space position (line
+	/// endings for virtual lines below the buffer end, then column padding).
+	/// Empty unless the cursor is in virtual space. Typing inserts this
+	/// before the typed character.
+	virtual_gap: String,
+}
+
+/// Collect cursor data needed for character insertion.
+fn collect_insert_cursor_data(state: &mut EditorState, cursors: &Cursors) -> Vec<InsertCursorData> {
+	// Collect cursors and sort by the effective insert position (reverse order)
+	let mut cursor_vec: Vec<_> = cursors.iter().collect();
+	cursor_vec.sort_by_key(|(_, c)| {
+		let insert_pos = c.selection_range().map(|r| r.start).unwrap_or(c.position);
+		std::cmp::Reverse(insert_pos)
+	});
+
+	// Collect cursor IDs and positions
+	let vs_mode = state.buffer_settings.virtual_space;
+	let line_ending = state.buffer.line_ending().as_str();
+	let cursor_info: Vec<_> = cursor_vec
+		.iter()
+		.map(|(cursor_id, cursor)| {
+			let selection = cursor.selection_range();
+			let insert_position = selection.as_ref().map(|r| r.start).unwrap_or(cursor.position);
+			let virtual_gap =
+				crate::model::virtual_space::virtual_gap_text(vs_mode, &state.buffer, cursor, line_ending);
+			(*cursor_id, selection, insert_position, virtual_gap)
+		})
+		.collect();
+
+	drop(cursor_vec);
+
+	// Collect all cursor data with buffer access
+	cursor_info
+		.into_iter()
+		.map(|(cursor_id, selection, insert_position, virtual_gap)| {
+			// Calculate line start for auto-dedent
+			let mut line_start = insert_position;
+			while line_start > 0 {
+				let prev = line_start - 1;
+				if state.buffer.slice_bytes(prev..prev + 1).first() == Some(&b'\n') {
+					break;
+				}
+				line_start = prev;
+			}
+
+			let line_before_cursor = state.buffer.slice_bytes(line_start..insert_position);
+			let only_spaces = line_before_cursor.iter().all(|&b| b == b' ' || b == b'\t');
+
+			let check_pos = selection.as_ref().map(|r| r.end).unwrap_or(insert_position);
+			let char_after = if check_pos < state.buffer.len() {
+				state.buffer.slice_bytes(check_pos..check_pos + 1).first().copied()
+			} else {
+				None
+			};
+
+			let deleted_text = selection.as_ref().map(|r| state.get_text_range(r.start, r.end));
+
+			InsertCursorData {
+				cursor_id,
+				selection,
+				insert_position,
+				line_start,
+				only_spaces,
+				char_after,
+				deleted_text,
+				virtual_gap,
+			}
+		})
+		.collect()
+}
+
+/// Handle InsertChar action - insert character at each cursor position.
+#[allow(clippy::too_many_arguments)]
+fn insert_char_events(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	ch: char,
+	tab_size: usize,
+	auto_indent: bool,
+	auto_close: bool,
+	auto_surround: bool,
+	block_pads: &[(CursorId, usize)],
+) {
+	let is_closing_delimiter = matches!(ch, '}' | ')' | ']');
+	let auto_close_char = get_auto_close_char(ch, auto_close, &state.language);
+	let cursor_data = collect_insert_cursor_data(state, cursors);
+
+	for data in cursor_data {
+		// Virtual space: materialize the gap between the buffer/line content
+		// end and the cursor, then the typed character — as one Insert so a
+		// single undo removes both. Auto-close/skip-over don't apply out in
+		// virtual space; the cursor is past every existing delimiter. The
+		// gap may come from the cursor itself (columns past EOL and/or lines
+		// below the buffer end) or from a block-selection rectangle whose
+		// left edge is past this line's end.
+		let block_pad =
+			block_pads.iter().find(|(id, _)| *id == data.cursor_id).map(|(_, pad)| *pad).unwrap_or(0);
+		let gap =
+			if !data.virtual_gap.is_empty() { data.virtual_gap.clone() } else { " ".repeat(block_pad) };
+		if !gap.is_empty() && data.selection.is_none() {
+			events.push(Event::Insert {
+				position: data.insert_position,
+				text: format!("{}{}", gap, ch),
+				cursor_id: data.cursor_id,
+			});
+			continue;
+		}
+
+		// Surround selection: when text is selected and the typed character has a
+		// matching close pair, wrap the selection instead of replacing it.
+		if auto_surround {
+			if let Some(close_char) = auto_close_char {
+				if let (Some(range), Some(_)) = (&data.selection, &data.deleted_text) {
+					let sel_start = range.start;
+					let sel_end = range.end;
+					// Insert closing char at end of selection first (higher position)
+					events.push(Event::Insert {
+						position: sel_end,
+						text: close_char.to_string(),
+						cursor_id: data.cursor_id,
+					});
+					// Insert opening char at start of selection
+					events.push(Event::Insert {
+						position: sel_start,
+						text: ch.to_string(),
+						cursor_id: data.cursor_id,
+					});
+					// Place cursor after closing char (sel_end + 2: +1 for open, +1 for close)
+					events.push(Event::MoveCursor {
+						cursor_id: data.cursor_id,
+						old_position: sel_end + 2,
+						new_position: sel_end + 2,
+						old_anchor: None,
+						new_anchor: None,
+						old_sticky_column: None,
+						new_sticky_column: None,
+					});
+					continue;
+				}
+			}
+		}
+
+		// Delete selection if present
+		if let (Some(range), Some(text)) = (data.selection, data.deleted_text) {
+			events.push(Event::Delete { range, deleted_text: text, cursor_id: data.cursor_id });
+		}
+
+		// Try skip-over logic for closing brackets/quotes
+		// Single quotes are excluded in markdown (apostrophes, not paired quotes)
+		let skip_single_quote = ch == '\'' && matches!(state.language.as_str(), "markdown" | "mdx");
+		if auto_close && matches!(ch, ')' | ']' | '}' | '"' | '\'' | '`') && !skip_single_quote {
+			if let Some(next_byte) = data.char_after {
+				if next_byte == ch as u8 {
+					// Try skip-over with dedent for closing delimiters
+					if is_closing_delimiter
+						&& data.only_spaces
+						&& data.insert_position > data.line_start
+						&& handle_skip_over_with_dedent(
+							state,
+							events,
+							data.cursor_id,
+							ch,
+							data.insert_position,
+							data.line_start,
+							tab_size,
+						) {
+						continue;
+					}
+					// Simple skip-over
+					handle_skip_over(events, data.cursor_id, data.insert_position);
+					continue;
+				}
+			}
+		}
+
+		// Try auto-dedent for closing delimiters
+		if is_closing_delimiter
+			&& auto_indent
+			&& data.only_spaces
+			&& data.insert_position > data.line_start
+		{
+			handle_auto_dedent(
+				state,
+				events,
+				data.cursor_id,
+				ch,
+				data.insert_position,
+				data.line_start,
+				tab_size,
+			);
+			continue;
+		}
+
+		// Try auto-close
+		// Suppress auto-close for quotes when cursor is inside a string
+		if let Some(close_char) = auto_close_char {
+			let suppress_quote_in_string = matches!(ch, '"' | '\'' | '`')
+				&& state.highlighter.category_at_position(data.insert_position)
+					== Some(HighlightCategory::String);
+			if !suppress_quote_in_string && should_auto_close(data.char_after) {
+				handle_auto_close(events, data.cursor_id, ch, close_char, data.insert_position);
+				continue;
+			}
+		}
+
+		// Normal character insertion
+		events.push(Event::Insert {
+			position: data.insert_position,
+			text: ch.to_string(),
+			cursor_id: data.cursor_id,
+		});
+	}
+}
+
+/// Calculate the maximum valid cursor position in the buffer.
+/// This is the end of the last line (excluding trailing newline).
+/// For empty buffers, returns 0.
+fn max_cursor_position(buffer: &Buffer) -> usize {
+	// The maximum cursor position is simply the end of the buffer
+	// No need to use line iterator or calculate line positions
+	buffer.len()
+}
+
+/// Transform selected text (or current word if no selection) using the given transform function.
+/// Processes cursors in reverse order to avoid position shifts.
+fn transform_case<F>(
+	state: &mut EditorState,
+	cursors: &mut Cursors,
+	events: &mut Vec<Event>,
+	transform: F,
+) where
+	F: Fn(&str) -> String,
+{
+	let mut selections: Vec<_> = cursors
+		.iter()
+		.map(|(cursor_id, cursor)| {
+			if let Some(range) = cursor.selection_range() {
+				(cursor_id, range.start, range.end)
+			} else {
+				// No selection - use current word
+				let word_start = find_word_start(&state.buffer, cursor.position);
+				let word_end = find_word_end(&state.buffer, word_start);
+				(cursor_id, word_start, word_end)
+			}
+		})
+		.filter(|(_, start, end)| start < end)
+		.collect();
+	selections.sort_by_key(|(_, start, _)| std::cmp::Reverse(*start));
+
+	for (cursor_id, start, end) in selections {
+		let text = state.get_text_range(start, end);
+		let transformed = transform(&text);
+		if transformed != text {
+			events.push(Event::Delete { range: start..end, deleted_text: text, cursor_id });
+			events.push(Event::Insert { position: start, text: transformed, cursor_id });
+		}
+	}
+}
+
+fn handle_insert_newline(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	tab_size: usize,
+	auto_indent: bool,
+	auto_close: bool,
+	_estimated_line_length: usize,
+) {
+	// Sort cursors by position (reverse order) to avoid position shifts
+	let mut cursor_vec: Vec<_> = cursors.iter().collect();
+	cursor_vec.sort_by_key(|(_, c)| std::cmp::Reverse(c.position));
+
+	// Collect deletions and positions for indentation
+	let deletions: Vec<_> = cursor_vec
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			cursor.selection_range().map(|range| (*cursor_id, range.clone(), range.start))
+		})
+		.collect();
+
+	let indent_positions: Vec<_> = cursor_vec
+		.iter()
+		.map(|(cursor_id, cursor)| {
+			let indent_position = cursor.selection_range().map(|r| r.start).unwrap_or(cursor.position);
+			(*cursor_id, indent_position)
+		})
+		.collect();
+
+	// Get text for deletions and build delete events
+	for (cursor_id, range, _start) in deletions {
+		let deleted_text = state.get_text_range(range.start, range.end);
+		events.push(Event::Delete { range, deleted_text, cursor_id });
+	}
+
+	// Now process insertions
+	let line_ending = state.buffer.line_ending().as_str();
+	for (cursor_id, indent_position) in indent_positions {
+		// Calculate indent for new line
+		let mut text = line_ending.to_string();
+
+		// Check for bracket expansion: cursor between matching brackets like {|}
+		// Only applies to braces, brackets, and parentheses (not quotes)
+		let bracket_expansion = if auto_close && indent_position > 0 {
+			let char_before = state
+				.buffer
+				.slice_bytes(indent_position.saturating_sub(1)..indent_position)
+				.first()
+				.copied();
+			let char_after = if indent_position < state.buffer.len() {
+				state.buffer.slice_bytes(indent_position..indent_position + 1).first().copied()
+			} else {
+				None
+			};
+
+			// Check if we're between matching brackets (not quotes)
+			matches!(
+				(char_before, char_after),
+				(Some(b'('), Some(b')')) | (Some(b'['), Some(b']')) | (Some(b'{'), Some(b'}'))
+			)
+		} else {
+			false
+		};
+
+		// Track cursor line position for bracket expansion
+		// After bracket expansion, cursor should be at end of cursor line, not at end of closing bracket line
+		let mut cursor_line_end_position: Option<usize> = None;
+
+		if auto_indent {
+			let use_tabs = state.buffer_settings.use_tabs;
+			// Tiering: a language with a *bundled* tree-sitter grammar (Go,
+			// JSON(C), TypeScript, JavaScript, Templ) uses the AST indenter,
+			// which handles its block structure — and strings/comments —
+			// precisely. Every other language uses the per-language regex rules
+			// tier (keyed by syntax name, with comment/string scope masking),
+			// falling back to the language-agnostic heuristic for unknown
+			// syntaxes (.txt, …). `IndentCalculator` itself also falls back to
+			// the rules tier when a language has no grammar.
+			let indent_width_opt = match state.highlighter.language() {
+				Some(language) if language.ts_language().is_some() => state
+					.indent_calculator
+					.borrow_mut()
+					.calculate_indent(&state.buffer, indent_position, language, tab_size),
+				_ => {
+					if let Some(w) = rules_indent(state, indent_position, tab_size) {
+						Some(w)
+					} else {
+						Some(crate::primitives::indent::IndentCalculator::calculate_indent_no_language(
+							&state.buffer,
+							indent_position,
+							tab_size,
+						))
+					}
+				}
+			};
+			if let Some(indent_width) = indent_width_opt {
+				let indent_str = indent_to_string(indent_width, use_tabs, tab_size);
+				text.push_str(&indent_str);
+
+				if bracket_expansion {
+					cursor_line_end_position = Some(indent_position + line_ending.len() + indent_str.len());
+					let opening_bracket_indent =
+						crate::primitives::indent::IndentCalculator::get_line_indent_at_position(
+							&state.buffer,
+							indent_position.saturating_sub(1),
+							tab_size,
+						);
+					text.push_str(line_ending);
+					text.push_str(&indent_to_string(opening_bracket_indent, use_tabs, tab_size));
+				}
+			}
+		}
+
+		// Calculate where cursor will end up after insert
+		let cursor_after_insert = indent_position + text.len();
+
+		events.push(Event::Insert { position: indent_position, text, cursor_id });
+
+		// For bracket expansion, move cursor back to the cursor line
+		// (not the closing bracket line where it ends up after insert)
+		if let Some(cursor_line_end) = cursor_line_end_position {
+			// Get current cursor state to build the MoveCursor event
+			if let Some(cursor) = cursors.get(cursor_id) {
+				events.push(Event::MoveCursor {
+					cursor_id,
+					old_position: cursor_after_insert,
+					new_position: cursor_line_end,
+					old_anchor: None, // No selection after bracket expansion
+					new_anchor: None,
+					old_sticky_column: cursor.sticky_column,
+					// No explicit goal column: `cursor_line_end` is a byte
+					// *position*, not a column — using it as a sticky column
+					// sent later vertical moves to a far-right column.
+					new_sticky_column: None,
+				});
+			}
+		}
+	}
+}
+
+fn handle_dedent_selection(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	tab_size: usize,
+	estimated_line_length: usize,
+) {
+	// Dedent selected lines and preserve selections
+	// Collect all line starts from all cursors first to avoid position shifts
+	use std::collections::BTreeMap;
+	let mut all_line_deletions: BTreeMap<usize, (usize, String)> = BTreeMap::new();
+	let mut cursor_info = Vec::new();
+
+	for (cursor_id, cursor) in cursors.iter() {
+		let has_selection = cursor.selection_range().is_some();
+
+		let (start_pos, end_pos) = if let Some(range) = cursor.selection_range() {
+			(range.start, range.end)
+		} else {
+			// No selection - dedent current line
+			let iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+			let line_start = iter.current_position();
+			(line_start, cursor.position)
+		};
+
+		// Find all line starts in the range using helper function
+		let line_starts =
+			collect_line_starts(&mut state.buffer, start_pos, end_pos, estimated_line_length);
+
+		// For each line start, calculate what to delete
+		for &line_start in &line_starts {
+			if let std::collections::btree_map::Entry::Vacant(e) = all_line_deletions.entry(line_start) {
+				let (chars_to_remove, deleted_text) =
+					calculate_leading_whitespace_removal(&state.buffer, line_start, tab_size);
+
+				if chars_to_remove > 0 {
+					e.insert((chars_to_remove, deleted_text));
+				}
+			}
+		}
+
+		// Store cursor info for later restoration
+		cursor_info.push((
+			cursor_id,
+			cursor.position,
+			cursor.anchor,
+			cursor.sticky_column,
+			has_selection,
+			start_pos,
+			end_pos,
+		));
+	}
+
+	// Create delete events in reverse order to avoid position shifts
+	let first_cursor_id = cursors.iter().next().unwrap().0;
+	for (&line_start, (chars_to_remove, deleted_text)) in all_line_deletions.iter().rev() {
+		events.push(Event::Delete {
+			range: line_start..line_start + chars_to_remove,
+			deleted_text: deleted_text.clone(),
+			cursor_id: first_cursor_id,
+		});
+	}
+
+	// Calculate new cursor/selection positions and add MoveCursor events
+	for (cursor_id, old_position, old_anchor, old_sticky_column, has_selection, start_pos, end_pos) in
+		cursor_info
+	{
+		// Calculate how many chars were removed before start_pos and end_pos
+		let mut removed_before_start = 0;
+		let mut removed_before_end = 0;
+		let mut removed_before_position = 0;
+
+		for (&line_start, &(chars_to_remove, _)) in &all_line_deletions {
+			if line_start < start_pos {
+				removed_before_start += chars_to_remove;
+			}
+			if line_start <= end_pos {
+				removed_before_end += chars_to_remove;
+			}
+			if line_start < old_position {
+				removed_before_position += chars_to_remove;
+			}
+		}
+
+		if has_selection {
+			// Had selection - restore it with adjusted positions
+			let new_anchor = start_pos.saturating_sub(removed_before_start);
+			let new_position = end_pos.saturating_sub(removed_before_end);
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				old_position,
+				new_position,
+				old_anchor,
+				Some(new_anchor),
+				old_sticky_column,
+			);
+		} else {
+			// No selection - just move cursor back by amount removed before it
+			let new_position = old_position.saturating_sub(removed_before_position);
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				old_position,
+				new_position,
+				old_anchor,
+				None,
+				old_sticky_column,
+			);
+		}
+	}
+}
+
+fn handle_insert_tab(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	tab_size: usize,
+	estimated_line_length: usize,
+) {
+	// Insert a tab character or spaces based on language config
+	let tab_str =
+		if state.buffer_settings.use_tabs { "\t".to_string() } else { " ".repeat(tab_size) };
+
+	// Check if any cursor has a selection
+	let has_selection = cursors.iter().any(|(_, cursor)| cursor.selection_range().is_some());
+
+	if has_selection {
+		// Indent selected lines and preserve selections
+		// Collect all line starts from all cursors first to avoid position shifts
+		use std::collections::BTreeSet;
+		let mut all_line_starts = BTreeSet::new();
+		let mut cursor_info = Vec::new();
+
+		for (cursor_id, cursor) in cursors.iter() {
+			if let Some(range) = cursor.selection_range() {
+				let (start_pos, end_pos) = (range.start, range.end);
+
+				// Find all line starts in the range using helper function
+				let line_starts =
+					collect_line_starts(&mut state.buffer, start_pos, end_pos, estimated_line_length);
+
+				// Add to global set (automatically deduplicates and sorts)
+				all_line_starts.extend(line_starts.iter());
+
+				// Store cursor info for later restoration
+				cursor_info.push((
+					cursor_id,
+					cursor.position,
+					cursor.anchor,
+					cursor.sticky_column,
+					start_pos,
+					end_pos,
+				));
+			}
+		}
+
+		// Create insert events for all line starts in reverse order
+		// This ensures later positions aren't shifted by earlier insertions
+		let first_cursor_id = cursors.iter().next().unwrap().0;
+		for &line_start in all_line_starts.iter().rev() {
+			events.push(Event::Insert {
+				position: line_start,
+				text: tab_str.clone(),
+				cursor_id: first_cursor_id,
+			});
+		}
+
+		// Calculate new selection positions and add MoveCursor events
+		let indent_len = tab_str.len();
+		for (cursor_id, old_position, old_anchor, old_sticky_column, start_pos, end_pos) in cursor_info
+		{
+			// Count how many indents were inserted at or before each position
+			// Use <= for anchor because we insert at line starts, and positions >= line_start shift
+			// Use < for position to avoid double-counting the indent at position itself
+			let indents_at_or_before_anchor =
+				all_line_starts.iter().filter(|&&pos| pos <= start_pos).count();
+			let indents_before_position = all_line_starts.iter().filter(|&&pos| pos < end_pos).count();
+
+			let new_anchor = start_pos + (indents_at_or_before_anchor * indent_len);
+			let new_position = end_pos + (indents_before_position * indent_len);
+
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				old_position,
+				new_position,
+				old_anchor,
+				Some(new_anchor),
+				old_sticky_column,
+			);
+		}
+	} else {
+		// No selection - insert tab character at cursor position
+		// Sort cursors by position (reverse order) to avoid position shifts
+		let mut cursor_vec: Vec<_> = cursors.iter().collect();
+		cursor_vec.sort_by_key(|(_, c)| std::cmp::Reverse(c.position));
+
+		// Insert tabs (materializing any virtual-space gap first)
+		let vs_mode = state.buffer_settings.virtual_space;
+		let line_ending = state.buffer.line_ending().as_str();
+		for (cursor_id, cursor) in cursor_vec {
+			let gap =
+				crate::model::virtual_space::virtual_gap_text(vs_mode, &state.buffer, cursor, line_ending);
+			let text = if gap.is_empty() { tab_str.clone() } else { format!("{}{}", gap, tab_str) };
+			events.push(Event::Insert { position: cursor.position, text, cursor_id });
+		}
+	}
+}
+
+/// Move or extend selection up by one line, using visual columns for wide-character accuracy.
+///
+/// When `extend_selection` is false (MoveUp): collapses any selection to the top edge first
+/// (VSCode/Sublime behavior, issue #1566), then respects Emacs mark mode via deselect_on_move.
+/// When `extend_selection` is true (SelectUp): keeps the existing anchor fixed and extends it.
+fn handle_vertical_up(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+	extend_selection: bool,
+	clamp_to_last_char: bool,
+) {
+	let vs_mode = state.buffer_settings.virtual_space;
+	for (cursor_id, cursor) in cursors.iter() {
+		// On a virtual line below the buffer end, Up steps back through the
+		// virtual lines before any real line movement.
+		let vlines = cursor_virtual_lines(vs_mode, &state.buffer, cursor);
+		if vlines > 0 && !extend_selection {
+			state.pending_virtual_lines.push((cursor_id, vlines - 1));
+			events.push(Event::MoveCursor {
+				cursor_id,
+				old_position: cursor.position,
+				new_position: cursor.position,
+				old_anchor: cursor.anchor,
+				new_anchor: None,
+				old_sticky_column: cursor.sticky_column,
+				new_sticky_column: cursor.sticky_column,
+			});
+			continue;
+		}
+
+		let from_pos = if !extend_selection && cursor.deselect_on_move {
+			cursor.selection_range().map(|r| r.start).unwrap_or(cursor.position)
+		} else {
+			cursor.position
+		};
+
+		let (current_visual_column, _) =
+			calculate_visual_column(&mut state.buffer, from_pos, estimated_line_length);
+		let goal_visual_column = cursor.sticky_column.unwrap_or(current_visual_column);
+
+		let mut iter = state.buffer.line_iterator(from_pos, estimated_line_length);
+		if let Some((prev_line_start, prev_line_content)) = iter.prev() {
+			let prev_line_text = prev_line_content.trim_end_matches('\n');
+			let byte_offset = byte_offset_at_visual_column(prev_line_text, goal_visual_column);
+			let mut new_pos = prev_line_start + byte_offset;
+			if clamp_to_last_char {
+				new_pos = clamp_to_last_char_on_line(prev_line_start, &prev_line_content, new_pos);
+			}
+
+			let new_anchor = if extend_selection {
+				Some(cursor.anchor.unwrap_or(cursor.position))
+			} else if cursor.deselect_on_move {
+				None
+			} else {
+				cursor.anchor
+			};
+			events.push(Event::MoveCursor {
+				cursor_id,
+				old_position: cursor.position,
+				new_position: new_pos,
+				old_anchor: cursor.anchor,
+				new_anchor,
+				old_sticky_column: cursor.sticky_column,
+				new_sticky_column: Some(goal_visual_column),
+			});
+		}
+	}
+}
+
+/// Move or extend selection down by one line, using visual columns for wide-character accuracy.
+///
+/// See [`handle_vertical_up`] for the `extend_selection` contract.
+fn handle_vertical_down(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+	extend_selection: bool,
+	clamp_to_last_char: bool,
+) {
+	let vs_mode = state.buffer_settings.virtual_space;
+	for (cursor_id, cursor) in cursors.iter() {
+		let from_pos = if !extend_selection && cursor.deselect_on_move {
+			cursor.selection_range().map(|r| r.end).unwrap_or(cursor.position)
+		} else {
+			cursor.position
+		};
+
+		let (current_visual_column, _) =
+			calculate_visual_column(&mut state.buffer, from_pos, estimated_line_length);
+		let goal_visual_column = cursor.sticky_column.unwrap_or(current_visual_column);
+
+		let mut iter = state.buffer.line_iterator(from_pos, estimated_line_length);
+		iter.next_line(); // consume current line
+
+		if let Some((next_line_start, next_line_content)) = iter.next_line() {
+			let next_line_text = next_line_content.trim_end_matches('\n');
+			let byte_offset = byte_offset_at_visual_column(next_line_text, goal_visual_column);
+			let mut new_pos = next_line_start + byte_offset;
+			if clamp_to_last_char {
+				new_pos = clamp_to_last_char_on_line(next_line_start, &next_line_content, new_pos);
+			}
+
+			let new_anchor = if extend_selection {
+				Some(cursor.anchor.unwrap_or(cursor.position))
+			} else if cursor.deselect_on_move {
+				None
+			} else {
+				cursor.anchor
+			};
+			events.push(Event::MoveCursor {
+				cursor_id,
+				old_position: cursor.position,
+				new_position: new_pos,
+				old_anchor: cursor.anchor,
+				new_anchor,
+				old_sticky_column: cursor.sticky_column,
+				new_sticky_column: Some(goal_visual_column),
+			});
+		} else if !extend_selection && cursor.anchor.is_none() && vs_mode.cursor_beyond_eol() {
+			// No line below: float onto (or one deeper into) the virtual
+			// lines below the buffer end, keeping the goal column. The byte
+			// position parks at the buffer end; the virtual line count is
+			// installed when the event applies (see pending_virtual_lines).
+			let vlines = cursor_virtual_lines(vs_mode, &state.buffer, cursor);
+			state.pending_virtual_lines.push((cursor_id, vlines + 1));
+			events.push(Event::MoveCursor {
+				cursor_id,
+				old_position: cursor.position,
+				new_position: state.buffer.len(),
+				old_anchor: cursor.anchor,
+				new_anchor: None,
+				old_sticky_column: cursor.sticky_column,
+				new_sticky_column: Some(goal_visual_column),
+			});
+		}
+	}
+}
+
+/// Scroll up by one page, moving or extending the selection.
+///
+/// See [`handle_vertical_up`] for the `extend_selection` contract.
+fn handle_page_up(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	viewport_height: u16,
+	estimated_line_length: usize,
+	extend_selection: bool,
+) {
+	for (cursor_id, cursor) in cursors.iter() {
+		let lines_to_move = viewport_height.saturating_sub(1) as usize;
+		let (current_visual_column, _) =
+			calculate_visual_column(&mut state.buffer, cursor.position, estimated_line_length);
+		let goal_column = cursor.sticky_column.unwrap_or(current_visual_column);
+
+		let mut iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+		let mut new_pos = cursor.position;
+		for _ in 0..lines_to_move {
+			if let Some((line_start, line_content)) = iter.prev() {
+				let line_text = line_content.trim_end_matches('\n');
+				new_pos = line_start + byte_offset_at_visual_column(line_text, goal_column);
+			} else {
+				new_pos = 0;
+				break;
+			}
+		}
+
+		let new_anchor = if extend_selection {
+			Some(cursor.anchor.unwrap_or(cursor.position))
+		} else if cursor.deselect_on_move {
+			None
+		} else {
+			cursor.anchor
+		};
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: cursor.position,
+			new_position: new_pos,
+			old_anchor: cursor.anchor,
+			new_anchor,
+			old_sticky_column: cursor.sticky_column,
+			new_sticky_column: Some(goal_column),
+		});
+	}
+}
+
+/// Scroll down by one page, moving or extending the selection.
+///
+/// See [`handle_vertical_up`] for the `extend_selection` contract.
+fn handle_page_down(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	viewport_height: u16,
+	estimated_line_length: usize,
+	extend_selection: bool,
+) {
+	for (cursor_id, cursor) in cursors.iter() {
+		let lines_to_move = viewport_height.saturating_sub(1) as usize;
+		let (current_visual_column, _) =
+			calculate_visual_column(&mut state.buffer, cursor.position, estimated_line_length);
+		let goal_column = cursor.sticky_column.unwrap_or(current_visual_column);
+
+		let mut iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+		iter.next_line(); // consume current line
+
+		let mut new_pos = cursor.position;
+		for _ in 0..lines_to_move {
+			if let Some((line_start, line_content)) = iter.next_line() {
+				let line_text = line_content.trim_end_matches('\n');
+				new_pos = line_start + byte_offset_at_visual_column(line_text, goal_column);
+			} else {
+				new_pos = max_cursor_position(&state.buffer);
+				break;
+			}
+		}
+
+		let new_anchor = if extend_selection {
+			Some(cursor.anchor.unwrap_or(cursor.position))
+		} else if cursor.deselect_on_move {
+			None
+		} else {
+			cursor.anchor
+		};
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: cursor.position,
+			new_position: new_pos,
+			old_anchor: cursor.anchor,
+			new_anchor,
+			old_sticky_column: cursor.sticky_column,
+			new_sticky_column: Some(goal_column),
+		});
+	}
+}
+
+/// Delete using a cursor-relative boundary computed by `compute_range`.
+///
+/// If the cursor has an active selection, deletes that instead.  Used to
+/// consolidate the identical boilerplate across DeleteWord* variants.
+fn delete_by_boundary(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	compute_range: impl Fn(&Buffer, &Cursor) -> Option<Range<usize>>,
+) {
+	let deletions: Vec<_> = cursors
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			cursor
+				.selection_range()
+				.or_else(|| compute_range(&state.buffer, cursor))
+				.map(|range| (cursor_id, range))
+		})
+		.collect();
+	apply_deletions(state, deletions, events);
+}
+
+fn handle_delete_backward(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	tab_size: usize,
+	auto_close: bool,
+	estimated_line_length: usize,
+) {
+	// Sort cursors by position (reverse order) to avoid position shifts
+	let mut cursor_vec: Vec<_> = cursors.iter().collect();
+	cursor_vec.sort_by_key(|(_, c)| std::cmp::Reverse(c.position));
+
+	let vs_mode = state.buffer_settings.virtual_space;
+
+	// Collect all deletions first, checking for smart dedent and auto-pair deletion
+	let deletions: Vec<_> = cursor_vec
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			// Backspace in virtual space steps the cursor one column left
+			// without touching the buffer (there is nothing to delete yet).
+			// On a virtual line below the buffer end it stops at column 0
+			// rather than eating the last real line's characters.
+			if cursor_virtual_lines(vs_mode, &state.buffer, cursor) > 0 {
+				let col = cursor.sticky_column.unwrap_or(0);
+				if col > 0 {
+					events.push(Event::MoveCursor {
+						cursor_id: *cursor_id,
+						old_position: cursor.position,
+						new_position: cursor.position,
+						old_anchor: cursor.anchor,
+						new_anchor: None,
+						old_sticky_column: cursor.sticky_column,
+						new_sticky_column: Some(col - 1),
+					});
+				}
+				return None;
+			}
+			if cursor_virtual_columns(vs_mode, &state.buffer, cursor) > 0 {
+				events.push(Event::MoveCursor {
+					cursor_id: *cursor_id,
+					old_position: cursor.position,
+					new_position: cursor.position,
+					old_anchor: cursor.anchor,
+					new_anchor: None,
+					old_sticky_column: cursor.sticky_column,
+					new_sticky_column: cursor.sticky_column.map(|s| s - 1),
+				});
+				return None;
+			}
+			if let Some(range) = cursor.selection_range() {
+				Some((*cursor_id, range))
+			} else if cursor.position > 0 {
+				// Smart backspace: if cursor is after only whitespace indentation,
+				// dedent by one indent unit instead of deleting a single character.
+				// Deletes from just before the cursor (not from line start) so the
+				// cursor naturally ends up at the right position.
+				let iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+				let line_start = iter.current_position();
+				let prefix_len = cursor.position - line_start;
+
+				if prefix_len > 0 {
+					let prefix_bytes = state.buffer.slice_bytes(line_start..cursor.position);
+					let all_whitespace = prefix_bytes.iter().all(|&b| b == b' ' || b == b'\t');
+
+					if all_whitespace && !prefix_bytes.is_empty() {
+						let last_byte = *prefix_bytes.last().unwrap();
+						let chars_to_remove = if last_byte == b'\t' {
+							1
+						} else {
+							// Count trailing spaces and remove up to tab_size
+							let trailing_spaces = prefix_bytes.iter().rev().take_while(|&&b| b == b' ').count();
+							trailing_spaces.min(tab_size)
+						};
+						if chars_to_remove > 0 {
+							return Some((*cursor_id, cursor.position - chars_to_remove..cursor.position));
+						}
+					}
+				}
+
+				// Normal backspace: delete one character
+				// Use prev_char_boundary to delete one code point at a time
+				// This allows "layer-by-layer" deletion of Thai combining marks
+				// In CRLF files, this also ensures we delete \r\n as a unit
+				let delete_from = state.buffer.prev_char_boundary(cursor.position);
+				let delete_from = adjust_position_for_crlf_left(&state.buffer, delete_from);
+
+				// Check for auto-pair deletion when auto_close is enabled
+				// Note: Auto-pairs are ASCII-only, so we can safely check single bytes
+				if auto_close && cursor.position < state.buffer.len() {
+					let char_before = state.buffer.slice_bytes(delete_from..cursor.position).first().copied();
+					let char_after =
+						state.buffer.slice_bytes(cursor.position..cursor.position + 1).first().copied();
+
+					// Check if we're between matching brackets/quotes
+					let is_matching_pair = matches!(
+						(char_before, char_after),
+						(Some(b'('), Some(b')'))
+							| (Some(b'['), Some(b']'))
+							| (Some(b'{'), Some(b'}'))
+							| (Some(b'"'), Some(b'"'))
+							| (Some(b'\''), Some(b'\''))
+							| (Some(b'`'), Some(b'`'))
+					);
+
+					if is_matching_pair {
+						// Delete both opening and closing characters
+						Some((*cursor_id, delete_from..cursor.position + 1))
+					} else {
+						Some((*cursor_id, delete_from..cursor.position))
+					}
+				} else {
+					Some((*cursor_id, delete_from..cursor.position))
+				}
+			} else {
+				None
+			}
+		})
+		.collect();
+
+	// Get text and create delete events
+	apply_deletions(state, deletions, events);
+}
+
+/// `Action::DeleteForward` — delete the selection, or the grapheme to the
+/// right of each cursor when there is none.
+fn handle_delete_forward(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	// Sort cursors by position (reverse order) to avoid position shifts
+	let mut cursor_vec: Vec<_> = cursors.iter().collect();
+	cursor_vec.sort_by_key(|(_, c)| std::cmp::Reverse(c.position));
+
+	let buffer_len = state.buffer.len();
+
+	let deletions: Vec<_> = cursor_vec
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			if let Some(range) = cursor.selection_range() {
+				Some((*cursor_id, range))
+			} else if cursor.position < buffer_len {
+				// Use next_position_for_crlf to properly handle multi-byte UTF-8
+				// characters; in CRLF files this deletes \r\n as a unit.
+				let delete_to = next_position_for_crlf(&state.buffer, cursor.position, buffer_len);
+				Some((*cursor_id, cursor.position..delete_to))
+			} else {
+				None
+			}
+		})
+		.collect();
+
+	apply_deletions(state, deletions, events);
+}
+
+/// `Action::DeleteLine` — delete the whole line (including its newline)
+/// under each cursor.
+fn handle_delete_line(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+) {
+	let deletions: Vec<_> = cursors
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			let mut iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+			let line_start = iter.current_position();
+			iter.next_line().map(|(_start, content)| {
+				let line_end = line_start + content.len();
+				(cursor_id, line_start..line_end)
+			})
+		})
+		.collect();
+
+	apply_deletions(state, deletions, events);
+}
+
+/// `Action::DeleteToLineEnd` — delete from each cursor to the end of its
+/// line (Ctrl+K). When the cursor already sits at the line content end,
+/// delete the trailing newline instead.
+fn handle_delete_to_line_end(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+) {
+	let deletions: Vec<_> = cursors
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			let mut iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+			let line_start = iter.current_position();
+			iter.next_line().map(|(_start, content)| {
+				let line_end = line_start + content_len_without_line_ending(&content);
+				if cursor.position < line_end {
+					Some((cursor_id, cursor.position..line_end))
+				} else {
+					// Cursor is at the end of the line content: delete the newline.
+					let full_line_end = line_start + content.len();
+					if cursor.position < full_line_end {
+						Some((cursor_id, cursor.position..full_line_end))
+					} else {
+						None
+					}
+				}
+			})?
+		})
+		.collect();
+
+	apply_deletions(state, deletions, events);
+}
+
+/// `Action::DeleteToLineStart` — delete from the start of each cursor's
+/// line up to the cursor (Ctrl+U).
+fn handle_delete_to_line_start(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+) {
+	let deletions: Vec<_> = cursors
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			let iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+			let line_start = iter.current_position();
+			(cursor.position > line_start).then_some((cursor_id, line_start..cursor.position))
+		})
+		.collect();
+
+	apply_deletions(state, deletions, events);
+}
+
+/// `Action::TransposeChars` — swap the character before each cursor with the
+/// one at it (Emacs C-t).
+fn handle_transpose_chars(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	// Collect cursor positions first to avoid borrow issues.
+	let cursor_positions: Vec<_> = cursors.iter().map(|(id, c)| (id, c.position)).collect();
+
+	for (cursor_id, pos) in cursor_positions {
+		// Need at least 2 characters: one before and one at the cursor.
+		if pos > 0 && pos < state.buffer.len() {
+			let text = state.get_text_range(pos - 1, pos + 1);
+			let chars: Vec<char> = text.chars().collect();
+			if chars.len() >= 2 {
+				events.push(Event::Delete { range: (pos - 1)..(pos + 1), deleted_text: text, cursor_id });
+				let swapped = format!("{}{}", chars[1], chars[0]);
+				events.push(Event::Insert { position: pos - 1, text: swapped, cursor_id });
+			}
+		}
+	}
+}
+
+/// `Action::OpenLine` — insert a newline at each cursor without advancing it
+/// (Emacs C-o: "open a blank line after the cursor"). The follow-up
+/// `MoveCursor` cancels the advance `apply_insert` would otherwise make,
+/// which is what distinguishes OpenLine from Enter.
+fn handle_open_line(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	let line_ending = state.buffer.line_ending().as_str();
+	let len = line_ending.len();
+	for (cursor_id, cursor) in cursors.iter() {
+		events.push(Event::Insert {
+			position: cursor.position,
+			text: line_ending.to_string(),
+			cursor_id,
+		});
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: cursor.position + len,
+			new_position: cursor.position,
+			old_anchor: cursor.anchor,
+			new_anchor: cursor.anchor,
+			old_sticky_column: cursor.sticky_column,
+			new_sticky_column: cursor.sticky_column,
+		});
+	}
+}
+
+/// `Action::RemoveSecondaryCursors` — drop every cursor except the original
+/// (lowest id) and clear all anchors, cancelling Emacs mark mode.
+fn remove_secondary_cursors(cursors: &Cursors, events: &mut Vec<Event>) {
+	let first_id = cursors
+		.iter()
+		.map(|(id, _)| id)
+		.min_by_key(|id| id.0)
+		.expect("Should have at least one cursor");
+
+	for (cursor_id, cursor) in cursors.iter() {
+		if cursor_id != first_id {
+			events.push(Event::RemoveCursor {
+				cursor_id,
+				position: cursor.position,
+				anchor: cursor.anchor,
+			});
+		}
+		// Clear the anchor (and reset deselect_on_move) for every cursor.
+		events.push(Event::ClearAnchor { cursor_id });
+	}
+}
+
+/// `Action::SelectWord` — select the word each cursor is in or adjacent to.
+fn select_word(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	for (cursor_id, cursor) in cursors.iter() {
+		// Find the start of the current word, then its end from that start
+		// (not from the cursor) so the whole word is selected.
+		let word_start = find_word_start(&state.buffer, cursor.position);
+		let word_end = find_word_end(&state.buffer, word_start);
+
+		if word_start < word_end {
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				cursor.position,
+				word_end,
+				cursor.anchor,
+				Some(word_start),
+				cursor.sticky_column,
+			);
+		}
+	}
+}
+
+/// `Action::SelectLine` — select the entire line (including its newline)
+/// under each cursor.
+fn select_line(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+) {
+	for (cursor_id, cursor) in cursors.iter() {
+		let mut iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+		if let Some((line_start, line_content)) = iter.next_line() {
+			let line_end = line_start + line_content.len();
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				cursor.position,
+				line_end,
+				cursor.anchor,
+				Some(line_start),
+				cursor.sticky_column,
+			);
+		}
+	}
+}
+
+/// `Action::ExpandSelection` — grow each cursor's selection by a word. With an
+/// existing selection, extend one word to the right; otherwise select from the
+/// cursor to the end of the current (or next) word.
+fn expand_selection(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	for (cursor_id, cursor) in cursors.iter() {
+		if let Some(anchor) = cursor.anchor {
+			// Already selecting — expand by one word to the right.
+			let next_word_start = find_word_start_right(&state.buffer, cursor.position);
+			let new_end = find_word_end(&state.buffer, next_word_start);
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				cursor.position,
+				new_end,
+				cursor.anchor,
+				Some(anchor),
+				cursor.sticky_column,
+			);
+		} else {
+			// No selection — select from the cursor to the end of the word.
+			let word_start = find_word_start(&state.buffer, cursor.position);
+			let word_end = find_word_end(&state.buffer, cursor.position);
+
+			// On a non-word char, or at a word end, jump to the next word's end.
+			let (final_start, final_end) = if word_start == word_end || cursor.position == word_end {
+				let next_start = find_word_start_right(&state.buffer, cursor.position);
+				let next_end = find_word_end(&state.buffer, next_start);
+				(cursor.position, next_end)
+			} else {
+				(cursor.position, word_end)
+			};
+
+			add_move_cursor_event(
+				events,
+				cursor_id,
+				cursor.position,
+				final_end,
+				cursor.anchor,
+				Some(final_start),
+				cursor.sticky_column,
+			);
+		}
+	}
+}
+
+fn handle_toggle_case(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	// Toggle case of char under cursor (vim ~ behavior) and advance cursor
+	for (cursor_id, cursor) in cursors.iter() {
+		let pos = cursor.position;
+		let buf_len = state.buffer.len();
+		if pos >= buf_len {
+			continue;
+		}
+		let next_pos = state.buffer.next_grapheme_boundary(pos);
+		if next_pos <= pos || next_pos > buf_len {
+			continue;
+		}
+		let text = state.get_text_range(pos, next_pos);
+		if text.is_empty() || text == "\n" || text == "\r\n" {
+			continue;
+		}
+		let toggled: String = text
+			.chars()
+			.map(|c| {
+				if c.is_uppercase() { c.to_lowercase().to_string() } else { c.to_uppercase().to_string() }
+			})
+			.collect();
+		if toggled != text {
+			events.push(Event::Delete { range: pos..next_pos, deleted_text: text, cursor_id });
+			events.push(Event::Insert { position: pos, text: toggled, cursor_id });
+		}
+		// Advance cursor to next character
+		let advance_pos = next_pos.min(buf_len);
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: pos,
+			new_position: advance_pos,
+			old_anchor: cursor.anchor,
+			new_anchor: None,
+			old_sticky_column: cursor.sticky_column,
+			new_sticky_column: None,
+		});
+	}
+}
+
+fn handle_sort_lines(state: &mut EditorState, cursors: &Cursors, events: &mut Vec<Event>) {
+	// Sort selected lines alphabetically
+	// Process cursors in reverse order to avoid position shifts
+	let line_ending = state.buffer.line_ending().as_str();
+	let mut selections: Vec<_> = cursors
+		.iter()
+		.filter_map(|(cursor_id, cursor)| cursor.selection_range().map(|range| (cursor_id, range)))
+		.collect();
+	selections.sort_by_key(|(_, range)| std::cmp::Reverse(range.start));
+
+	for (cursor_id, range) in selections {
+		let text = state.get_text_range(range.start, range.end);
+		// Split into lines, preserving the original line ending style
+		let mut lines: Vec<&str> = text.lines().collect();
+		// Check if original text ends with a newline
+		let ends_with_newline = text.ends_with('\n') || text.ends_with("\r\n");
+
+		if lines.len() > 1 {
+			lines.sort();
+			let mut sorted_text = lines.join(line_ending);
+			if ends_with_newline {
+				sorted_text.push_str(line_ending);
+			}
+
+			if sorted_text != text {
+				events.push(Event::Delete { range: range.clone(), deleted_text: text, cursor_id });
+				events.push(Event::Insert { position: range.start, text: sorted_text, cursor_id });
+			}
+		}
+	}
+}
+
+fn handle_duplicate_line(
+	state: &mut EditorState,
+	cursors: &Cursors,
+	events: &mut Vec<Event>,
+	estimated_line_length: usize,
+) {
+	// Duplicate the current line (or selected lines) below
+	// Process cursors in reverse order to avoid position shifts
+	let mut cursor_data: Vec<_> = cursors
+		.iter()
+		.filter_map(|(cursor_id, cursor)| {
+			if let Some(range) = cursor.selection_range() {
+				// Has selection: duplicate selected lines
+				let start_line = state.buffer.get_line_number(range.start);
+				let end_line = state.buffer.get_line_number(range.end.saturating_sub(1).max(range.start));
+				let line_start = state.buffer.line_start_offset(start_line)?;
+				// Get end of last line
+				let mut iter = state
+					.buffer
+					.line_iterator(state.buffer.line_start_offset(end_line)?, estimated_line_length);
+				let end_line_start = iter.current_position();
+				iter.next_line().map(|(_, content)| {
+					let line_end = end_line_start + content.len();
+					(cursor_id, line_start, line_end)
+				})
+			} else {
+				// No selection: duplicate current line
+				let mut iter = state.buffer.line_iterator(cursor.position, estimated_line_length);
+				let line_start = iter.current_position();
+				iter.next_line().map(|(_, content)| {
+					let line_end = line_start + content.len();
+					(cursor_id, line_start, line_end)
+				})
+			}
+		})
+		.collect();
+	cursor_data.sort_by_key(|(_, start, _)| std::cmp::Reverse(*start));
+
+	for (cursor_id, line_start, line_end) in cursor_data {
+		let line_text = state.get_text_range(line_start, line_end);
+		let line_ending = state.buffer.line_ending().as_str();
+		// If the line doesn't end with a newline, prepend one
+		let has_trailing_newline = line_text.ends_with('\n') || line_text.ends_with("\r\n");
+		let insert_text =
+			if has_trailing_newline { line_text } else { format!("{}{}", line_ending, line_text) };
+		let insert_len = insert_text.len();
+		events.push(Event::Insert { position: line_end, text: insert_text, cursor_id });
+
+		// Move cursor to start of the newly duplicated line.
+		// After the Insert, apply_insert places cursor at line_end + insert_len.
+		// The new line starts at line_end (if original had trailing newline)
+		// or line_end + line_ending.len() (if we prepended a newline).
+		let new_line_start = if has_trailing_newline { line_end } else { line_end + line_ending.len() };
+		let cursor = cursors.get(cursor_id);
+		let old_sticky = cursor.and_then(|c| c.sticky_column);
+		events.push(Event::MoveCursor {
+			cursor_id,
+			old_position: line_end + insert_len,
+			new_position: new_line_start,
+			old_anchor: None,
+			new_anchor: None,
+			old_sticky_column: old_sticky,
+			new_sticky_column: None,
+		});
+	}
+}
+
+/// Convert an action into a sequence of events that can be applied to the editor state
+///
+/// # Parameters
+/// * `state` - The current editor state
+/// * `action` - The action to convert
+/// * `tab_size` - Number of spaces per tab
+/// * `auto_indent` - Whether auto-indent is enabled
+/// * `auto_close` - Whether auto-close brackets/quotes is enabled
+/// * `auto_surround` - Whether to surround selections with matching pairs
+/// * `estimated_line_length` - Estimated bytes per line for large files
+/// * `viewport_height` - Height of the viewport in lines (for PageUp/PageDown)
+///
+/// # Returns
+/// * `Some(Vec<Event>)` - Events to apply for this action
+/// * `None` - If the action doesn't generate events (like Quit, Save, etc.)
+#[allow(clippy::too_many_arguments)]
+pub fn action_to_events(
+	state: &mut EditorState,
+	cursors: &mut Cursors,
+	action: Action,
+	tab_size: usize,
+	auto_indent: bool,
+	auto_close: bool,
+	auto_surround: bool,
+	estimated_line_length: usize,
+	viewport_height: u16,
+) -> Option<Vec<Event>> {
+	// For virtual buffers with hidden cursors, ignore movement and editing actions
+	if !state.show_cursors && action.is_movement_or_editing() {
+		return None;
+	}
+
+	let mut events = Vec::new();
+
+	// Entries queued by a previous action whose events never applied must
+	// not leak into this action's cursor moves.
+	state.pending_virtual_lines.clear();
+
+	// Convert block selection to multi-cursor before processing editing actions
+	// This allows normal multi-cursor logic to handle typing, deletion, etc.
+	let mut block_pads: Vec<(CursorId, usize)> = Vec::new();
+	if action.is_editing() {
+		let (cursor_events, pads) = convert_block_selection_to_cursors(state, cursors);
+		for event in &cursor_events {
+			state.apply(cursors, event);
+		}
+		events.extend(cursor_events);
+		block_pads = pads;
+	}
+
+	match action {
+		// Character input - insert at each cursor
+		Action::InsertChar(ch) => {
+			insert_char_events(
+				state,
+				cursors,
+				&mut events,
+				ch,
+				tab_size,
+				auto_indent,
+				auto_close,
+				auto_surround,
+				&block_pads,
+			);
+		}
+
+		Action::InsertNewline => {
+			handle_insert_newline(
+				state,
+				cursors,
+				&mut events,
+				tab_size,
+				auto_indent,
+				auto_close,
+				estimated_line_length,
+			);
+		}
+
+		Action::DedentSelection => {
+			handle_dedent_selection(state, cursors, &mut events, tab_size, estimated_line_length);
+		}
+
+		Action::InsertTab => {
+			handle_insert_tab(state, cursors, &mut events, tab_size, estimated_line_length);
+		}
+
+		// Basic movement - move each cursor
+		// Uses grapheme cluster boundaries for proper handling of combining characters
+		Action::MoveLeft => {
+			// Collapse selection to LEFT edge when deselect_on_move (issue #1566).
+			let vs_mode = state.buffer_settings.virtual_space;
+			move_each_cursor_with_sticky(cursors, &mut events, |c| {
+				if c.deselect_on_move {
+					if let Some(range) = c.selection_range() {
+						return (range.start, None);
+					}
+				}
+				// On a virtual line below the buffer end, Left moves along
+				// that line's columns and stops at column 0 (leaving the
+				// virtual line vertically is a click/Up away).
+				if cursor_virtual_lines(vs_mode, &state.buffer, c) > 0 {
+					let col = c.sticky_column.unwrap_or(0);
+					return (c.position, Some(col.saturating_sub(1)));
+				}
+				// In virtual space, step back one column before bytes move.
+				if cursor_virtual_columns(vs_mode, &state.buffer, c) > 0 {
+					return (c.position, c.sticky_column.map(|s| s - 1));
+				}
+				let p = state.buffer.prev_grapheme_boundary(c.position);
+				(adjust_position_for_crlf_left(&state.buffer, p), None)
+			});
+		}
+
+		Action::MoveRight => {
+			// Collapse selection to RIGHT edge when deselect_on_move (issue #1566).
+			let max_pos = max_cursor_position(&state.buffer);
+			let vs_mode = state.buffer_settings.virtual_space;
+			move_each_cursor_with_sticky(cursors, &mut events, |c| {
+				if c.deselect_on_move {
+					if let Some(range) = c.selection_range() {
+						return (range.end.min(max_pos), None);
+					}
+				}
+				// On a virtual line below the buffer end, Right advances the
+				// column (measured from the empty virtual line's start).
+				if cursor_virtual_lines(vs_mode, &state.buffer, c) > 0 {
+					return (c.position, Some(c.sticky_column.unwrap_or(0) + 1));
+				}
+				// In virtual space, Right at a line's content end stays on
+				// the line and advances the goal column past the width.
+				if vs_mode.cursor_beyond_eol()
+					&& c.anchor.is_none()
+					&& c.selection_mode != SelectionMode::Block
+				{
+					if let Some(width) = line_width_at_content_end(&state.buffer, c.position) {
+						let vcols = c.sticky_column.map_or(0, |s| s.saturating_sub(width));
+						return (c.position, Some(width + vcols + 1));
+					}
+				}
+				(next_position_for_crlf(&state.buffer, c.position, max_pos), None)
+			});
+		}
+
+		Action::MoveUp => {
+			handle_vertical_up(state, cursors, &mut events, estimated_line_length, false, false);
+		}
+
+		Action::MoveDown => {
+			handle_vertical_down(state, cursors, &mut events, estimated_line_length, false, false);
+		}
+
+		// Vi NORMAL-mode `k`/`j`: like MoveUp/MoveDown but the caret is clamped
+		// to the destination line's last character (it may never rest past it),
+		// while the goal column is still remembered for the next vertical move.
+		Action::ViMoveUp => {
+			handle_vertical_up(state, cursors, &mut events, estimated_line_length, false, true);
+		}
+
+		Action::ViMoveDown => {
+			handle_vertical_down(state, cursors, &mut events, estimated_line_length, false, true);
+		}
+
+		Action::MoveLineStart => {
+			move_each_cursor(cursors, &mut events, |c| {
+				state
+					.buffer
+					.line_iterator(c.position, estimated_line_length)
+					.next_line()
+					.map(|(ls, _)| ls)
+					.unwrap_or(c.position)
+			});
+		}
+
+		Action::MoveLineEnd => {
+			// Cursor lands at the first byte of line ending (LF: on \n; CRLF: on \r).
+			move_each_cursor(cursors, &mut events, |c| {
+				state
+					.buffer
+					.line_iterator(c.position, estimated_line_length)
+					.next_line()
+					.map(|(ls, lc)| ls + content_len_without_line_ending(&lc))
+					.unwrap_or(c.position)
+			});
+		}
+
+		Action::MoveWordLeft => {
+			move_each_cursor(cursors, &mut events, |c| find_word_start_left(&state.buffer, c.position));
+		}
+
+		Action::MoveWordRight => {
+			move_each_cursor(cursors, &mut events, |c| find_word_start_right(&state.buffer, c.position));
+		}
+
+		Action::MoveWordEnd => {
+			move_each_cursor(cursors, &mut events, |c| find_word_end_right(&state.buffer, c.position));
+		}
+
+		Action::ViMoveWordEnd => {
+			move_each_cursor(cursors, &mut events, |c| find_vi_word_end(&state.buffer, c.position));
+		}
+
+		Action::MoveLeftInLine => {
+			move_each_cursor(cursors, &mut events, |c| {
+				let new_pos = state.buffer.prev_grapheme_boundary(c.position);
+				let new_pos = adjust_position_for_crlf_left(&state.buffer, new_pos);
+				let mut iter = state.buffer.line_iterator(c.position, estimated_line_length);
+				let line_start = iter.next_line().map(|(ls, _)| ls).unwrap_or(0);
+				new_pos.max(line_start)
+			});
+		}
+
+		Action::MoveRightInLine => {
+			let max_pos = max_cursor_position(&state.buffer);
+			move_each_cursor(cursors, &mut events, |c| {
+				let new_pos = next_position_for_crlf(&state.buffer, c.position, max_pos);
+				let mut iter = state.buffer.line_iterator(c.position, estimated_line_length);
+				let line_last_char = iter
+					.next_line()
+					.map(|(ls, lc)| {
+						let content_len = content_len_without_line_ending(&lc);
+						if content_len > 0 { ls + content_len - 1 } else { ls }
+					})
+					.unwrap_or(max_pos);
+				new_pos.min(line_last_char)
+			});
+		}
+
+		Action::MoveDocumentStart => {
+			move_each_cursor(cursors, &mut events, |_| 0);
+		}
+
+		Action::MoveDocumentEnd => {
+			let max_pos = max_cursor_position(&state.buffer);
+			move_each_cursor(cursors, &mut events, |_| max_pos);
+		}
+
+		Action::MovePageUp => {
+			handle_page_up(state, cursors, &mut events, viewport_height, estimated_line_length, false);
+		}
+
+		Action::MovePageDown => {
+			handle_page_down(state, cursors, &mut events, viewport_height, estimated_line_length, false);
+		}
+
+		// Selection movement - same as regular movement but keeps anchor
+		// Uses grapheme cluster boundaries for proper handling of combining characters
+		Action::SelectLeft => {
+			select_each_cursor(cursors, &mut events, |c| {
+				let p = state.buffer.prev_grapheme_boundary(c.position);
+				adjust_position_for_crlf_left(&state.buffer, p)
+			});
+		}
+
+		Action::SelectRight => {
+			let max_pos = max_cursor_position(&state.buffer);
+			select_each_cursor(cursors, &mut events, |c| {
+				next_position_for_crlf(&state.buffer, c.position, max_pos)
+			});
+		}
+
+		Action::SelectUp => {
+			handle_vertical_up(state, cursors, &mut events, estimated_line_length, true, false);
+		}
+
+		Action::SelectDown => {
+			handle_vertical_down(state, cursors, &mut events, estimated_line_length, true, false);
+		}
+
+		Action::SelectToParagraphUp => {
+			select_each_cursor(cursors, &mut events, |c| {
+				find_paragraph_up(&mut state.buffer, c.position, estimated_line_length)
+			});
+		}
+
+		Action::SelectToParagraphDown => {
+			select_each_cursor(cursors, &mut events, |c| {
+				paragraph_down_selection_position(&mut state.buffer, c.position, estimated_line_length)
+			});
+		}
+
+		Action::MoveToParagraphUp => {
+			move_each_cursor(cursors, &mut events, |c| {
+				find_paragraph_up(&mut state.buffer, c.position, estimated_line_length)
+			});
+		}
+
+		Action::MoveToParagraphDown => {
+			move_each_cursor(cursors, &mut events, |c| {
+				find_paragraph_down(&mut state.buffer, c.position, estimated_line_length)
+			});
+		}
+
+		Action::SelectLineStart => {
+			select_each_cursor(cursors, &mut events, |c| {
+				state
+					.buffer
+					.line_iterator(c.position, estimated_line_length)
+					.next_line()
+					.map(|(ls, _)| ls)
+					.unwrap_or(c.position)
+			});
+		}
+
+		Action::SelectLineEnd => {
+			// Cursor lands at the first byte of line ending (LF: on \n; CRLF: on \r).
+			select_each_cursor(cursors, &mut events, |c| {
+				state
+					.buffer
+					.line_iterator(c.position, estimated_line_length)
+					.next_line()
+					.map(|(ls, lc)| ls + content_len_without_line_ending(&lc))
+					.unwrap_or(c.position)
+			});
+		}
+
+		Action::SelectWordLeft => {
+			select_each_cursor(cursors, &mut events, |c| find_word_start_left(&state.buffer, c.position));
+		}
+
+		Action::SelectWordRight => {
+			select_each_cursor(cursors, &mut events, |c| {
+				find_word_start_right(&state.buffer, c.position)
+			});
+		}
+
+		Action::SelectWordEnd => {
+			select_each_cursor(cursors, &mut events, |c| find_word_end_right(&state.buffer, c.position));
+		}
+
+		Action::ViSelectWordEnd => {
+			select_each_cursor(cursors, &mut events, |c| find_vi_word_end(&state.buffer, c.position));
+		}
+
+		Action::SelectDocumentStart => {
+			select_each_cursor(cursors, &mut events, |_| 0);
+		}
+
+		Action::SelectDocumentEnd => {
+			let max_pos = max_cursor_position(&state.buffer);
+			select_each_cursor(cursors, &mut events, |_| max_pos);
+		}
+
+		Action::SelectPageUp => {
+			handle_page_up(state, cursors, &mut events, viewport_height, estimated_line_length, true);
+		}
+
+		Action::SelectPageDown => {
+			handle_page_down(state, cursors, &mut events, viewport_height, estimated_line_length, true);
+		}
+
+		Action::SelectAll => {
+			// Select entire buffer for primary cursor only
+			// Note: RemoveSecondaryCursors is handled in handle_key, not as an event
+			let primary_id = cursors.primary_id();
+			let primary_cursor = cursors.primary();
+			let max_pos = max_cursor_position(&state.buffer);
+			add_move_cursor_event(
+				&mut events,
+				primary_id,
+				primary_cursor.position,
+				max_pos,
+				primary_cursor.anchor,
+				Some(0),
+				primary_cursor.sticky_column,
+			);
+		}
+
+		Action::SelectWord => {
+			select_word(state, cursors, &mut events);
+		}
+
+		Action::DeleteBackward => {
+			handle_delete_backward(
+				state,
+				cursors,
+				&mut events,
+				tab_size,
+				auto_close,
+				estimated_line_length,
+			);
+		}
+
+		Action::DeleteForward => {
+			handle_delete_forward(state, cursors, &mut events);
+		}
+
+		Action::DeleteWordBackward => {
+			delete_by_boundary(state, cursors, &mut events, |buf, c| {
+				let start = find_word_start_left(buf, c.position);
+				(start < c.position).then_some(start..c.position)
+			});
+		}
+
+		Action::DeleteWordForward => {
+			delete_by_boundary(state, cursors, &mut events, |buf, c| {
+				let end = find_word_start_right(buf, c.position);
+				(c.position < end).then_some(c.position..end)
+			});
+		}
+
+		Action::DeleteViWordEnd => {
+			// +1 because vim 'de' is inclusive of the last character
+			delete_by_boundary(state, cursors, &mut events, |buf, c| {
+				let end = (find_vi_word_end(buf, c.position) + 1).min(buf.len());
+				(c.position < end).then_some(c.position..end)
+			});
+		}
+
+		Action::DeleteLine => {
+			handle_delete_line(state, cursors, &mut events, estimated_line_length);
+		}
+
+		Action::DeleteToLineEnd => {
+			handle_delete_to_line_end(state, cursors, &mut events, estimated_line_length);
+		}
+
+		Action::DeleteToLineStart => {
+			handle_delete_to_line_start(state, cursors, &mut events, estimated_line_length);
+		}
+
+		Action::MoveLineUp => {
+			move_lines(state, cursors, &mut events, LineMoveDirection::Up, estimated_line_length);
+		}
+
+		Action::MoveLineDown => {
+			move_lines(state, cursors, &mut events, LineMoveDirection::Down, estimated_line_length);
+		}
+
+		Action::TransposeChars => {
+			handle_transpose_chars(state, cursors, &mut events);
+		}
+
+		Action::ToUpperCase => {
+			transform_case(state, cursors, &mut events, |s| s.to_uppercase());
+		}
+
+		Action::ToLowerCase => {
+			transform_case(state, cursors, &mut events, |s| s.to_lowercase());
+		}
+
+		Action::ToggleCase => {
+			handle_toggle_case(state, cursors, &mut events);
+		}
+
+		Action::SortLines => {
+			handle_sort_lines(state, cursors, &mut events);
+		}
+
+		Action::OpenLine => {
+			handle_open_line(state, cursors, &mut events);
+		}
+
+		Action::DuplicateLine => {
+			handle_duplicate_line(state, cursors, &mut events, estimated_line_length);
+		}
+
+		Action::Recenter => {
+			// Scroll so that the cursor is centered in the view
+			// This is handled specially - we emit a Recenter event
+			events.push(Event::Recenter);
+		}
+
+		Action::SetMark => {
+			// Set the selection anchor at the current cursor position
+			// This starts a selection that extends as the cursor moves
+			for (cursor_id, cursor) in cursors.iter() {
+				events.push(Event::SetAnchor { cursor_id, position: cursor.position });
+			}
+		}
+
+		Action::CancelMark => {
+			// Cancel the selection anchor at the current cursor position
+			// This removes the ability to extend a selection on move
+			for (cursor_id, _) in cursors.iter() {
+				events.push(Event::CancelAnchor { cursor_id });
+			}
+		}
+
+		Action::ClearMark => {
+			// Clear the anchor and remove any existing selection
+			for (cursor_id, _) in cursors.iter() {
+				events.push(Event::ClearAnchor { cursor_id });
+			}
+		}
+
+		Action::RemoveSecondaryCursors => {
+			remove_secondary_cursors(cursors, &mut events);
+		}
+
+		Action::ScrollUp => {
+			events.push(Event::Scroll { line_offset: -1 });
+		}
+
+		Action::ScrollDown => {
+			events.push(Event::Scroll { line_offset: 1 });
+		}
+
+		// Actions that don't generate events
+		Action::Quit
+		| Action::ForceQuit
+		| Action::Detach
+		| Action::Save
+		| Action::SaveAs
+		| Action::Open
+		| Action::SwitchProject
+		| Action::New
+		| Action::Close
+		| Action::CloseTab
+		| Action::GotoLine
+		| Action::ScanLineIndex
+		| Action::NextBuffer
+		| Action::PrevBuffer
+		| Action::SwitchToPreviousTab
+		| Action::SwitchToTabByName
+		| Action::NavigateBack
+		| Action::NavigateForward
+		| Action::SplitHorizontal
+		| Action::SplitVertical
+		| Action::CloseSplit
+		| Action::NextSplit
+		| Action::PrevSplit
+		| Action::NextWindow
+		| Action::PrevWindow
+		| Action::Copy
+		| Action::CopyWithTheme(_)
+		| Action::CopyFilePath
+		| Action::CopyRelativeFilePath
+		| Action::Cut
+		| Action::Paste
+		| Action::YankWordForward
+		| Action::YankWordBackward
+		| Action::YankToLineEnd
+		| Action::YankToLineStart
+		| Action::YankViWordEnd
+		| Action::AddCursorNextMatch
+		| Action::AddCursorAbove
+		| Action::AddCursorBelow
+		| Action::AddCursorsToLineEnds
+		| Action::CommandPalette
+		| Action::QuickOpen
+		| Action::QuickOpenBuffers
+		| Action::QuickOpenFiles
+		| Action::OpenLiveGrep
+		| Action::ResumeLiveGrep
+		| Action::ToggleUtilityDock
+		| Action::OpenTerminalInDock
+		| Action::CycleLiveGrepProvider
+		| Action::ShowHelp
+		| Action::ToggleLineWrap
+		| Action::ToggleCurrentLineHighlight
+		| Action::ToggleOccurrenceHighlight
+		| Action::ToggleReadOnly
+		| Action::TogglePageView
+		| Action::SetPageWidth
+		| Action::IncreaseSplitSize
+		| Action::DecreaseSplitSize
+		| Action::ToggleMaximizeSplit
+		| Action::Undo
+		| Action::Redo
+		| Action::GoToMatchingBracket
+		| Action::JumpToNextError
+		| Action::JumpToPreviousError
+		| Action::ShowKeyboardShortcuts
+		| Action::ShowWarnings
+		| Action::ShowStatusLog
+		| Action::ShowLspStatus
+		| Action::ShowRemoteIndicatorMenu
+		| Action::ShowReadOnlyMenu
+		| Action::ClearWarnings
+		| Action::SmartHome
+		| Action::ToggleComment
+		| Action::DabbrevExpand
+		| Action::ToggleFold
+		| Action::SetBookmark(_)
+		| Action::JumpToBookmark(_)
+		| Action::ClearBookmark(_)
+		| Action::ListBookmarks
+		| Action::ToggleSearchCaseSensitive
+		| Action::ToggleSearchWholeWord
+		| Action::ToggleSearchRegex
+		| Action::ToggleSearchConfirmEach
+		| Action::StartMacroRecording
+		| Action::StopMacroRecording
+		| Action::PlayMacro(_)
+		| Action::ToggleMacroRecording(_)
+		| Action::ShowMacro(_)
+		| Action::ListMacros
+		| Action::PromptRecordMacro
+		| Action::PromptPlayMacro
+		| Action::PlayLastMacro
+		| Action::PromptSaveMacroToInit
+		| Action::PromptPromoteMacro
+		| Action::PromptSetBookmark
+		| Action::PromptJumpToBookmark
+		| Action::PromptConfirm
+		| Action::PromptConfirmWithText(_)
+		| Action::PromptCancel
+		| Action::PromptBackspace
+		| Action::PromptDelete
+		| Action::PromptMoveLeft
+		| Action::PromptMoveRight
+		| Action::PromptMoveStart
+		| Action::PromptMoveEnd
+		| Action::PromptSelectPrev
+		| Action::PromptSelectNext
+		| Action::PromptPageUp
+		| Action::PromptPageDown
+		| Action::PromptAcceptSuggestion
+		| Action::PromptMoveWordLeft
+		| Action::PromptMoveWordRight
+		| Action::PromptDeleteWordForward
+		| Action::PromptDeleteWordBackward
+		| Action::PromptDeleteToLineEnd
+		| Action::PromptCopy
+		| Action::PromptCut
+		| Action::PromptPaste
+		| Action::PromptMoveLeftSelecting
+		| Action::PromptMoveRightSelecting
+		| Action::PromptMoveHomeSelecting
+		| Action::PromptMoveEndSelecting
+		| Action::PromptSelectWordLeft
+		| Action::PromptSelectWordRight
+		| Action::PromptSelectAll
+		| Action::FileBrowserToggleHidden
+		| Action::FileBrowserToggleDetectEncoding
+		| Action::PopupSelectNext
+		| Action::PopupSelectPrev
+		| Action::PopupPageUp
+		| Action::PopupPageDown
+		| Action::PopupConfirm
+		| Action::PopupCancel
+		| Action::PopupFocus
+		| Action::CompletionAccept
+		| Action::CompletionDismiss
+		| Action::ToggleFileExplorer
+		| Action::ToggleFileExplorerSide
+		| Action::ToggleMenuBar
+		| Action::ToggleTabBar
+		| Action::ToggleStatusBar
+		| Action::TogglePromptLine
+		| Action::ToggleVerticalScrollbar
+		| Action::ToggleHorizontalScrollbar
+		| Action::FocusFileExplorer
+		| Action::FocusEditor
+		| Action::ToggleDockFocus
+		| Action::SetBackground
+		| Action::SetBackgroundBlend
+		| Action::FileExplorerUp
+		| Action::FileExplorerDown
+		| Action::FileExplorerPageUp
+		| Action::FileExplorerPageDown
+		| Action::FileExplorerExpand
+		| Action::FileExplorerCollapse
+		| Action::FileExplorerOpen
+		| Action::FileExplorerRefresh
+		| Action::FileExplorerNewFile
+		| Action::FileExplorerNewDirectory
+		| Action::FileExplorerDelete
+		| Action::FileExplorerRename
+		| Action::FileExplorerToggleHidden
+		| Action::FileExplorerToggleGitignored
+		| Action::FileExplorerSearchClear
+		| Action::FileExplorerSearchBackspace
+		| Action::FileExplorerCopy
+		| Action::FileExplorerCut
+		| Action::FileExplorerPaste
+		| Action::FileExplorerDuplicate
+		| Action::FileExplorerCopyFullPath
+		| Action::FileExplorerCopyRelativePath
+		| Action::FileExplorerExtendSelectionUp
+		| Action::FileExplorerExtendSelectionDown
+		| Action::FileExplorerToggleSelect
+		| Action::FileExplorerSelectAll
+		| Action::LspCompletion
+		| Action::LspGotoDefinition
+		| Action::LspReferences
+		| Action::LspImplementation
+		| Action::LspRename
+		| Action::LspHover
+		| Action::LspSignatureHelp
+		| Action::LspCodeActions
+		| Action::LspRestart
+		| Action::LspStop
+		| Action::LspToggleForBuffer
+		| Action::ToggleInlayHints
+		| Action::ToggleMouseHover
+		| Action::ToggleLineNumbers
+		| Action::ToggleLineNumbersCurrentBuffer
+		| Action::ToggleLineWrapCurrentBuffer
+		| Action::ToggleVirtualSpaceCurrentBuffer
+		| Action::TriggerWaveAnimation
+		| Action::ToggleScrollSync
+		| Action::ToggleMouseCapture
+		| Action::DumpConfig
+		| Action::RedrawScreen
+		| Action::Search
+		| Action::FindInSelection
+		| Action::FindNext
+		| Action::FindPrevious
+		| Action::FindSelectionNext
+		| Action::FindSelectionPrevious
+		| Action::ClearSearch
+		| Action::Replace
+		| Action::QueryReplace
+		| Action::MenuActivate
+		| Action::MenuClose
+		| Action::MenuLeft
+		| Action::MenuRight
+		| Action::MenuUp
+		| Action::MenuDown
+		| Action::MenuExecute
+		| Action::MenuOpen(_)
+		| Action::SwitchKeybindingMap(_)
+		| Action::PluginAction(_)
+		| Action::None
+		| Action::ScrollTabsLeft
+		| Action::ScrollTabsRight
+		| Action::InspectThemeAtCursor
+		| Action::SelectTheme
+		| Action::SelectKeybindingMap
+		| Action::SelectCursorStyle
+		| Action::SelectLocale
+		| Action::Revert
+		| Action::ToggleAutoRevert
+		| Action::FormatBuffer
+		| Action::TrimTrailingWhitespace
+		| Action::EnsureFinalNewline
+		| Action::OpenTerminal
+		| Action::OpenTerminalRight
+		| Action::OpenTerminalBelow
+		| Action::CloseTerminal
+		| Action::FocusTerminal
+		| Action::TerminalEscape
+		| Action::ToggleKeyboardCapture
+		| Action::TerminalPaste
+		| Action::SendSelectionToTerminal
+		| Action::OpenSettings
+		| Action::CloseSettings
+		| Action::SettingsSave
+		| Action::SettingsReset
+		| Action::SettingsToggleFocus
+		| Action::SettingsActivate
+		| Action::SettingsSearch
+		| Action::SettingsHelp
+		| Action::SettingsIncrement
+		| Action::SettingsDecrement
+		| Action::SettingsInherit
+		| Action::SetTabSize
+		| Action::SetLineEnding
+		| Action::SetEncoding
+		| Action::ReloadWithEncoding
+		| Action::SetLanguage
+		| Action::ToggleIndentationStyle
+		| Action::ToggleTabIndicators
+		| Action::ToggleWhitespaceIndicators
+		| Action::ToggleDebugHighlights
+		| Action::ResetBufferSettings
+		| Action::ShellCommand
+		| Action::ShellCommandReplace
+		| Action::CalibrateInput
+		| Action::EventDebug
+		| Action::SuspendProcess
+		| Action::LoadPluginFromBuffer
+		| Action::InitReload
+		| Action::InitEdit
+		| Action::InitCheck
+		| Action::OpenKeybindingEditor
+		| Action::AddRuler
+		| Action::RemoveRuler
+		| Action::CompositeNextHunk
+		| Action::CompositePrevHunk
+		| Action::WorkspaceTrustTrust
+		| Action::WorkspaceTrustRestrict
+		| Action::WorkspaceTrustBlock
+		| Action::WorkspaceTrustPrompt => return None,
+
+		// Block/rectangular selection actions
+		Action::BlockSelectLeft => {
+			block_select_action(state, cursors, &mut events, BlockDirection::Left);
+		}
+
+		Action::BlockSelectRight => {
+			block_select_action(state, cursors, &mut events, BlockDirection::Right);
+		}
+
+		Action::BlockSelectUp => {
+			block_select_action(state, cursors, &mut events, BlockDirection::Up);
+		}
+
+		Action::BlockSelectDown => {
+			block_select_action(state, cursors, &mut events, BlockDirection::Down);
+		}
+
+		Action::SelectLine => {
+			select_line(state, cursors, &mut events, estimated_line_length);
+		}
+
+		Action::ExpandSelection => {
+			expand_selection(state, cursors, &mut events);
+		}
+	}
+
+	Some(events)
+}
+
+#[cfg(test)]
+mod tests {
+	use crate::model::filesystem::StdFileSystem;
+	use std::sync::Arc;
+
+	fn test_fs() -> Arc<dyn crate::model::filesystem::FileSystem + Send + Sync> {
+		Arc::new(StdFileSystem)
+	}
+	use super::*;
+	use crate::model::cursor::Cursors;
+	use crate::model::event::{CursorId, Event};
+	use crate::state::EditorState;
+
+	#[test]
+	fn test_backspace_deletes_newline() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "Hello\nWorld"
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "Hello\nWorld".to_string(), cursor_id: CursorId(0) },
+		);
+
+		assert_eq!(state.buffer.to_string().unwrap(), "Hello\nWorld");
+		assert_eq!(cursors.primary().position, 11);
+
+		// Move cursor to position 6 (beginning of "World")
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 0,
+				new_position: 6,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		assert_eq!(cursors.primary().position, 6);
+
+		// Press Backspace - should delete the newline at position 5
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		println!("Generated events: {:?}", events);
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "HelloWorld");
+		assert_eq!(cursors.primary().position, 5);
+	}
+
+	#[test]
+	fn test_move_down_basic() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert three lines
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "Line1\nLine2\nLine3".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// Move cursor to start of file
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 17,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		assert_eq!(cursors.primary().position, 0);
+
+		// Move down - should go to position 6 (start of Line2)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 6, "Cursor should move to start of Line2");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+
+		state.apply(&mut cursors, &events[0]);
+		assert_eq!(cursors.primary().position, 6);
+
+		// Move down again - should go to position 12 (start of Line3)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 12, "Cursor should move to start of Line3");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+	}
+
+	/// Helper for the PageUp/PageDown goal-column tests: build a state with
+	/// `content`, place the cursor at `position`, run `action` with a
+	/// 3-row viewport, and return the resulting cursor position and sticky
+	/// column.
+	fn page_move(content: &str, position: usize, action: Action) -> (usize, Option<usize>) {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: content.to_string(), cursor_id: CursorId(0) },
+		);
+		let old_position = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position,
+				new_position: position,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events =
+			action_to_events(&mut state, &mut cursors, action, 4, false, false, true, 80, 3).unwrap();
+		for event in &events {
+			state.apply(&mut cursors, event);
+		}
+		(cursors.primary().position, cursors.primary().sticky_column)
+	}
+
+	/// PageDown resolves the goal column *visually* (wide-char aware), so it
+	/// never lands inside a multi-byte character. From the end of "你a"
+	/// (visual column 3), two lines down it must land after the first 好 of
+	/// 你好好def (byte offset 6 in the line) — the old byte-column goal (4)
+	/// landed mid-好.
+	#[test]
+	fn test_page_down_uses_visual_goal_column() {
+		// Line starts: 0, 5, 18, 31.
+		let content = "你a\n你好好def\n你好好def\n你好好def";
+		let (pos, sticky) = page_move(content, 4, Action::MovePageDown);
+		assert_eq!(pos, 18 + 6, "goal column 3 lands after the first 好");
+		assert_eq!(sticky, Some(3), "sticky column is the visual column");
+	}
+
+	/// Same as `test_page_down_uses_visual_goal_column` for PageUp.
+	#[test]
+	fn test_page_up_uses_visual_goal_column() {
+		// Line starts: 0, 13, 26.
+		let content = "你好好def\n你好好def\n你a";
+		let (pos, sticky) = page_move(content, 26 + 4, Action::MovePageUp);
+		assert_eq!(pos, 6, "goal column 3 lands after the first 好");
+		assert_eq!(sticky, Some(3), "sticky column is the visual column");
+	}
+
+	/// Build a state with virtual space `mode`, `content`, and the cursor at
+	/// `position` with no sticky column.
+	fn virtual_space_state(
+		content: &str,
+		position: usize,
+		mode: crate::config::VirtualSpaceMode,
+	) -> (EditorState, Cursors) {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		state.buffer_settings.virtual_space = mode;
+		let mut cursors = Cursors::new();
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: content.to_string(), cursor_id: CursorId(0) },
+		);
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 0,
+				new_position: position,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+		(state, cursors)
+	}
+
+	fn run_action(state: &mut EditorState, cursors: &mut Cursors, action: Action) {
+		let events = action_to_events(state, cursors, action, 4, false, false, true, 80, 24).unwrap();
+		for event in &events {
+			state.apply(cursors, event);
+		}
+	}
+
+	/// With virtual space on, Right at a line's content end pins the byte
+	/// position and walks the goal column out past the width; Left walks it
+	/// back before any bytes move.
+	#[test]
+	fn test_move_right_left_traverse_virtual_space() {
+		use crate::config::VirtualSpaceMode;
+		use crate::model::virtual_space::cursor_virtual_columns;
+
+		let (mut state, mut cursors) = virtual_space_state("ab\nxyz", 2, VirtualSpaceMode::On);
+
+		run_action(&mut state, &mut cursors, Action::MoveRight);
+		assert_eq!(cursors.primary().position, 2, "byte position stays at EOL");
+		assert_eq!(cursors.primary().sticky_column, Some(3));
+		assert_eq!(cursor_virtual_columns(VirtualSpaceMode::On, &state.buffer, cursors.primary()), 1);
+
+		run_action(&mut state, &mut cursors, Action::MoveRight);
+		assert_eq!(cursors.primary().position, 2);
+		assert_eq!(cursors.primary().sticky_column, Some(4));
+
+		run_action(&mut state, &mut cursors, Action::MoveLeft);
+		assert_eq!(cursors.primary().position, 2);
+		assert_eq!(cursors.primary().sticky_column, Some(3));
+
+		run_action(&mut state, &mut cursors, Action::MoveLeft);
+		assert_eq!(cursors.primary().position, 2);
+		assert_eq!(cursors.primary().sticky_column, Some(2), "back at the edge");
+
+		// One more Left is a normal byte move.
+		run_action(&mut state, &mut cursors, Action::MoveLeft);
+		assert_eq!(cursors.primary().position, 1);
+		assert_eq!(cursors.primary().sticky_column, None);
+	}
+
+	/// With virtual space off, Right at a line's content end wraps to the
+	/// next line exactly as before.
+	#[test]
+	fn test_move_right_wraps_when_virtual_space_off() {
+		use crate::config::VirtualSpaceMode;
+
+		let (mut state, mut cursors) = virtual_space_state("ab\nxyz", 2, VirtualSpaceMode::Off);
+		run_action(&mut state, &mut cursors, Action::MoveRight);
+		assert_eq!(cursors.primary().position, 3, "moved to next line start");
+
+		// The block-only tier keeps regular cursor movement clamped too.
+		let (mut state, mut cursors) = virtual_space_state("ab\nxyz", 2, VirtualSpaceMode::Block);
+		run_action(&mut state, &mut cursors, Action::MoveRight);
+		assert_eq!(cursors.primary().position, 3);
+	}
+
+	/// Vertical movement onto a shorter line keeps the goal column; with
+	/// virtual space on, the cursor is virtually at that column.
+	#[test]
+	fn test_vertical_movement_holds_virtual_column() {
+		use crate::config::VirtualSpaceMode;
+		use crate::model::virtual_space::cursor_virtual_columns;
+
+		// Cursor at column 4 of the first line; the middle line is 2 wide.
+		let (mut state, mut cursors) =
+			virtual_space_state("abcdef\nab\nabcdef", 4, VirtualSpaceMode::On);
+
+		run_action(&mut state, &mut cursors, Action::MoveDown);
+		assert_eq!(cursors.primary().position, 9, "clipped to line content end");
+		assert_eq!(cursors.primary().sticky_column, Some(4));
+		assert_eq!(
+			cursor_virtual_columns(VirtualSpaceMode::On, &state.buffer, cursors.primary()),
+			2,
+			"cursor is 2 columns past the short line's end"
+		);
+
+		run_action(&mut state, &mut cursors, Action::MoveDown);
+		assert_eq!(cursors.primary().position, 10 + 4, "goal column restored on the longer line");
+	}
+
+	#[test]
+	fn test_move_line_up_without_trailing_newline() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "A\nB".to_string(), cursor_id: CursorId(0) },
+		);
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: 2, // "B"
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveLineUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "B\nA");
+		assert_eq!(cursors.primary().position, 0);
+	}
+
+	#[test]
+	fn test_move_line_down_without_trailing_newline() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "A\nB".to_string(), cursor_id: CursorId(0) },
+		);
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: 0, // "A"
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineDown,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "B\nA");
+		assert_eq!(cursors.primary().position, 2);
+	}
+
+	#[test]
+	fn test_move_line_up_first_line_noop() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "A\nB".to_string(), cursor_id: CursorId(0) },
+		);
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveLineUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert!(events.is_empty());
+		assert_eq!(state.buffer.to_string().unwrap(), "A\nB");
+		assert_eq!(cursors.primary().position, 0);
+	}
+
+	#[test]
+	fn test_move_line_down_last_line_noop() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "A\nB".to_string(), cursor_id: CursorId(0) },
+		);
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: 2, // "B"
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineDown,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		assert!(events.is_empty());
+		assert_eq!(state.buffer.to_string().unwrap(), "A\nB");
+		assert_eq!(cursors.primary().position, 2);
+	}
+
+	#[test]
+	fn test_move_line_up_multi_cursor_separate_lines() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "A\nB\nC\nD".to_string(), cursor_id: CursorId(0) },
+		);
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: 2, // "B"
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		state.apply(
+			&mut cursors,
+			&Event::AddCursor {
+				position: 6, // "D"
+				cursor_id: CursorId(1),
+				anchor: None,
+			},
+		);
+
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveLineUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "B\nA\nD\nC");
+		assert_eq!(cursors.get(CursorId(0)).unwrap().position, 0);
+		assert_eq!(cursors.get(CursorId(1)).unwrap().position, 4);
+	}
+
+	#[test]
+	fn test_move_line_up_large_file_unloaded_chunks() {
+		use crate::model::buffer::TextBuffer;
+		use std::fs;
+		use tempfile::tempdir;
+
+		let temp_dir = tempdir().unwrap();
+		let test_file = temp_dir.path().join("move_line_up_large_file.txt");
+
+		let mut content = String::new();
+		for i in 0..200 {
+			content.push_str(&format!("Line {i:04}\n"));
+		}
+		fs::write(&test_file, &content).unwrap();
+
+		let large_file_threshold = 500;
+		let buffer = TextBuffer::load_from_file(&test_file, large_file_threshold, test_fs()).unwrap();
+
+		let mut state = EditorState::new(80, 24, large_file_threshold, test_fs());
+		let mut cursors = Cursors::new();
+		state.buffer = buffer;
+
+		let line_len = "Line 0000\n".len();
+		let target_line = 120usize;
+		let target_start = line_len * target_line;
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: target_start,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveLineUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		let line_119_start = line_len * (target_line - 1);
+		let line_120_start = line_len * target_line;
+		let line_119 = state.get_text_range(line_119_start, line_119_start + line_len);
+		let line_120 = state.get_text_range(line_120_start, line_120_start + line_len);
+
+		assert_eq!(line_119, "Line 0120\n");
+		assert_eq!(line_120, "Line 0119\n");
+	}
+
+	#[test]
+	fn test_move_line_down_large_file_selection_block() {
+		use crate::model::buffer::TextBuffer;
+		use std::fs;
+		use tempfile::tempdir;
+
+		let temp_dir = tempdir().unwrap();
+		let test_file = temp_dir.path().join("move_line_down_large_file.txt");
+
+		let mut content = String::new();
+		for i in 0..200 {
+			content.push_str(&format!("Line {i:04}\n"));
+		}
+		fs::write(&test_file, &content).unwrap();
+
+		let large_file_threshold = 500;
+		let buffer = TextBuffer::load_from_file(&test_file, large_file_threshold, test_fs()).unwrap();
+
+		let mut state = EditorState::new(80, 24, large_file_threshold, test_fs());
+		let mut cursors = Cursors::new();
+		state.buffer = buffer;
+
+		let line_len = "Line 0000\n".len();
+		let start_line = 50usize;
+		let end_line_exclusive = 53usize; // selects lines 50..=52
+		let selection_start = line_len * start_line;
+		let selection_end = line_len * end_line_exclusive;
+
+		let pos = cursors.primary().position;
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: pos,
+				new_position: selection_end,
+				old_anchor: None,
+				new_anchor: Some(selection_start),
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineDown,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		let line_50 = state.get_text_range(selection_start, selection_start + line_len);
+		let line_51 = state.get_text_range(selection_start + line_len, selection_start + line_len * 2);
+		let line_52 =
+			state.get_text_range(selection_start + line_len * 2, selection_start + line_len * 3);
+		let line_53 =
+			state.get_text_range(selection_start + line_len * 3, selection_start + line_len * 4);
+
+		assert_eq!(line_50, "Line 0053\n");
+		assert_eq!(line_51, "Line 0050\n");
+		assert_eq!(line_52, "Line 0051\n");
+		assert_eq!(line_53, "Line 0052\n");
+	}
+
+	#[test]
+	fn test_move_up_basic() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert three lines
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "Line1\nLine2\nLine3".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// Cursor is at end (position 17)
+		// Text structure: "Line1\nLine2\nLine3"
+		// Positions: 0-4 (Line1), 5 (\n), 6-10 (Line2), 11 (\n), 12-16 (Line3)
+		assert_eq!(cursors.primary().position, 17);
+		assert_eq!(state.buffer.to_string().unwrap(), "Line1\nLine2\nLine3");
+
+		// Move up - cursor is at end of Line3 (position 17, column 5)
+		// Should go to end of Line2 (position 11, which is the newline, BUT we want column 5 which is position 11)
+		// Wait, Line2 has content "Line2" (5 chars), so column 5 is position 6+5=11 (the newline)
+		// This is technically correct but weird - we're on the newline
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			// The current behavior puts us at position 11 (the newline after Line2)
+			// This happens because Line2 without newline has length 5, and we preserve column 5
+			// Position 6 (start of Line2) + 5 = 11 (the newline)
+			assert_eq!(
+				*new_position, 11,
+				"Cursor should move to column 5 of Line2 (which is the newline)"
+			);
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+
+		state.apply(&mut cursors, &events[0]);
+
+		// Move up again - from position 11 (newline after Line2)
+		// Current line is Line2 (starts at 6), column is 11-6=5
+		// Previous line is Line1 (starts at 0), content "Line1" has length 5
+		// So we go to position 0 + min(5, 5) = 5 (the newline after Line1)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 5, "Cursor should move to column 5 of Line1 (the newline)");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+	}
+
+	#[test]
+	fn test_move_down_preserves_column() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert lines with different lengths
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "12345\n123\n12345".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor to position 3 (column 3 of first line)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 15,
+				new_position: 3,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		assert_eq!(cursors.primary().position, 3);
+
+		// Move down - should go to position 9 (column 3 of second line, which is end of "123")
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, new_sticky_column, .. } = &events[0] {
+			assert_eq!(*new_position, 9, "Cursor should move to end of shorter line");
+			assert_eq!(*new_sticky_column, Some(3), "Sticky column should preserve original column");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+
+		state.apply(&mut cursors, &events[0]);
+
+		// Move down again - should go to position 13 (column 3 of third line)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, new_sticky_column, .. } = &events[0] {
+			assert_eq!(*new_position, 13, "Cursor should move back to column 3");
+			assert_eq!(*new_sticky_column, Some(3), "Sticky column should be preserved");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+	}
+
+	#[test]
+	fn test_move_up_preserves_column() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert lines with different lengths
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "12345\n123\n12345".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor to position 13 (column 3 of third line)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 15,
+				new_position: 13,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		assert_eq!(cursors.primary().position, 13);
+
+		// Move up - should go to position 9 (column 3 of second line, which is end of "123")
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, new_sticky_column, .. } = &events[0] {
+			assert_eq!(*new_position, 9, "Cursor should move to end of shorter line");
+			assert_eq!(*new_sticky_column, Some(3), "Sticky column should preserve original column");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+
+		state.apply(&mut cursors, &events[0]);
+
+		// Move up again - should go to position 3 (column 3 of first line)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, new_sticky_column, .. } = &events[0] {
+			assert_eq!(*new_position, 3, "Cursor should move back to column 3");
+			assert_eq!(*new_sticky_column, Some(3), "Sticky column should be preserved");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+	}
+
+	#[test]
+	fn test_move_down_at_line_start() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert two lines
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "First\nSecond".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor to start (position 0)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 12,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Move down - should go to position 6 (start of second line)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 6, "Cursor should move to start of next line");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+	}
+
+	#[test]
+	fn test_move_up_at_line_start() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert two lines
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "First\nSecond".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor to start of second line (position 6)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 12,
+				new_position: 6,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Move up - should go to position 0 (start of first line)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 1);
+
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 0, "Cursor should move to start of previous line");
+		} else {
+			panic!("Expected MoveCursor event");
+		}
+	}
+
+	#[test]
+	fn test_move_down_with_empty_lines() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert lines with empty line in middle
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "Line1\n\nLine3".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor to start
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 12,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Move down - should go to position 6 (empty line)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 6, "Cursor should move to empty line");
+		}
+
+		state.apply(&mut cursors, &events[0]);
+
+		// Move down again - should go to position 7 (start of Line3)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		if let Event::MoveCursor { new_position, .. } = &events[0] {
+			assert_eq!(*new_position, 7, "Cursor should move to Line3");
+		}
+	}
+
+	#[test]
+	fn test_column_calculation_doesnt_underflow() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert a single line
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "Hello".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Set cursor at end (position 5)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 5,
+				new_position: 5,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Try to move up (no previous line exists)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 0, "Should not generate event when at first line");
+
+		// Try to move down (no next line exists)
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		assert_eq!(events.len(), 0, "Should not generate event when at last line");
+	}
+
+	#[test]
+	fn test_line_iterator_positioning_for_cursor_movement() {
+		// This test verifies the behavior of line_iterator when positioning at different offsets
+		// to understand how column calculation works
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "Line1\nLine2\nLine3".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// First, let's verify what offset_to_position returns for key positions
+		// Text structure: "Line1\nLine2\nLine3"
+		// Positions: 0-4 (Line1), 5 (\n), 6-10 (Line2), 11 (\n), 12-16 (Line3), 17 (end)
+
+		// Position 11 is the newline after "Line2"
+		if let Some(pos) = state.buffer.offset_to_position(11) {
+			println!("offset_to_position(11) = line={}, column={}", pos.line, pos.column);
+			// The newline is the 6th character of line 1 (0-indexed): "Line2\n"
+			// So column should be 5 (0-indexed)
+		}
+
+		// Position 17 is after "Line3"
+		if let Some(pos) = state.buffer.offset_to_position(17) {
+			println!("offset_to_position(17) = line={}, column={}", pos.line, pos.column);
+			// This is the 6th character of line 2 (after "Line3")
+			// So column should be 5
+		}
+
+		// Test 1: Position at end of Line3 (position 17)
+		// line_iterator(17) should position at start of Line3 (position 12)
+		let iter = state.buffer.line_iterator(17, 80);
+		assert_eq!(iter.current_position(), 12, "Iterator at position 17 should be at line start 12");
+
+		// Test 2: Position in middle of Line2 (position 9, which is 'n' in "Line2")
+		let iter = state.buffer.line_iterator(9, 80);
+		assert_eq!(iter.current_position(), 6, "Iterator at position 9 should be at line start 6");
+
+		// Test 3: Position at newline after Line2 (position 11)
+		let iter = state.buffer.line_iterator(11, 80);
+		assert_eq!(
+			iter.current_position(),
+			6,
+			"Iterator at position 11 (newline) should be at line start 6"
+		);
+
+		// Test 4: Position at start of Line2 (position 6)
+		let iter = state.buffer.line_iterator(6, 80);
+		assert_eq!(iter.current_position(), 6, "Iterator at position 6 should stay at 6");
+	}
+
+	#[test]
+	fn test_move_line_end_positioning() {
+		// Test where MoveLineEnd actually puts the cursor
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "HelloNew Line\nWorld!".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// Start at position 0
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 20,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Move to line end
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineEnd,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			println!("MoveLineEnd event: {:?}", event);
+			state.apply(&mut cursors, &event);
+		}
+
+		println!("After MoveLineEnd: cursor at {}", cursors.primary().position);
+		// "HelloNew Line\n" - the visible part is 13 chars (0-12)
+		// MoveLineEnd should put cursor at position 13 (after the visible text, before/on the newline)
+		assert_eq!(
+			cursors.primary().position,
+			13,
+			"MoveLineEnd should position at end of visible text"
+		);
+	}
+
+	#[test]
+	fn test_move_line_start_from_eof() {
+		// Test MoveLineStart when cursor is at EOF (beyond last character)
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "HelloNew Line\nWorld!".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// Cursor is at EOF (position 20)
+		assert_eq!(cursors.primary().position, 20);
+		println!("Starting at EOF: position 20");
+
+		// Check what line_iterator does at EOF
+		let iter = state.buffer.line_iterator(20, 80);
+		println!("line_iterator(20).current_position() = {}", iter.current_position());
+
+		// Move to line start
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineStart,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			println!("MoveLineStart event from EOF: {:?}", event);
+			state.apply(&mut cursors, &event);
+		}
+
+		println!("After MoveLineStart from EOF: cursor at {}", cursors.primary().position);
+		// Should move to position 14 (start of "World!" line)
+		assert_eq!(
+			cursors.primary().position,
+			14,
+			"MoveLineStart from EOF should go to start of last line"
+		);
+	}
+
+	#[test]
+	fn test_move_up_with_unloaded_chunks() {
+		// Test MoveUp when the chunk containing the cursor hasn't been loaded yet
+		// This simulates large file behavior where not all chunks are in memory
+		use crate::model::buffer::TextBuffer;
+		use std::fs;
+
+		// Create a temp file with multiple lines
+		let temp_dir = std::env::temp_dir();
+		let test_file = temp_dir.join("test_large_file_move_up.txt");
+
+		// Write 100 lines to simulate a larger file (each line ~25 bytes)
+		let mut content = String::new();
+		for i in 0..100 {
+			content.push_str(&format!("This is line number {}\n", i));
+		}
+		fs::write(&test_file, &content).unwrap();
+
+		// Use a VERY SMALL threshold (500 bytes) to force lazy loading behavior
+		// This ensures chunks won't all be loaded at once
+		let large_file_threshold = 500;
+		let buffer = TextBuffer::load_from_file(&test_file, large_file_threshold, test_fs()).unwrap();
+
+		// Create editor state with the loaded buffer
+		let mut state = EditorState::new(80, 24, large_file_threshold, test_fs());
+		let mut cursors = Cursors::new();
+		state.buffer = buffer;
+
+		// Move cursor to near the end (line 90)
+		let target_line_start: usize = content.lines().take(90).map(|l| l.len() + 1).sum();
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 0,
+				new_position: target_line_start,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		println!("Cursor at line 90, position: {}", cursors.primary().position);
+
+		// Try to move up - this should work even if chunks aren't loaded
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		println!("MoveUp events: {:?}", events);
+
+		assert!(!events.is_empty(), "MoveUp should generate events even with unloaded chunks");
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		println!("After MoveUp: cursor at {}", cursors.primary().position);
+		assert!(cursors.primary().position < target_line_start, "Cursor should have moved up");
+
+		// Clean up
+		fs::remove_file(&test_file).ok();
+	}
+
+	#[test]
+	fn test_move_down_from_newline_position() {
+		// Test moving down when cursor is ON a newline character
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "HelloNew Line\nWorld!"
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "HelloNew Line\nWorld!".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// Text structure: "HelloNew Line\nWorld!"
+		// Positions: 0-12 (HelloNew Line), 13 (\n), 14-19 (World!)
+		assert_eq!(state.buffer.to_string().unwrap(), "HelloNew Line\nWorld!");
+
+		// Move cursor to position 13 (the newline after "HelloNew Line")
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 20,
+				new_position: 13,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		assert_eq!(cursors.primary().position, 13);
+		println!("Starting position: 13 (on the newline)");
+
+		// line_iterator(13) should position at...?
+		let iter = state.buffer.line_iterator(13, 80);
+		println!("line_iterator(13).current_position() = {}", iter.current_position());
+
+		// Move down to second line
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		println!("MoveDown events: {:?}", events);
+
+		if events.is_empty() {
+			panic!("MoveDown from position 13 generated no events!");
+		}
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+		println!("After MoveDown from position 13: cursor at {}", cursors.primary().position);
+
+		// We expect to be at position 14 (start of "World!" line) or somewhere on that line
+		// NOT at position 20 (EOF)
+		assert!(
+			cursors.primary().position >= 14 && cursors.primary().position <= 20,
+			"After MoveDown from newline, cursor should be on the next line, not at EOF"
+		);
+	}
+
+	#[test]
+	fn test_move_down_then_home_backspace() {
+		// Reproduce the e2e test failure scenario
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "HelloNew Line\nWorld!"
+		state.apply(
+			&mut cursors,
+			&Event::Insert {
+				position: 0,
+				text: "HelloNew Line\nWorld!".to_string(),
+				cursor_id: CursorId(0),
+			},
+		);
+
+		// Text structure: "HelloNew Line\nWorld!"
+		// Positions: 0-12 (HelloNew Line), 13 (\n), 14-19 (World!)
+		assert_eq!(state.buffer.to_string().unwrap(), "HelloNew Line\nWorld!");
+		assert_eq!(cursors.primary().position, 20); // End of text
+
+		// Move up to first line
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveUp, 4, false, false, true, 80, 24)
+				.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+		println!("After MoveUp: cursor at {}", cursors.primary().position);
+
+		// Move to end of first line
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineEnd,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+		assert_eq!(
+			cursors.primary().position,
+			13,
+			"Should be at end of first line (position 13, the newline)"
+		);
+
+		// Move down to second line
+		let events =
+			action_to_events(&mut state, &mut cursors, Action::MoveDown, 4, false, false, true, 80, 24)
+				.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+		println!("After MoveDown: cursor at {}", cursors.primary().position);
+
+		// Move to start of line (Home)
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::MoveLineStart,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+		println!("After Home: cursor at {}", cursors.primary().position);
+		assert_eq!(cursors.primary().position, 14, "Should be at start of second line (position 14)");
+
+		// Delete backward (should delete the newline)
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events.iter() {
+			println!("Event: {:?}", event);
+			state.apply(&mut cursors, event);
+		}
+
+		println!("After backspace: buffer = {:?}", state.buffer.to_string().unwrap());
+		println!("After backspace: cursor at {}", cursors.primary().position);
+		assert_eq!(state.buffer.to_string().unwrap(), "HelloNew LineWorld!", "Lines should be joined");
+		assert_eq!(cursors.primary().position, 13, "Cursor should be at join point");
+	}
+
+	#[test]
+	fn test_bracket_auto_close_parenthesis() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Cursor is at position 0 initially
+		assert_eq!(cursors.primary().position, 0);
+
+		// Insert opening parenthesis with auto_indent=true
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('('),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		println!("Events: {:?}", events);
+
+		// Should have Insert event for "()" and MoveCursor to position between them
+		assert_eq!(events.len(), 2, "Should have Insert and MoveCursor events");
+
+		// Apply events
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "()");
+		assert_eq!(cursors.primary().position, 1, "Cursor should be between brackets");
+	}
+
+	#[test]
+	fn test_bracket_auto_close_curly_brace() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert opening curly brace with auto_indent=true
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('{'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "{}");
+		assert_eq!(cursors.primary().position, 1, "Cursor should be between braces");
+	}
+
+	#[test]
+	fn test_bracket_auto_close_square_bracket() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert opening square bracket
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('['),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "[]");
+		assert_eq!(cursors.primary().position, 1);
+	}
+
+	#[test]
+	fn test_bracket_auto_close_double_quote() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+		state.language = "rust".to_string();
+
+		// Insert double quote
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('"'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "\"\"");
+		assert_eq!(cursors.primary().position, 1);
+	}
+
+	#[test]
+	fn test_bracket_auto_close_disabled_when_auto_indent_false() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert opening parenthesis with auto_indent=false
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('('),
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Should only insert the opening character, no auto-close
+		assert_eq!(state.buffer.to_string().unwrap(), "(");
+		assert_eq!(cursors.primary().position, 1);
+	}
+
+	#[test]
+	fn test_bracket_auto_close_not_before_alphanumeric() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "abc"
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "abc".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor to start
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 3,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Insert opening parenthesis before 'abc'
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('('),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Should NOT auto-close because 'a' is alphanumeric
+		assert_eq!(state.buffer.to_string().unwrap(), "(abc");
+		assert_eq!(cursors.primary().position, 1);
+	}
+
+	#[test]
+	fn test_bracket_auto_close_multiple_cursors() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert some text
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "foo\nbar".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Add a second cursor
+		state
+			.apply(&mut cursors, &Event::AddCursor { position: 0, cursor_id: CursorId(1), anchor: None });
+
+		// Move both cursors to end of their respective lines
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 7,
+				new_position: 7, // end of "bar"
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(1),
+				old_position: 0,
+				new_position: 3, // end of "foo"
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Insert opening parenthesis at both cursors
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('('),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Both cursors should have auto-closed brackets
+		assert_eq!(state.buffer.to_string().unwrap(), "foo()\nbar()");
+	}
+
+	#[test]
+	fn test_bracket_auto_close_multiple_cursors_with_skip_over() {
+		// Test case: type 'foo()' with multiple cursors - the closing paren should skip over
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Start with two empty lines
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "\n".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Primary cursor at position 0 (start of first line)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 1,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Add a second cursor at position 1 (start of second line)
+		state
+			.apply(&mut cursors, &Event::AddCursor { position: 1, cursor_id: CursorId(1), anchor: None });
+
+		// Type 'f'
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('f'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Type 'o'
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('o'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Type 'o'
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('o'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Verify we have "foo\nfoo" before typing '('
+		assert_eq!(
+			state.buffer.to_string().unwrap(),
+			"foo\nfoo",
+			"Before typing '(' we should have just 'foo' on each line"
+		);
+
+		// Type '(' - should auto-close to '()'
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('('),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Verify auto-close happened: we typed '(' but got '()' on each line
+		// This confirms the auto-close feature is working with multiple cursors
+		assert_eq!(
+			state.buffer.to_string().unwrap(),
+			"foo()\nfoo()",
+			"Auto-close should add closing paren: typing '(' should produce '()'"
+		);
+
+		// Verify cursors are positioned between ( and ) for skip-over to work
+		// Buffer is "foo()\nfoo()" - positions: f(0)o(1)o(2)((3))(4)\n(5)f(6)o(7)o(8)((9))(10)
+		// After auto-close, cursor should be at position 4 (after '(' at 3, before ')' at 4)
+		// and at position 10 (after '(' at 9, before ')' at 10)
+		let cursor_positions: Vec<_> = cursors.iter().map(|(_, c)| c.position).collect();
+		assert!(
+			cursor_positions.contains(&4) && cursor_positions.contains(&10),
+			"Cursors should be between parens at positions 4 and 10, got: {:?}",
+			cursor_positions
+		);
+
+		// Type ')' - should skip over the existing ')', not add another
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar(')'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Should still be "foo()\nfoo()" - the ')' should have skipped over, not doubled
+		assert_eq!(
+			state.buffer.to_string().unwrap(),
+			"foo()\nfoo()",
+			"Closing paren should skip over existing paren, not create 'foo())'"
+		);
+	}
+
+	#[test]
+	fn test_bracket_auto_close_three_cursors_with_skip_over() {
+		// Test case: type 'foo()' with THREE cursors - the closing paren should skip over
+		// This tests the bug where skip-over fails with 3+ cursors
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Start with three empty lines
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "\n\n".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Primary cursor at position 0 (start of first line)
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 2,
+				new_position: 0,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Add a second cursor at position 1 (start of second line)
+		state
+			.apply(&mut cursors, &Event::AddCursor { position: 1, cursor_id: CursorId(1), anchor: None });
+
+		// Add a third cursor at position 2 (start of third line)
+		state
+			.apply(&mut cursors, &Event::AddCursor { position: 2, cursor_id: CursorId(2), anchor: None });
+
+		// Type 'foo'
+		for ch in ['f', 'o', 'o'] {
+			let events = action_to_events(
+				&mut state,
+				&mut cursors,
+				Action::InsertChar(ch),
+				4,
+				true,
+				true,
+				true,
+				80,
+				24,
+			)
+			.unwrap();
+			for event in events {
+				state.apply(&mut cursors, &event);
+			}
+		}
+
+		// Verify we have "foo\nfoo\nfoo" before typing '('
+		assert_eq!(
+			state.buffer.to_string().unwrap(),
+			"foo\nfoo\nfoo",
+			"Before typing '(' we should have 'foo' on each line"
+		);
+
+		// Type '(' - should auto-close to '()'
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar('('),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Verify auto-close happened
+		assert_eq!(
+			state.buffer.to_string().unwrap(),
+			"foo()\nfoo()\nfoo()",
+			"Auto-close should add closing paren on all three lines"
+		);
+
+		// Verify cursor positions - all should be between ( and )
+		let cursor_positions: Vec<_> = cursors.iter().map(|(_, c)| c.position).collect();
+		// Buffer is "foo()\nfoo()\nfoo()" - positions:
+		// f(0)o(1)o(2)((3))(4)\n(5)f(6)o(7)o(8)((9))(10)\n(11)f(12)o(13)o(14)((15))(16)
+		// Cursors should be at 4, 10, 16 (between each ( and ))
+		assert!(
+			cursor_positions.contains(&4)
+				&& cursor_positions.contains(&10)
+				&& cursor_positions.contains(&16),
+			"Cursors should be between parens at positions 4, 10, and 16, got: {:?}",
+			cursor_positions
+		);
+
+		// Type ')' - should skip over the existing ')', not add another
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::InsertChar(')'),
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		// Should still be "foo()\nfoo()\nfoo()" - the ')' should have skipped over
+		assert_eq!(
+			state.buffer.to_string().unwrap(),
+			"foo()\nfoo()\nfoo()",
+			"Closing paren should skip over existing paren on ALL THREE lines"
+		);
+	}
+
+	#[test]
+	fn test_auto_pair_deletion_parenthesis() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "()"
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "()".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor between the brackets
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 2,
+				new_position: 1,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		assert_eq!(state.buffer.to_string().unwrap(), "()");
+		assert_eq!(cursors.primary().position, 1);
+
+		// Delete backward with auto_indent=true - should delete both characters
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "");
+		assert_eq!(cursors.primary().position, 0);
+	}
+
+	#[test]
+	fn test_auto_pair_deletion_curly_brace() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "{}"
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "{}".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor between the braces
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 2,
+				new_position: 1,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Delete backward - should delete both
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "");
+	}
+
+	#[test]
+	fn test_auto_pair_deletion_double_quote() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert empty string literal
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "\"\"".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor between the quotes
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 2,
+				new_position: 1,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Delete backward - should delete both quotes
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "");
+	}
+
+	#[test]
+	fn test_auto_pair_deletion_disabled_when_auto_indent_false() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "()"
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "()".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor between the brackets
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 2,
+				new_position: 1,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Delete backward with auto_indent=false - should only delete opening bracket
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			false,
+			false,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), ")");
+		assert_eq!(cursors.primary().position, 0);
+	}
+
+	#[test]
+	fn test_auto_pair_deletion_not_matching() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "(]" - not a matching pair
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "(]".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor between
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 2,
+				new_position: 1,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Delete backward - should only delete opening bracket since they don't match
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "]");
+		assert_eq!(cursors.primary().position, 0);
+	}
+
+	#[test]
+	fn test_auto_pair_deletion_with_content() {
+		let mut state =
+			EditorState::new(80, 24, crate::config::LARGE_FILE_THRESHOLD_BYTES as usize, test_fs());
+		let mut cursors = Cursors::new();
+
+		// Insert "(abc)" - has content between brackets
+		state.apply(
+			&mut cursors,
+			&Event::Insert { position: 0, text: "(abc)".to_string(), cursor_id: CursorId(0) },
+		);
+
+		// Move cursor after 'a'
+		state.apply(
+			&mut cursors,
+			&Event::MoveCursor {
+				cursor_id: CursorId(0),
+				old_position: 5,
+				new_position: 2,
+				old_anchor: None,
+				new_anchor: None,
+				old_sticky_column: None,
+				new_sticky_column: None,
+			},
+		);
+
+		// Delete backward - should only delete 'a', not both brackets
+		let events = action_to_events(
+			&mut state,
+			&mut cursors,
+			Action::DeleteBackward,
+			4,
+			true,
+			true,
+			true,
+			80,
+			24,
+		)
+		.unwrap();
+
+		for event in events {
+			state.apply(&mut cursors, &event);
+		}
+
+		assert_eq!(state.buffer.to_string().unwrap(), "(bc)");
+	}
+}
+
+#[cfg(test)]
+mod property_tests {
+	use crate::model::filesystem::StdFileSystem;
+	use std::sync::Arc;
+
+	fn test_fs() -> Arc<dyn crate::model::filesystem::FileSystem + Send + Sync> {
+		Arc::new(StdFileSystem)
+	}
+
+	use super::*;
+	use proptest::prelude::*;
+
+	// Generate text with some newlines
+	fn text_with_newlines() -> impl Strategy<Value = Vec<u8>> {
+		prop::collection::vec(prop_oneof![(b'a'..=b'z').prop_map(|c| c), Just(b'\n'),], 0..200)
+	}
+
+	proptest! {
+			/// Test that collect_line_starts returns valid line start positions
+			#[test]
+			fn prop_collect_line_starts_returns_valid_positions(
+					text in text_with_newlines(),
+					start_frac in 0.0f64..=1.0,
+					end_frac in 0.0f64..=1.0,
+			) {
+					if text.is_empty() {
+							return Ok(());
+					}
+
+					let mut buffer = Buffer::from_bytes(text.clone(), test_fs());
+					let buffer_len = buffer.len();
+
+					// Convert fractions to positions, ensuring start <= end
+					let start_pos = (start_frac * buffer_len as f64) as usize;
+					let end_pos = (end_frac * buffer_len as f64) as usize;
+					let (start_pos, end_pos) = if start_pos <= end_pos {
+							(start_pos, end_pos)
+					} else {
+							(end_pos, start_pos)
+					};
+
+					let line_starts = collect_line_starts(&mut buffer, start_pos, end_pos, 80);
+
+					// Property 1: All positions should be <= end_pos and <= buffer_len
+					for &pos in &line_starts {
+							prop_assert!(pos <= end_pos, "Position {} exceeds end_pos {}", pos, end_pos);
+							prop_assert!(pos <= buffer_len, "Position {} exceeds buffer_len {}", pos, buffer_len);
+					}
+
+					// Property 2: All positions should be valid line starts
+					// (either position 0, or the byte before is a newline)
+					for &pos in &line_starts {
+							if pos == 0 {
+									continue; // Position 0 is always a valid line start
+							}
+							let prev_byte = buffer.get_text_range_mut(pos - 1, 1).unwrap();
+							prop_assert_eq!(
+									prev_byte[0], b'\n',
+									"Position {} is not a valid line start (preceded by {:?})",
+									pos, prev_byte
+							);
+					}
+
+					// Property 3: Positions should be sorted and have no duplicates
+					for window in line_starts.windows(2) {
+							prop_assert!(
+									window[0] < window[1],
+									"Positions not strictly increasing: {} >= {}",
+									window[0], window[1]
+							);
+					}
+
+					// Property 4: Should include all line starts in range
+					// Find all actual line starts in the text
+					let mut expected_line_starts: Vec<usize> = vec![0];
+					for (i, &byte) in text.iter().enumerate() {
+							if byte == b'\n' && i < buffer_len {
+									expected_line_starts.push(i + 1);
+							}
+					}
+					// Filter to those in range, considering that we start from the line containing start_pos
+					// A line start at exactly end_pos is excluded when end_pos > start_pos (the selection
+					// ends at a line boundary, so that line has no selected content)
+					let first_line_start = expected_line_starts.iter()
+							.filter(|&&pos| pos <= start_pos)
+							.max()
+							.copied()
+							.unwrap_or(0);
+					let expected_in_range: Vec<usize> = expected_line_starts.iter()
+							.filter(|&&pos| {
+									pos >= first_line_start
+											&& (pos < end_pos || (pos == end_pos && pos == start_pos))
+							})
+							.copied()
+							.collect();
+
+					prop_assert_eq!(
+							line_starts, expected_in_range,
+							"Line starts mismatch for text {:?} with start={} end={}",
+							String::from_utf8_lossy(&text), start_pos, end_pos
+					);
+			}
+
+			/// Test that collect_line_starts handles edge cases correctly
+			#[test]
+			fn prop_collect_line_starts_edge_cases(
+					text in text_with_newlines(),
+			) {
+					if text.is_empty() {
+							return Ok(());
+					}
+
+					let mut buffer = Buffer::from_bytes(text.clone(), test_fs());
+					let buffer_len = buffer.len();
+
+					// Edge case 1: start_pos == end_pos (single position range)
+					let mid = buffer_len / 2;
+					let line_starts = collect_line_starts(&mut buffer, mid, mid, 80);
+					// Should return exactly one line start (the line containing mid)
+					prop_assert!(line_starts.len() <= 1, "Single position range should have at most 1 line start");
+
+					// Edge case 2: Full buffer range
+					let line_starts = collect_line_starts(&mut buffer, 0, buffer_len, 80);
+					// Should return at least position 0
+					prop_assert!(!line_starts.is_empty(), "Full range should have at least one line start");
+					prop_assert_eq!(line_starts[0], 0, "First line start should be 0 for full range starting at 0");
+
+					// Edge case 3: Range at the very end
+					if buffer_len > 0 {
+							let line_starts = collect_line_starts(&mut buffer, buffer_len - 1, buffer_len, 80);
+							// Should return the line start for the last line
+							prop_assert!(!line_starts.is_empty(), "End range should have at least one line start");
+					}
+			}
+
+			/// Test that trailing newlines produce the correct number of line starts
+			#[test]
+			fn prop_collect_line_starts_trailing_newline(
+					prefix in "[a-z]{0,20}",
+					num_trailing_newlines in 0usize..5,
+			) {
+					let text = format!("{}{}", prefix, "\n".repeat(num_trailing_newlines));
+					if text.is_empty() {
+							return Ok(());
+					}
+
+					let mut buffer = Buffer::from_bytes(text.as_bytes().to_vec(), test_fs());
+					let buffer_len = buffer.len();
+
+					let line_starts = collect_line_starts(&mut buffer, 0, buffer_len, 80);
+
+					// Expected line starts: position 0, then one for each \n.
+					// The last \n creates a line start at buffer_len, but since start_pos=0 < end_pos=buffer_len,
+					// a line start at exactly end_pos is excluded (no selected content on that line).
+					// So the count is: 1 (pos 0) + num_trailing_newlines - 1 (last excluded) = num_trailing_newlines
+					// when num_trailing_newlines > 0. When num_trailing_newlines == 0, count is 1 (just pos 0).
+					let expected_count = if num_trailing_newlines > 0 {
+							num_trailing_newlines
+					} else {
+							1
+					};
+
+					prop_assert_eq!(
+							line_starts.len(), expected_count,
+							"Text {:?} (len={}) should have {} line starts, got {:?}",
+							text, buffer_len, expected_count, line_starts
+					);
+			}
+	}
+}

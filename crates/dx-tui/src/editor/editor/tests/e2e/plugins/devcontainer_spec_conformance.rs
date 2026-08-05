@@ -1,0 +1,1263 @@
+//! Spec-conformance tests beyond the bug reproducers in
+//! `devcontainer_spec_repros.rs`. References the official spec at
+//! <https://containers.dev/implementors/spec/>.
+//!
+//! This file mixes one **failing reproducer** (R1, parallel
+//! lifecycle commands) with five **regression guards** (G1-G5)
+//! covering parser/detection paths that already work today but
+//! aren't otherwise tested. R1 stays red until the plugin is
+//! fixed; G1-G5 are green from day one and signal a regression if
+//! a future change breaks them.
+//!
+//! Spec coverage map (full list lives in
+//! `docs/internal/DEVCONTAINER_SPEC_TEST_GAPS.md`):
+//!
+//!   - R1 — lifecycle "object form" parallelism. Spec: each entry
+//!     in the object form runs in parallel, the stage waits for
+//!     all to complete, and the stage succeeds iff every entry
+//!     exited 0. Plugin runs them sequentially in a `for` loop
+//!     (`devcontainer.ts:709-728`) — spec violation.
+//!   - G1 — lifecycle "array form" runs the command verbatim
+//!     without shell-splitting (`devcontainer.ts:700-707`).
+//!   - G2 — neither `remoteUser` nor `containerUser` declared →
+//!     spawner emits no `-u` flag.
+//!   - G3 — only `containerUser` declared → falls back to that
+//!     user (per spec; the CLI computes the fallback and emits it
+//!     in the success JSON; the fake mirrors that behaviour).
+//!   - G4 — JSONC config (line + block comments + trailing commas)
+//!     is parsed by the plugin's `parseJsonc`.
+//!   - G5 — config under `.devcontainer/<sub>/devcontainer.json`
+//!     is detected by the plugin's third-priority discovery path.
+
+#![cfg(feature = "plugins")]
+
+use crate::common::harness::{copy_plugin, copy_plugin_lib, EditorTestHarness, HarnessOptions};
+use crossterm::event::{KeyCode, KeyModifiers};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+/// Bounded poll loop that panics with the screen on timeout, used
+/// instead of `harness.wait_until` so a bug surfaces in seconds
+/// with full context rather than waiting for the test runner's
+/// external timeout.
+fn bounded_wait<F>(harness: &mut EditorTestHarness, what: &str, mut cond: F)
+where
+    F: FnMut(&EditorTestHarness) -> bool,
+{
+    let max_iters = 200;
+    for _ in 0..max_iters {
+        harness.tick_and_render().unwrap();
+        if cond(harness) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        harness.advance_time(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "bounded_wait timed out: {what}. Screen:\n{}",
+        harness.screen_to_string()
+    );
+}
+
+/// Build a workspace with the given `devcontainer.json` content.
+/// Returns (TempDir guard, canonicalized workspace path).
+fn workspace_with_devcontainer(dc_json: &str) -> (tempfile::TempDir, PathBuf) {
+    i18n::set_locale("en");
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    let dc = workspace.join(".devcontainer");
+    fs::create_dir_all(&dc).unwrap();
+    fs::write(dc.join("devcontainer.json"), dc_json).unwrap();
+    let plugins_dir = workspace.join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    copy_plugin_lib(&plugins_dir);
+    copy_plugin(&plugins_dir, "devcontainer");
+    (temp, workspace)
+}
+
+/// Attach end-to-end: wait for plugin commands, fire
+/// `plugins_loaded`, accept the popup, and apply the staged
+/// authority (the production restart path the harness doesn't
+/// have).
+fn attach(harness: &mut EditorTestHarness) {
+    bounded_wait(harness, "plugin command registration", |h| {
+        let reg = h.editor().command_registry().read().unwrap();
+        reg.get_all().iter().any(|c| c.name == "%cmd.run_lifecycle")
+    });
+    harness.editor().fire_plugins_loaded_hook();
+    bounded_wait(harness, "Reopen popup", |h| {
+        let s = h.screen_to_string();
+        s.contains("Dev Container Detected") && s.contains("Reopen in Container")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    let max_iters = 200;
+    for _ in 0..max_iters {
+        harness.tick_and_render().unwrap();
+        if let Some(auth) = harness.editor_mut().take_pending_authority() {
+            harness.editor_mut().set_boot_authority(auth);
+            return;
+        }
+        if harness
+            .editor()
+            .authority()
+            .display_label
+            .starts_with("Container:")
+        {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        harness.advance_time(std::time::Duration::from_millis(50));
+    }
+    panic!("attach never landed an authority");
+}
+
+/// Drive the lifecycle picker for the (assumed-only) postCreateCommand.
+/// Waits for `probe` to materialize, returns its content. If the
+/// plugin runs entries in parallel the file appears quickly; if
+/// sequentially the wall clock balloons and tests can detect that.
+/// Drive the lifecycle picker for the (assumed-only)
+/// postCreateCommand entry. Returns once `Enter` has been
+/// dispatched on the picker — does NOT wait for any side-effect
+/// (file creation, screen update). Callers add the right wait.
+fn drive_lifecycle_picker(harness: &mut EditorTestHarness) {
+    harness
+        .send_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .unwrap();
+    bounded_wait(harness, "palette open", |h| h.editor().is_prompting());
+    harness.type_text("Dev Container: Run Lifecycle").unwrap();
+    bounded_wait(harness, "lifecycle palette match", |h| {
+        h.screen_to_string()
+            .contains("Dev Container: Run Lifecycle Command")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    bounded_wait(harness, "lifecycle picker shows postCreateCommand", |h| {
+        h.screen_to_string().contains("postCreateCommand")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+}
+
+fn run_post_create(harness: &mut EditorTestHarness, probe: &Path) -> String {
+    drive_lifecycle_picker(harness);
+    bounded_wait_for_file(harness, probe, std::time::Duration::from_secs(10));
+    fs::read_to_string(probe).unwrap_or_default()
+}
+
+/// Existence-only variant kept for tests where the picker's
+/// command is `touch <sentinel>` and the assertion is on file
+/// presence rather than content. For content-based assertions
+/// see [`bounded_wait_for_probe_line`].
+fn bounded_wait_for_file(
+    harness: &mut EditorTestHarness,
+    path: &Path,
+    deadline: std::time::Duration,
+) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        harness.tick_and_render().unwrap();
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        harness.advance_time(std::time::Duration::from_millis(25));
+    }
+    panic!(
+        "file {path:?} never appeared within {deadline:?}. Screen:\n{}",
+        harness.screen_to_string()
+    );
+}
+
+/// Wait for `path` to materialize and contain a line satisfying
+/// `expected`, ticking the harness on every iteration so the
+/// plugin's pending async work (the `editor.spawnProcess` Promise
+/// the lifecycle handler is awaiting) can resolve. Without the
+/// tick the spawned child runs but its completion message is
+/// never drained, and the post-spawn `setStatus("completed")`
+/// call never happens.
+///
+/// We can't just wait for *existence* because the fake `up` runs
+/// `postCreateCommand` in the background (per spec, anything past
+/// `waitFor` is async) and that bg run produces a different line
+/// than the picker run we're testing — see the `>>` rationale on
+/// the test JSONs. Whichever run finishes first creates the file;
+/// returning then would race with the slower picker run.
+fn bounded_wait_for_probe_line(
+    harness: &mut EditorTestHarness,
+    path: &Path,
+    expected: impl Fn(&str) -> bool,
+    deadline: std::time::Duration,
+) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        harness.tick_and_render().unwrap();
+        if path.exists() {
+            let content = fs::read_to_string(path).unwrap_or_default();
+            if content.lines().any(&expected) {
+                return;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        harness.advance_time(std::time::Duration::from_millis(25));
+    }
+    let content = fs::read_to_string(path).unwrap_or_default();
+    panic!(
+        "expected line never appeared in {path:?} within {deadline:?}. \
+         Probe contents:\n{content}\nScreen:\n{}",
+        harness.screen_to_string()
+    );
+}
+
+// ============================================================================
+// R1 — failing reproducer: object-form lifecycle should run in parallel.
+// ============================================================================
+
+/// **R1.** Spec: `postCreateCommand: { "a": "...", "b": "..." }`
+/// runs entries in parallel.  The plugin's
+/// `devcontainer_on_lifecycle_confirmed` runs them in a sequential
+/// `for` loop — wall-clock = sum of entry sleeps instead of the max.
+///
+/// Asserts parallelism **without** a wall-clock measurement
+/// (CONTRIBUTING.md rule #3 — no time-sensitive assertions).
+/// Each entry uses a barrier:
+///
+///   1. touch its own `start_X`
+///   2. wait until **every other entry's** `start_*` exists (with a
+///      bounded retry budget to fail fast if the others never start)
+///   3. touch its own `done_X`
+///
+/// If the plugin runs entries in parallel, all three `start_*`
+/// sentinels appear within milliseconds, every entry observes the
+/// others, and every entry touches its `done_*`.  The test waits
+/// for all three `done_*` sentinels.
+///
+/// If the plugin runs entries sequentially, the first entry's
+/// barrier wait can never succeed (the next entry can't start until
+/// the first finishes — chicken-and-egg).  The first entry exhausts
+/// its retry budget without touching `done_a`, then the second runs
+/// the same way, and only the **last** entry can touch its done
+/// sentinel.  The test sees `done_a` / `done_b` missing and fails
+/// with a clear "barrier never satisfied" message.
+///
+/// Bounded retry budget = 30 × 100ms = 3s, so the failure case
+/// runs in roughly `entries × 3s` wall time, well inside nextest's
+/// per-test timeout.
+#[test]
+fn lifecycle_object_form_must_run_in_parallel() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let start_a = probe_temp.path().join("start_a");
+    let start_b = probe_temp.path().join("start_b");
+    let start_c = probe_temp.path().join("start_c");
+    let done_a = probe_temp.path().join("done_a");
+    let done_b = probe_temp.path().join("done_b");
+    let done_c = probe_temp.path().join("done_c");
+
+    // Bash barrier script: touch own start, wait for the two siblings'
+    // starts to exist (up to 3s), then touch own done.  Each entry's
+    // command differs only in which sentinels it owns vs. waits on.
+    let barrier = |own_start: &Path, sib1: &Path, sib2: &Path, own_done: &Path| -> String {
+        format!(
+            r#"sh -c 'touch {own_start} && for i in $(seq 1 30); do if [ -f {sib1} ] && [ -f {sib2} ]; then touch {own_done}; exit 0; fi; sleep 0.1; done; exit 1'"#,
+            own_start = own_start.display(),
+            sib1 = sib1.display(),
+            sib2 = sib2.display(),
+            own_done = own_done.display(),
+        )
+    };
+
+    let cmd_a = barrier(&start_a, &start_b, &start_c, &done_a);
+    let cmd_b = barrier(&start_b, &start_a, &start_c, &done_b);
+    let cmd_c = barrier(&start_c, &start_a, &start_b, &done_c);
+
+    let dc_json = format!(
+        r#"{{
+  "name": "r1-parallel",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "postCreateCommand": {{
+    "a": {cmd_a},
+    "b": {cmd_b},
+    "done": {cmd_c}
+  }}
+}}
+"#,
+        cmd_a = serde_json::to_string(&cmd_a).unwrap(),
+        cmd_b = serde_json::to_string(&cmd_b).unwrap(),
+        cmd_c = serde_json::to_string(&cmd_c).unwrap(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    // Drive the lifecycle picker, then wait until **every** entry's
+    // done sentinel exists.  Can't just wait for `done_c` —
+    // `Promise.all` resolves in indeterminate order, and entry `c`
+    // can finish while `a` / `b` are still in their barrier loop.
+    // Bounded by 10s per entry; nextest enforces the outer per-test
+    // timeout.  In the parallel-success path each entry finishes
+    // within ~50ms of the others, so this is essentially three
+    // back-to-back O(1) existence checks.
+    drive_lifecycle_picker(&mut harness);
+    bounded_wait_for_file(&mut harness, &done_a, std::time::Duration::from_secs(10));
+    bounded_wait_for_file(&mut harness, &done_b, std::time::Duration::from_secs(10));
+    bounded_wait_for_file(&mut harness, &done_c, std::time::Duration::from_secs(10));
+
+    // All three barrier scripts must have completed.  In sequential
+    // execution, only the last entry to run has its barrier
+    // satisfied (it sees the previous entries' start sentinels
+    // already exist) — the first two exit 1 without touching their
+    // done.  `bounded_wait_for_file` panics on timeout, so reaching
+    // these asserts already proves the parallel case.  Kept as
+    // explicit assertions so the failure mode is obvious if a
+    // future refactor breaks the contract.
+    assert!(done_a.exists(), "entry `a` never satisfied the barrier");
+    assert!(done_b.exists(), "entry `b` never satisfied the barrier");
+    assert!(done_c.exists(), "entry `done` never satisfied the barrier");
+}
+
+// ============================================================================
+// G1-G5 — regression guards (pass today).
+// ============================================================================
+
+/// **G1.** Lifecycle command in array form: the plugin's
+/// `devcontainer_on_lifecycle_confirmed` array branch
+/// (`devcontainer.ts:700-707`) calls `editor.spawnProcess(bin,
+/// args, ...)` with the array's first element as `bin` and the
+/// rest as `args`. The test verifies a command of the form
+/// `["sh", "-c", "..."]` actually runs through that path.
+#[test]
+fn lifecycle_array_form_executes_verbatim() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let probe = probe_temp.path().join("g1.sentinel");
+
+    let dc_json = format!(
+        r#"{{
+  "name": "g1-array-form",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "postCreateCommand": ["sh", "-c", "touch {}"]
+}}
+"#,
+        probe.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+    let _ = run_post_create(&mut harness, &probe);
+
+    assert!(
+        probe.exists(),
+        "G1: array-form lifecycle command should execute via the \
+         array-branch in the plugin's lifecycle handler. Sentinel \
+         file at {probe:?} never appeared."
+    );
+}
+
+/// **G2.** Spec: when neither `remoteUser` nor `containerUser` is
+/// declared, the spawner must not pass a `-u` flag. The fake's
+/// `docker exec` only sets `FAKE_DC_USER` from `-u`; with no flag
+/// the env var is empty.
+#[test]
+fn no_user_means_no_dash_u_flag() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let probe = probe_temp.path().join("g2.log");
+
+    let dc_json = format!(
+        r#"{{
+  "name": "g2-no-user",
+  "image": "ubuntu:22.04",
+  "postCreateCommand": "echo USER_FLAG=${{FAKE_DC_USER-NONE}} > {}"
+}}
+"#,
+        probe.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+    let probe_text = run_post_create(&mut harness, &probe);
+
+    // FAKE_DC_USER is exported as an empty string when -u is
+    // absent (the fake initializes `user=""` and only overwrites
+    // it from `-u`). Empty / NONE both prove no -u was passed.
+    let line = probe_text.trim();
+    assert!(
+        line == "USER_FLAG=" || line == "USER_FLAG=NONE",
+        "G2: no remoteUser/containerUser should mean no `-u` flag. \
+         Probe: {line:?}"
+    );
+}
+
+/// **G3.** Spec: when `remoteUser` is unset, fall back to
+/// `containerUser`. The CLI is responsible for resolving the
+/// fallback before reporting `remoteUser` in the success JSON;
+/// the fake mirrors that. Asserts the spawner ends up passing
+/// `-u <containerUser>` and the child sees `FAKE_DC_USER=<that>`.
+#[test]
+fn remote_user_defaults_to_container_user() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let probe = probe_temp.path().join("g3.log");
+
+    // Append (`>>`) so the picker run and the fake `up`'s
+    // background-spawned `postCreateCommand` (direct sh, no
+    // `-u`, sees `FAKE_DC_USER=`) don't clobber each other.
+    // We then scan for the picker run's exact line.
+    let dc_json = format!(
+        r#"{{
+  "name": "g3-fallback",
+  "image": "ubuntu:22.04",
+  "containerUser": "node",
+  "postCreateCommand": "echo USER=$FAKE_DC_USER >> {}"
+}}
+"#,
+        probe.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+    drive_lifecycle_picker(&mut harness);
+    // Wait for the *picker's* contribution. The bg-run line
+    // (`USER=`) will land first because the bg path skips
+    // `docker exec`; without this wait we'd read a probe with
+    // only the bg line and miss the picker's line entirely.
+    bounded_wait_for_probe_line(
+        &mut harness,
+        &probe,
+        |l| l == "USER=node",
+        std::time::Duration::from_secs(10),
+    );
+    let probe_text = fs::read_to_string(&probe).unwrap_or_default();
+
+    assert!(
+        probe_text.lines().any(|l| l == "USER=node"),
+        "G3: with no remoteUser declared, spawner should pass \
+         `-u <containerUser>`. Probe: {probe_text:?}"
+    );
+}
+
+/// **G4.** JSONC support: the plugin's `parseJsonc` must accept
+/// `// line comments`, `/* block comments */`, and trailing
+/// commas. Asserted indirectly: if parsing failed, the popup
+/// would never fire because `findConfig` would skip the file.
+#[test]
+fn jsonc_config_with_comments_and_trailing_commas_is_detected() {
+    let dc_json = r#"{
+  // Top-level comment.
+  "name": "g4-jsonc",
+  /* block comment
+     spanning lines */
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "forwardPorts": [8080,], // trailing comma in array
+}
+"#;
+    let (_w_temp, workspace) = workspace_with_devcontainer(dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+
+    bounded_wait(&mut harness, "plugin command registration", |h| {
+        let reg = h.editor().command_registry().read().unwrap();
+        reg.get_all().iter().any(|c| c.name == "%cmd.run_lifecycle")
+    });
+    harness.editor().fire_plugins_loaded_hook();
+    bounded_wait(&mut harness, "Reopen popup", |h| {
+        let s = h.screen_to_string();
+        s.contains("Dev Container Detected") && s.contains("Reopen in Container")
+    });
+}
+
+/// **G5.** Spec: the plugin discovers configs at
+/// `.devcontainer/devcontainer.json`, `.devcontainer.json`, and
+/// `.devcontainer/<sub>/devcontainer.json`. This test puts the
+/// config under a subfolder only and asserts it's still detected.
+#[test]
+fn subfolder_devcontainer_json_is_detected() {
+    i18n::set_locale("en");
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().canonicalize().unwrap();
+    // No top-level `.devcontainer/devcontainer.json` — only the subfolder one.
+    let sub = workspace.join(".devcontainer").join("rust-dev");
+    fs::create_dir_all(&sub).unwrap();
+    fs::write(
+        sub.join("devcontainer.json"),
+        r#"{
+  "name": "g5-subfolder",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode"
+}
+"#,
+    )
+    .unwrap();
+    let plugins_dir = workspace.join("plugins");
+    fs::create_dir_all(&plugins_dir).unwrap();
+    copy_plugin_lib(&plugins_dir);
+    copy_plugin(&plugins_dir, "devcontainer");
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+
+    bounded_wait(&mut harness, "plugin command registration", |h| {
+        let reg = h.editor().command_registry().read().unwrap();
+        reg.get_all().iter().any(|c| c.name == "%cmd.run_lifecycle")
+    });
+    harness.editor().fire_plugins_loaded_hook();
+    bounded_wait(&mut harness, "Reopen popup", |h| {
+        let s = h.screen_to_string();
+        s.contains("Dev Container Detected") && s.contains("Reopen in Container")
+    });
+}
+
+// ============================================================================
+// R2 — failing reproducer: object-form must run all entries even on failure.
+// ============================================================================
+
+/// **R2.** Spec: object-form lifecycle commands run all entries
+/// (in parallel — see R1); the stage fails iff *any* entry exits
+/// non-zero. Today the plugin's
+/// `devcontainer_on_lifecycle_confirmed` runs entries
+/// sequentially in a `for` loop and `return`s on the first
+/// failure, so the second entry never runs at all. Spec
+/// violation: entry B should run regardless of A's exit code.
+///
+/// Test: A is `exit 1`, B is `touch <sentinel>`. After the
+/// picker reports failure, B's sentinel must exist. Today it
+/// doesn't (FAILS).
+#[test]
+fn lifecycle_object_form_must_run_all_entries_even_on_failure() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let b_sentinel = probe_temp.path().join("b.touched");
+
+    let dc_json = format!(
+        r#"{{
+  "name": "r2-fail-fast",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "postCreateCommand": {{
+    "a": "exit 1",
+    "b": "touch {b}"
+  }}
+}}
+"#,
+        b = b_sentinel.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    // Drive the picker. We don't `bounded_wait_for_file` on the
+    // sentinel because in the buggy path the file never appears —
+    // we'd hang the deadline. Instead wait for the *picker* to
+    // report a final status, then check the sentinel directly.
+    harness
+        .send_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .unwrap();
+    bounded_wait(&mut harness, "palette open", |h| h.editor().is_prompting());
+    harness.type_text("Dev Container: Run Lifecycle").unwrap();
+    bounded_wait(&mut harness, "lifecycle palette match", |h| {
+        h.screen_to_string()
+            .contains("Dev Container: Run Lifecycle Command")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    bounded_wait(
+        &mut harness,
+        "lifecycle picker shows postCreateCommand",
+        |h| h.screen_to_string().contains("postCreateCommand"),
+    );
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+
+    // Picker status ends with `<name> (<label>) failed (exit <c>)`
+    // on failure (current path) or `<name> completed successfully`
+    // on success (post-fix path) — both lowercased in the i18n
+    // bundle. Wait for either, generous deadline since the
+    // sequential path has to spawn `sh -c "exit 1"` first.
+    let max_iters = 400;
+    let mut found = false;
+    for _ in 0..max_iters {
+        harness.tick_and_render().unwrap();
+        let s = harness.screen_to_string();
+        if s.contains(" failed (exit ")
+            || s.contains(" completed successfully")
+            || b_sentinel.exists()
+        {
+            found = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        harness.advance_time(std::time::Duration::from_millis(25));
+    }
+    if !found {
+        eprintln!(
+            "R2: picker outcome never showed up. Final screen:\n{}",
+            harness.screen_to_string()
+        );
+    }
+    // Give one extra tick for any in-flight side effects to land.
+    harness.tick_and_render().unwrap();
+
+    assert!(
+        b_sentinel.exists(),
+        "R2 (failing on master): even when entry `a` exits 1, entry \
+         `b` must still run per spec. Sentinel {b_sentinel:?} missing."
+    );
+}
+
+// ============================================================================
+// R3 — passing guard: lifecycle hooks fire in spec order during up.
+// ============================================================================
+
+/// **R3.** Spec lifecycle order:
+///   `onCreateCommand` → `updateContentCommand` → `postCreateCommand`
+///   → `postStartCommand` → `postAttachCommand`
+///
+/// `initializeCommand` is the host-side prologue and runs before
+/// any of the above (the plugin runs it directly via
+/// `spawnHostProcess`); the rest run inside the container during
+/// `devcontainer up`. Our fake CLI faithfully runs each in
+/// order. This test defines all six hooks as `echo NAME >>
+/// order.log`, attaches once, and asserts `order.log` matches
+/// the spec sequence verbatim.
+#[test]
+fn lifecycle_hooks_fire_in_spec_order_during_up() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let order = probe_temp.path().join("order.log");
+
+    let dc_json = format!(
+        r#"{{
+  "name": "r3-order",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "initializeCommand":   "echo init >> {p}",
+  "onCreateCommand":     "echo onCreate >> {p}",
+  "updateContentCommand":"echo updateContent >> {p}",
+  "postCreateCommand":   "echo postCreate >> {p}",
+  "postStartCommand":    "echo postStart >> {p}",
+  "postAttachCommand":   "echo postAttach >> {p}"
+}}
+"#,
+        p = order.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    // Wait for the `postAttach` line — that's the last hook, so
+    // its presence proves all earlier hooks ran first.
+    bounded_wait_for_file(&mut harness, &order, std::time::Duration::from_secs(10));
+    bounded_wait(&mut harness, "postAttach line in order.log", |_| {
+        std::fs::read_to_string(&order)
+            .map(|s| s.contains("postAttach"))
+            .unwrap_or(false)
+    });
+
+    let raw = std::fs::read_to_string(&order).unwrap();
+    let lines: Vec<String> = raw
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    let expected = vec![
+        "init".to_string(),
+        "onCreate".to_string(),
+        "updateContent".to_string(),
+        "postCreate".to_string(),
+        "postStart".to_string(),
+        "postAttach".to_string(),
+    ];
+    assert_eq!(
+        lines, expected,
+        "R3: lifecycle hooks must fire in spec order: \
+         init → onCreate → updateContent → postCreate → postStart → postAttach"
+    );
+}
+
+// ============================================================================
+// G6 — forwardPorts as `host:port` string.
+// ============================================================================
+
+/// **G6.** Spec: `forwardPorts` entries are integer (0-65535) or
+/// `^([a-z0-9-]+):(\d{1,5})$` host:port string used to forward
+/// from a non-localhost host (e.g. an in-network DB). The plugin
+/// renders entries via `String(port)` so a string entry shows
+/// verbatim.
+#[test]
+fn forward_ports_host_port_string_renders_in_panel() {
+    let dc_json = r#"{
+  "name": "g6-host-port",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "forwardPorts": ["db:5432", 8080]
+}
+"#;
+    let (_w_temp, workspace) = workspace_with_devcontainer(dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        180,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    harness
+        .send_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .unwrap();
+    bounded_wait(&mut harness, "palette open", |h| h.editor().is_prompting());
+    harness.type_text("Show Forwarded Ports").unwrap();
+    bounded_wait(&mut harness, "ports palette match", |h| {
+        h.screen_to_string()
+            .contains("Dev Container: Show Forwarded Ports")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    bounded_wait(&mut harness, "ports panel renders", |h| {
+        h.screen_to_string().contains("Forwarded Ports")
+    });
+
+    let screen = harness.screen_to_string();
+    assert!(
+        screen.contains("db:5432"),
+        "G6: panel must render the host:port string `db:5432`. Screen:\n{screen}"
+    );
+    assert!(
+        screen.contains("8080"),
+        "G6: panel must still render the numeric port. Screen:\n{screen}"
+    );
+}
+
+// ============================================================================
+// G7 — portsAttributes onAutoForward.
+// ============================================================================
+
+/// **G7.** Spec `onAutoForward` enum:
+///   `notify` (default) | `openBrowser` | `openBrowserOnce`
+///   | `openPreview` | `silent` | `ignore`
+/// The plugin shows the value in parentheses next to the label
+/// in the ports panel.
+#[test]
+fn ports_attributes_on_auto_forward_renders_in_panel() {
+    let dc_json = r#"{
+  "name": "g7-auto-forward",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "forwardPorts": [3000, 9229],
+  "portsAttributes": {
+    "3000": { "label": "Web", "onAutoForward": "silent" },
+    "9229": { "label": "Debug", "onAutoForward": "notify" }
+  }
+}
+"#;
+    let (_w_temp, workspace) = workspace_with_devcontainer(dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        180,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    harness
+        .send_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .unwrap();
+    bounded_wait(&mut harness, "palette open", |h| h.editor().is_prompting());
+    harness.type_text("Show Forwarded Ports").unwrap();
+    bounded_wait(&mut harness, "ports palette match", |h| {
+        h.screen_to_string()
+            .contains("Dev Container: Show Forwarded Ports")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    bounded_wait(&mut harness, "ports panel renders", |h| {
+        h.screen_to_string().contains("Forwarded Ports")
+    });
+
+    let screen = harness.screen_to_string();
+    for (label, attr) in [("Web", "silent"), ("Debug", "notify")] {
+        let want = format!("{label} ({attr})");
+        assert!(
+            screen.contains(&want),
+            "G7: panel must render label + onAutoForward as `{want}`. Screen:\n{screen}"
+        );
+    }
+}
+
+// ============================================================================
+// B2 — failing reproducer: shutdownAction must stop the container on detach.
+// ============================================================================
+
+/// **B2.** Spec `shutdownAction` enum (image/Dockerfile):
+///   `none` | `stopContainer` (default)
+/// The attaching tool is responsible for honoring it on
+/// disconnect. The plugin's `devcontainer_detach` calls
+/// `editor.clearAuthority()` and stops there — it never asks the
+/// CLI / docker to stop the container. Test: declare
+/// `shutdownAction: "stopContainer"`, attach, detach, then
+/// assert the container's recorded status is `"stopped"`.
+/// Today the status remains `"running"` (FAILS).
+#[test]
+fn shutdown_action_stop_container_must_stop_on_detach() {
+    let dc_json = r#"{
+  "name": "b2-shutdown",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "shutdownAction": "stopContainer"
+}
+"#;
+    let (_w_temp, workspace) = workspace_with_devcontainer(dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    let label = harness.editor().authority().display_label.clone();
+    let container_id = label
+        .strip_prefix("Container:")
+        .expect("attached")
+        .to_string();
+
+    // Detach via the palette command.
+    harness
+        .send_key(KeyCode::Char('p'), KeyModifiers::CONTROL)
+        .unwrap();
+    bounded_wait(&mut harness, "palette open", |h| h.editor().is_prompting());
+    harness.type_text("Dev Container: Detach").unwrap();
+    bounded_wait(&mut harness, "detach palette match", |h| {
+        h.screen_to_string().contains("Dev Container: Detach")
+    });
+    harness
+        .send_key(KeyCode::Enter, KeyModifiers::NONE)
+        .unwrap();
+    // Detach calls `clearAuthority` which (mirroring
+    // `setAuthority`) stages a `pending_authority` for the local
+    // default and signals quit. Production's `main.rs` swaps it
+    // in via `set_boot_authority`; the harness has no main loop,
+    // so we do the swap inline.
+    let max_iters = 200;
+    for _ in 0..max_iters {
+        harness.tick_and_render().unwrap();
+        if let Some(auth) = harness.editor_mut().take_pending_authority() {
+            harness.editor_mut().set_boot_authority(auth);
+            break;
+        }
+        if !harness
+            .editor()
+            .authority()
+            .display_label
+            .starts_with("Container:")
+        {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        harness.advance_time(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        !harness
+            .editor()
+            .authority()
+            .display_label
+            .starts_with("Container:"),
+        "Detach should clear the container authority. label = {:?}",
+        harness.editor().authority().display_label,
+    );
+
+    // Allow post-detach side effects (the eventual `docker stop`
+    // call, once the plugin learns to make it) to land.
+    for _ in 0..20 {
+        harness.tick_and_render().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        harness.advance_time(std::time::Duration::from_millis(25));
+    }
+
+    let state = harness
+        .fake_devcontainer_state()
+        .expect("fake-devcontainer enabled");
+    let status_path = state.join("containers").join(&container_id).join("status");
+    let status = std::fs::read_to_string(&status_path)
+        .unwrap_or_else(|e| panic!("status file missing at {status_path:?}: {e}"))
+        .trim()
+        .to_string();
+    assert_eq!(
+        status, "stopped",
+        "B2 (failing on master): shutdownAction \"stopContainer\" \
+         must stop the container on Detach. Today the plugin only \
+         clears the authority. Status: {status}"
+    );
+}
+
+// ============================================================================
+// B3 — failing reproducer: userEnvProbe must apply env to lifecycle commands.
+// ============================================================================
+
+/// **B3.** Spec `userEnvProbe` enum:
+///   `none` | `loginShell` | `loginInteractiveShell` | `interactiveShell`
+/// The attaching tool runs the configured probe shell once at
+/// attach (e.g. `bash -lic env` for `loginShell`), captures its
+/// env, and applies the captured vars to all subsequently
+/// spawned remote processes. The plugin doesn't read
+/// `userEnvProbe` at all today — neither the
+/// `DevContainerConfig` interface nor any handler references it.
+///
+/// Test: stage a fake user-rc that exports `PROBED_VAR`, declare
+/// `userEnvProbe: "loginShell"` and `remoteEnv: {BASH_ENV: <rc>}`
+/// so a login bash would source it, and run a lifecycle command
+/// that echoes `$PROBED_VAR`. Today: empty (FAILS).
+#[test]
+fn user_env_probe_must_apply_captured_env_to_lifecycle_commands() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let probed = probe_temp.path().join("probed.log");
+    let rc_path = probe_temp.path().join("user.rc");
+    std::fs::write(&rc_path, "export PROBED_VAR=fromProfile\n").unwrap();
+
+    // Note: postCreateCommand appends (`>>`) instead of overwriting
+    // (`>`). The fake CLI runs lifecycle hooks during `up` (with no
+    // env propagation — the host-shell bg execution can't synthesize
+    // a userEnvProbe), and the picker re-runs them through the
+    // plugin's spawnProcess path (with env propagation, post-fix).
+    // Both runs land in the same probe file. Test asserts the file
+    // CONTAINS the expected line, so we don't race the bg overwrite.
+    let dc_json = format!(
+        r#"{{
+  "name": "b3-user-env-probe",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "userEnvProbe": "loginShell",
+  "remoteEnv": {{ "BASH_ENV": "{rc}" }},
+  "postCreateCommand": "echo PROBED=${{PROBED_VAR-unset}} >> {p}"
+}}
+"#,
+        rc = rc_path.display(),
+        p = probed.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+    let _ = run_post_create(&mut harness, &probed);
+
+    // Wait until the picker's run lands (the bg run writes
+    // PROBED=unset; the picker's run with userEnvProbe applied
+    // writes PROBED=fromProfile). bounded_wait_for_file returned
+    // when the FIRST line was written, but the picker's exec may
+    // still be in flight.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        let content = std::fs::read_to_string(&probed).unwrap_or_default();
+        if content.contains("PROBED=fromProfile") {
+            break;
+        }
+        harness.tick_and_render().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        harness.advance_time(std::time::Duration::from_millis(50));
+    }
+
+    let content = std::fs::read_to_string(&probed).unwrap_or_default();
+    assert!(
+        content.contains("PROBED=fromProfile"),
+        "B3: userEnvProbe `loginShell` must capture the user shell's \
+         env and apply it to lifecycle commands. Probe content:\n{content}"
+    );
+}
+
+// ============================================================================
+// B1 — passing guards: waitFor cuts the timeline.
+// ============================================================================
+
+/// Wait until `path` exists, polling at 25ms with a deadline.
+/// Doesn't tick the harness — the bg hooks run as detached host
+/// subshells so harness ticks don't matter for their progress.
+fn wait_for_file_path(path: &Path, deadline: std::time::Duration) -> bool {
+    let start = std::time::Instant::now();
+    while start.elapsed() < deadline {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    false
+}
+
+/// Read `order.log` (if present) into a Vec<String> of trimmed
+/// non-empty lines.
+fn read_order_log(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// **B1a — default waitFor.** Spec: `waitFor` defaults to
+/// `updateContentCommand`; pre-waitFor hooks (init, onCreate,
+/// updateContent) block `up`'s return; post-waitFor hooks
+/// (postCreate, postStart, postAttach) run in the background so
+/// the editor reaches "ready" without waiting for slow setup.
+///
+/// Test definition: each post-waitFor hook sleeps then writes
+/// its name to `order.log`. After the harness sees the container
+/// authority land, `order.log` must contain only the pre-waitFor
+/// names and NONE of the post-waitFor names. Eventually (a few
+/// seconds later) all six lines must materialize.
+///
+/// This is a regression guard for fake-CLI fidelity: if the fake
+/// stops backgrounding post-waitFor hooks (e.g. someone reverts
+/// the `&` in `bin/devcontainer`), the immediate-state assertion
+/// flips red. Also detects a future plugin change that gates
+/// "ready" on something other than `up` returning.
+#[test]
+fn wait_for_default_blocks_up_at_update_content_command() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let order = probe_temp.path().join("order.log");
+
+    // Pre-waitFor hooks are instant. Post-waitFor hooks sleep
+    // long enough that the test reliably observes the gap (the
+    // harness needs ~hundreds of ms to attach + take the staged
+    // authority + run the assertion before the bg sleeps end).
+    let dc_json = format!(
+        r#"{{
+  "name": "b1a-default-waitfor",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "initializeCommand":   "echo init >> {p}",
+  "onCreateCommand":     "echo onCreate >> {p}",
+  "updateContentCommand":"echo updateContent >> {p}",
+  "postCreateCommand":   "sleep 1 && echo postCreate >> {p}",
+  "postStartCommand":    "sleep 1.2 && echo postStart >> {p}",
+  "postAttachCommand":   "sleep 1.4 && echo postAttach >> {p}"
+}}
+"#,
+        p = order.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    // The order log must exist by now (pre-waitFor hooks ran
+    // synchronously during `up`). Read it immediately so we
+    // catch the pre-only window before the bg sleeps finish.
+    assert!(
+        wait_for_file_path(&order, std::time::Duration::from_secs(3)),
+        "order.log should exist after attach (pre-waitFor hooks ran synchronously)"
+    );
+    let immediate = read_order_log(&order);
+    let expected_pre: Vec<String> = ["init", "onCreate", "updateContent"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        immediate, expected_pre,
+        "B1a: with default waitFor=updateContentCommand, only \
+         pre-waitFor hooks should have run by the time `up` returns. \
+         Got: {immediate:?}"
+    );
+
+    // Now wait for all bg hooks to drain. `postAttach` is the
+    // slowest at sleep 1.4s; give a generous deadline.
+    let final_done_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < final_done_deadline {
+        let lines = read_order_log(&order);
+        if lines.len() >= 6 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let final_lines = read_order_log(&order);
+    assert_eq!(
+        final_lines,
+        vec![
+            "init".to_string(),
+            "onCreate".to_string(),
+            "updateContent".to_string(),
+            "postCreate".to_string(),
+            "postStart".to_string(),
+            "postAttach".to_string(),
+        ],
+        "B1a: bg hooks must eventually all run, in spec order. Got: \
+         {final_lines:?}"
+    );
+}
+
+/// **B1b — explicit waitFor.** Spec allows `waitFor` to name any
+/// hook earlier or later than the default. With
+/// `waitFor: "onCreateCommand"`, only `onCreateCommand` blocks
+/// `up`'s return; `updateContentCommand`, `postCreateCommand`,
+/// etc. all run in the background.
+///
+/// This proves the fake honors any value of `waitFor`, not just
+/// the default. Together with B1a it locks in the spec's
+/// "block until X has executed" contract.
+#[test]
+fn wait_for_explicit_value_changes_the_cutoff() {
+    let probe_temp = tempfile::tempdir().unwrap();
+    let order = probe_temp.path().join("order.log");
+
+    let dc_json = format!(
+        r#"{{
+  "name": "b1b-explicit-waitfor",
+  "image": "ubuntu:22.04",
+  "remoteUser": "vscode",
+  "waitFor": "onCreateCommand",
+  "initializeCommand":   "echo init >> {p}",
+  "onCreateCommand":     "echo onCreate >> {p}",
+  "updateContentCommand":"sleep 1 && echo updateContent >> {p}",
+  "postCreateCommand":   "sleep 1.2 && echo postCreate >> {p}"
+}}
+"#,
+        p = order.display(),
+    );
+    let (_w_temp, workspace) = workspace_with_devcontainer(&dc_json);
+
+    let mut harness = EditorTestHarness::create(
+        160,
+        40,
+        HarnessOptions::new()
+            .with_working_dir(workspace.clone())
+            .with_fake_devcontainer(),
+    )
+    .unwrap();
+    harness.tick_and_render().unwrap();
+    attach(&mut harness);
+
+    assert!(
+        wait_for_file_path(&order, std::time::Duration::from_secs(3)),
+        "order.log should exist after attach"
+    );
+    let immediate = read_order_log(&order);
+    assert_eq!(
+        immediate,
+        vec!["init".to_string(), "onCreate".to_string()],
+        "B1b: with waitFor=onCreateCommand, `updateContentCommand` and \
+         later must NOT have run when `up` returned. Got: {immediate:?}"
+    );
+
+    let final_done_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < final_done_deadline {
+        let lines = read_order_log(&order);
+        if lines.len() >= 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let final_lines = read_order_log(&order);
+    assert_eq!(
+        final_lines,
+        vec![
+            "init".to_string(),
+            "onCreate".to_string(),
+            "updateContent".to_string(),
+            "postCreate".to_string(),
+        ],
+        "B1b: bg hooks must eventually all run, in spec order. Got: \
+         {final_lines:?}"
+    );
+}

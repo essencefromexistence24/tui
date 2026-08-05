@@ -81,7 +81,7 @@ pub enum ConfigUpdate {
 /// Runs on `tokio::spawn` (`Send`). Receives raw [`ConfigChangeEvent`]s from
 /// the file watcher, diffs against last-known state, and sends [`ConfigUpdate`]
 /// messages to the agent via an `mpsc` channel.
-pub(crate) struct ConfigReloader {
+pub struct ConfigReloader {
     last_auth_key_hash: u64,
     last_global_config: toml::Value,
     /// Per-cwd content hash of the project MCP config files, used to
@@ -99,7 +99,7 @@ pub(crate) struct ConfigReloader {
 }
 
 impl ConfigReloader {
-    pub(crate) fn new(
+    pub fn new(
         grok_home: PathBuf,
         initial_auth_key_hash: u64,
         initial_config: toml::Value,
@@ -123,7 +123,7 @@ impl ConfigReloader {
     }
 
     /// Main loop. Batches all events from each debounce tick before processing.
-    pub(crate) async fn run(
+    pub async fn run(
         mut self,
         mut events: mpsc::UnboundedReceiver<ConfigChangeEvent>,
         cancel: CancellationToken,

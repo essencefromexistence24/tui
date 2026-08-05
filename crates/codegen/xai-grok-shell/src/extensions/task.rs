@@ -387,7 +387,7 @@ struct DeleteScheduledTaskResponse {
 }
 
 /// Handle `x.ai/scheduler/*` extension methods.
-pub(crate) async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/scheduler/delete" => {
             let req: DeleteScheduledTaskRequest = parse(args)?;
@@ -405,7 +405,7 @@ pub(crate) async fn handle_scheduler(agent: &MvpAgent, args: &acp::ExtRequest) -
 }
 
 /// Handle `x.ai/subagent/*` extension methods.
-pub(crate) async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     match args.method.as_ref() {
         "x.ai/subagent/cancel" => {
             let req: CancelSubagentRequest = parse(args)?;

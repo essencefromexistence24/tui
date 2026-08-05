@@ -18,7 +18,7 @@ pub enum DeferredSessionStartup {
         /// Conversation-entry bit (`source == "conversation"`), not sticky `--chat`.
         chat_kind: bool,
     },
-    /// Client-chosen id (`--session-id`), also mirrored into `preferred_session_id`.
+    /// Client-chosen id (`--session-id`); also stashes preferred for picker.
     NewWithId { session_id: String },
     /// Startup `--fork-session` after parent resolve.
     Fork {

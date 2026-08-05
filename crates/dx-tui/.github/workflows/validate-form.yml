@@ -1,0 +1,34 @@
+name: Validate Form
+
+on:
+  issues:
+    types: [opened, edited]
+  schedule:
+    - cron: "20 * * * *"
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Verify TypeScript script sources
+        run: node --experimental-strip-types scripts/verify-typescript-sources.ts
+
+      - name: Install Dependencies
+        run: |
+          cd scripts/validate-form
+          npm ci
+
+      - name: Validate Form
+        working-directory: scripts/validate-form
+        run: npm run validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

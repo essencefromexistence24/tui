@@ -37,6 +37,87 @@ impl AgentView {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.left_mouse_down = true;
+                let contains = |area: ratatui::layout::Rect| {
+                    mouse.column >= area.x
+                        && mouse.column < area.right()
+                        && mouse.row >= area.y
+                        && mouse.row < area.bottom()
+                };
+                if let Some(&(section, row, _)) = self
+                    .dx_ui
+                    .sidebar
+                    .row_areas
+                    .iter()
+                    .find(|(_, _, area)| contains(*area))
+                {
+                    match section {
+                        crate::dx::sidebar::TASKS_SECTION => {
+                            self.todo.overlay.toggle();
+                            self.todo.on_state_change();
+                            if self.todo.overlay.focused {
+                                self.set_active_pane(AgentPane::Todo, false);
+                            } else if self.active_pane == AgentPane::Todo {
+                                self.set_active_pane(AgentPane::Scrollback, false);
+                            }
+                        }
+                        crate::dx::sidebar::WORKFLOWS_SECTION => {
+                            self.show_workflows = true;
+                        }
+                        crate::dx::sidebar::PROMPTS_SECTION => self.toggle_queue_pane(),
+                        crate::dx::sidebar::SUBAGENTS_SECTION => {
+                            if let Some(session_id) = self.subagent_views.keys().nth(row).cloned() {
+                                self.open_subagent_fullscreen(session_id);
+                            }
+                        }
+                        crate::dx::sidebar::PLUGINS_SECTION => {
+                            return InputOutcome::Action(Action::OpenExtensionsModal {
+                                tab: crate::views::extensions_modal::ExtensionsTab::Plugins,
+                                trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
+                            });
+                        }
+                        crate::dx::sidebar::MCP_SECTION => {
+                            return InputOutcome::Action(Action::OpenExtensionsModal {
+                                tab: crate::views::extensions_modal::ExtensionsTab::McpServers,
+                                trigger: xai_grok_telemetry::events::ExtensionsModalTrigger::KeyboardShortcut,
+                            });
+                        }
+                        _ => {}
+                    }
+                    return InputOutcome::Changed;
+                }
+                if let Some((section, _)) = self
+                    .dx_ui
+                    .sidebar
+                    .section_areas
+                    .iter()
+                    .enumerate()
+                    .find(|(_, area)| contains(**area))
+                {
+                    if section == crate::dx::sidebar::NOTES_SECTION
+                        && self.dx_ui.sidebar.accordion_open[crate::dx::sidebar::NOTES_SECTION]
+                    {
+                        return InputOutcome::Action(Action::EditNote);
+                    }
+                    self.dx_ui.sidebar.toggle_section(section);
+                    return InputOutcome::Changed;
+                }
+                if contains(self.dx_ui.minimap.top_indicator) {
+                    self.dx_ui.minimap.scroll = self.dx_ui.minimap.scroll.saturating_sub(1);
+                    return InputOutcome::Changed;
+                }
+                if contains(self.dx_ui.minimap.bottom_indicator) {
+                    self.dx_ui.minimap.scroll = self.dx_ui.minimap.scroll.saturating_add(1);
+                    return InputOutcome::Changed;
+                }
+                if contains(self.dx_ui.minimap.area) {
+                    let row = mouse.row.saturating_sub(self.dx_ui.minimap.area.y) as usize;
+                    let turn = self.dx_ui.minimap.scroll as usize + row;
+                    if turn < self.scrollback.turn_count() {
+                        self.dx_ui.minimap.active_turn = Some(turn);
+                        self.scrollback.jump_to_turn(turn);
+                    }
+                    return InputOutcome::Changed;
+                }
                 if self.hit_todo_close.contains(mouse.column, mouse.row) {
                     self.todo.overlay.escape();
                     self.todo.on_state_change();
@@ -254,9 +335,19 @@ impl AgentView {
                         xai_grok_telemetry::events::AnnouncementCtaSurface::Header,
                     ));
                 }
+                if self.hit_branch.contains(mouse.column, mouse.row) {
+                    self.dx_ui.editor.schedule_init();
+                    self.dx_ui.view = crate::dx::DxView::Editor;
+                    return InputOutcome::Changed;
+                }
                 if self.hit_cwd.contains(mouse.column, mouse.row) {
-                    let path = self.session.cwd.display().to_string();
-                    self.copy_to_clipboard(&path);
+                    self.dx_ui.file_browser.ensure_initialized();
+                    self.dx_ui.view = crate::dx::DxView::FileBrowser;
+                    return InputOutcome::Changed;
+                }
+                if self.hit_diff_stats.contains(mouse.column, mouse.row) {
+                    self.dx_ui.diff.open_and_refresh();
+                    self.dx_ui.view = crate::dx::DxView::Diff;
                     return InputOutcome::Changed;
                 }
                 if self.hit_badge.contains(mouse.column, mouse.row) {
@@ -271,13 +362,6 @@ impl AgentView {
                 }
                 if self.hit_follow_indicator.contains(mouse.column, mouse.row) {
                     self.scrollback.goto_bottom();
-                    return InputOutcome::Changed;
-                }
-                if self
-                    .hit_response_top_indicator
-                    .contains(mouse.column, mouse.row)
-                {
-                    self.scrollback.prev_response();
                     return InputOutcome::Changed;
                 }
                 if let Some(hd_area) = self.history_dropdown_area
@@ -781,6 +865,10 @@ impl AgentView {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.pending_link_click = None;
+                if self.scrollbar_dragging {
+                    self.apply_scrollbar_click(mouse.row);
+                    return InputOutcome::Changed;
+                }
                 tracing::debug!(
                     event = "scrollback_mouse_drag",
                     col = mouse.column,
@@ -991,6 +1079,29 @@ impl AgentView {
                 }
             }
             MouseEventKind::Moved => {
+                let in_minimap = self
+                    .dx_ui
+                    .minimap
+                    .area
+                    .contains((mouse.column, mouse.row).into());
+                let next_minimap_hover = in_minimap.then(|| {
+                    self.dx_ui.minimap.scroll as usize
+                        + mouse.row.saturating_sub(self.dx_ui.minimap.area.y) as usize
+                });
+                let next_minimap_hover =
+                    next_minimap_hover.filter(|turn| *turn < self.scrollback.turn_count());
+                if next_minimap_hover != self.dx_ui.minimap.hovered_turn {
+                    self.dx_ui.minimap.hovered_turn = next_minimap_hover;
+                    self.dx_ui.minimap.hovered_since = next_minimap_hover.map(|_| Instant::now());
+                    // Highlight the hovered turn without scrolling the
+                    // scrollback: jumping on hover shifts the minimap's
+                    // scroll, which would re-derive a different hovered turn
+                    // index every frame and keep resetting the hover timer so
+                    // the hover card never appears. Clicking still jumps.
+                    if let Some(turn) = next_minimap_hover {
+                        self.dx_ui.minimap.active_turn = Some(turn);
+                    }
+                }
                 tracing::debug!(
                     event = "scrollback_mouse_moved",
                     col = mouse.column,
@@ -1001,7 +1112,8 @@ impl AgentView {
                     "scrollback mouse moved"
                 );
                 if self.left_mouse_down
-                    && (self.pending_text_drag.is_some()
+                    && (self.scrollbar_dragging
+                        || self.pending_text_drag.is_some()
                         || self.drag_selection.is_some()
                         || self.pending_block_drag.is_some()
                         || self.block_drag_selection.is_some()
@@ -1105,9 +1217,6 @@ impl AgentView {
                 changed |= self
                     .hit_follow_indicator
                     .update_hover(mouse.column, mouse.row);
-                changed |= self
-                    .hit_response_top_indicator
-                    .update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cancel_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_button.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_watching_cue.update_hover(mouse.column, mouse.row);
@@ -1148,6 +1257,7 @@ impl AgentView {
                 changed |= self.hit_goal_status.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_bg_close.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_catalog_close.update_hover(mouse.column, mouse.row);
+                changed |= self.hit_branch.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_cwd.update_hover(mouse.column, mouse.row);
                 changed |= self.hit_upgrade_cta.update_hover(mouse.column, mouse.row);
                 {

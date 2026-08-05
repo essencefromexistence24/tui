@@ -14,14 +14,14 @@ type ExtResult = Result<acp::ExtResponse, acp::Error>;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FuzzyOpenResponse {
+pub struct FuzzyOpenResponse {
     pub session_id: String,
     pub search_id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FuzzyChangeResponse {
+pub struct FuzzyChangeResponse {
     pub session_id: String,
     pub search_id: String,
 }
@@ -65,7 +65,7 @@ fn resolve_cwd(
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FuzzyOpenRequest {
+pub struct FuzzyOpenRequest {
     /// Optional session ID - used to lookup cwd if cwd not provided directly
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
@@ -86,7 +86,7 @@ pub(crate) struct FuzzyOpenRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FuzzyChangeRequest {
+pub struct FuzzyChangeRequest {
     pub search_id: String,
     pub query: String,
     #[serde(default)]
@@ -97,7 +97,7 @@ pub(crate) struct FuzzyChangeRequest {
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FuzzyCloseRequest {
+pub struct FuzzyCloseRequest {
     pub search_id: String,
 }
 

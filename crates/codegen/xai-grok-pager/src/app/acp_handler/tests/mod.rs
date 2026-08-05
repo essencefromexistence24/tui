@@ -1845,7 +1845,6 @@ pub(super) fn task_completed_notif(
                 owner_session_id: None,
                 description: None,
                 is_backgrounded: false,
-                output_total_bytes: 0,
             },
             will_wake,
         },

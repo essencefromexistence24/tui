@@ -27,7 +27,7 @@ use xai_hunk_tracker::{
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GetHunksRequest {
+pub struct GetHunksRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     /// Filter by file path (optional)
@@ -39,14 +39,14 @@ pub(crate) struct GetHunksRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GetFilesRequest {
+pub struct GetFilesRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct HunkActionRequest {
+pub struct HunkActionRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub hunk_id: String,
@@ -55,7 +55,7 @@ pub(crate) struct HunkActionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct FileActionRequest {
+pub struct FileActionRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub path: String,
@@ -64,7 +64,7 @@ pub(crate) struct FileActionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct TurnActionRequest {
+pub struct TurnActionRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub prompt_index: usize,
@@ -73,7 +73,7 @@ pub(crate) struct TurnActionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AllActionRequest {
+pub struct AllActionRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     pub action: String, // "accept" | "reject"
@@ -81,7 +81,7 @@ pub(crate) struct AllActionRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GetSummaryRequest {
+pub struct GetSummaryRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
 }
@@ -125,19 +125,19 @@ pub struct FileSummary {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GetFilesResponse {
+pub struct GetFilesResponse {
     pub files: Vec<FileSummary>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GetAllFileContentsResponse {
+pub struct GetAllFileContentsResponse {
     pub files: Vec<FileContentEntry>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ActionResponse {
+pub struct ActionResponse {
     pub success: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,

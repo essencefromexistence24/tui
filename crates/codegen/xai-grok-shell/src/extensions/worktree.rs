@@ -71,13 +71,13 @@ pub struct ListWorktreeRequest {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ShowWorktreeRequest {
+pub struct ShowWorktreeRequest {
     pub id_or_path: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GcWorktreeRequest {
+pub struct GcWorktreeRequest {
     #[serde(default)]
     pub dry_run: bool,
     /// Duration string like "7d", "24h", "30m", "60s".
@@ -95,14 +95,14 @@ pub struct WorktreeDbPathResponse {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ResolveLocalForWorktreeResumeRequest {
+pub struct ResolveLocalForWorktreeResumeRequest {
     pub session_id: String,
     pub cwd: String,
 }
 
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ResolveLocalForWorktreeResumeResponse {
+pub struct ResolveLocalForWorktreeResumeResponse {
     pub found: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resolved_session_id: Option<String>,

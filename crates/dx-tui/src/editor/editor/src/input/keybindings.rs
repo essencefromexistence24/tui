@@ -1,0 +1,3995 @@
+use crate::config::Config;
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use rust_i18n::t;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Normalize a key for consistent lookup in keybinding resolution.
+///
+/// Terminals vary in how they report certain keys:
+/// - BackTab already encodes Shift+Tab, but some terminals also set SHIFT —
+///   strip the redundant SHIFT so bindings defined as "BackTab" match.
+/// - Shift+Backspace has no distinct semantics from plain Backspace — strip
+///   the redundant SHIFT so bindings defined as "Backspace" match both.
+/// - Uppercase letters may arrive as `Char('P')` + SHIFT (real Shift press
+///   with kitty keyboard protocol), `Char('P')` without SHIFT (typical
+///   terminal — the case carries the shift information, including with ALT:
+///   Alt+Shift+F arrives as `Char('F')` + ALT), or `Char('A')` with only
+///   CONTROL (CapsLock+Ctrl+A in some terminals). Lowercase the character and
+///   infer SHIFT so that a binding defined as `Shift+P` / `Alt+Shift+F`
+///   matches whether or not the terminal reports the modifier. The one
+///   exception is CONTROL: an uppercase letter with Ctrl is ambiguous between
+///   CapsLock+Ctrl+letter and Shift+Ctrl+letter, and treating it as the
+///   former preserves the long-standing intent that CapsLock+Ctrl+A still
+///   triggers the `Ctrl+A` binding — so don't infer SHIFT when CONTROL is set.
+pub(crate) fn normalize_key(code: KeyCode, modifiers: KeyModifiers) -> (KeyCode, KeyModifiers) {
+	if code == KeyCode::BackTab {
+		return (code, modifiers.difference(KeyModifiers::SHIFT));
+	}
+	if code == KeyCode::Backspace {
+		return (code, modifiers.difference(KeyModifiers::SHIFT));
+	}
+	if let KeyCode::Char(c) = code {
+		if c.is_ascii_uppercase() {
+			let new_modifiers = if modifiers.contains(KeyModifiers::CONTROL) {
+				modifiers
+			} else {
+				modifiers | KeyModifiers::SHIFT
+			};
+			return (KeyCode::Char(c.to_ascii_lowercase()), new_modifiers);
+		}
+	}
+	(code, modifiers)
+}
+
+/// Global flag to force Linux-style keybinding display (Alt/Shift instead of ⌥/⇧)
+/// This is primarily used in tests to ensure consistent output across platforms.
+static FORCE_LINUX_KEYBINDINGS: AtomicBool = AtomicBool::new(false);
+
+/// Force Linux-style keybinding display (Alt/Shift instead of ⌥/⇧)
+/// Call this in tests to ensure consistent output regardless of platform.
+pub fn set_force_linux_keybindings(force: bool) {
+	FORCE_LINUX_KEYBINDINGS.store(force, Ordering::SeqCst);
+}
+
+/// Check if we should use macOS-style symbols for Alt and Shift keybindings
+fn use_macos_symbols() -> bool {
+	if FORCE_LINUX_KEYBINDINGS.load(Ordering::SeqCst) {
+		return false;
+	}
+	cfg!(target_os = "macos")
+}
+
+/// Check if the given modifiers allow text input (character insertion).
+///
+/// Returns true for:
+/// - No modifiers
+/// - Shift only (for uppercase letters, symbols)
+/// - Ctrl+Alt on Windows (AltGr key, used for special characters on international keyboards)
+///
+/// On Windows, the AltGr key is reported as Ctrl+Alt by crossterm, which is needed for
+/// typing characters like @, [, ], {, }, etc. on German, French, and other keyboard layouts.
+/// See: https://github.com/crossterm-rs/crossterm/issues/820
+fn is_text_input_modifier(modifiers: KeyModifiers) -> bool {
+	if modifiers.is_empty() || modifiers == KeyModifiers::SHIFT {
+		return true;
+	}
+
+	// Windows: AltGr is reported as Ctrl+Alt by crossterm.
+	// AltGr+Shift is needed for some layouts (e.g. Italian: AltGr+Shift+è = '{').
+	// See: https://github.com/anomalyco/dx/issues/993
+	#[cfg(windows)]
+	if modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT)
+		|| modifiers == (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT)
+	{
+		return true;
+	}
+
+	false
+}
+
+/// Format a keybinding as a user-friendly string
+/// On macOS, uses native symbols: ⌃ (Control), ⌥ (Option), ⇧ (Shift) without separators
+/// On other platforms, uses "Ctrl+Alt+Shift+" format
+pub fn format_keybinding(keycode: &KeyCode, modifiers: &KeyModifiers) -> String {
+	let mut result = String::new();
+
+	// On macOS, use native symbols: ⌃ (Control), ⌥ (Option/Alt), ⇧ (Shift), ⌘ (Command)
+	let (ctrl_label, alt_label, shift_label, super_label) = if use_macos_symbols() {
+		("⌃", "⌥", "⇧", "⌘")
+	} else {
+		("Ctrl", "Alt", "Shift", "Super")
+	};
+
+	let use_plus = !use_macos_symbols();
+
+	if modifiers.contains(KeyModifiers::SUPER) {
+		result.push_str(super_label);
+		if use_plus {
+			result.push('+');
+		}
+	}
+	if modifiers.contains(KeyModifiers::CONTROL) {
+		result.push_str(ctrl_label);
+		if use_plus {
+			result.push('+');
+		}
+	}
+	if modifiers.contains(KeyModifiers::ALT) {
+		result.push_str(alt_label);
+		if use_plus {
+			result.push('+');
+		}
+	}
+	if modifiers.contains(KeyModifiers::SHIFT) {
+		result.push_str(shift_label);
+		if use_plus {
+			result.push('+');
+		}
+	}
+
+	match keycode {
+		KeyCode::Enter => result.push_str("Enter"),
+		KeyCode::Backspace => result.push_str("Backspace"),
+		KeyCode::Delete => result.push_str("Del"),
+		KeyCode::Tab => result.push_str("Tab"),
+		KeyCode::Esc => result.push_str("Esc"),
+		KeyCode::Left => result.push('←'),
+		KeyCode::Right => result.push('→'),
+		KeyCode::Up => result.push('↑'),
+		KeyCode::Down => result.push('↓'),
+		KeyCode::Home => result.push_str("Home"),
+		KeyCode::End => result.push_str("End"),
+		KeyCode::PageUp => result.push_str("PgUp"),
+		KeyCode::PageDown => result.push_str("PgDn"),
+		KeyCode::Char(' ') => result.push_str("Space"),
+		KeyCode::Char(c) => result.push_str(&c.to_uppercase().to_string()),
+		KeyCode::F(n) => result.push_str(&format!("F{}", n)),
+		_ => return String::new(),
+	}
+
+	result
+}
+
+/// Returns a priority score for a keybinding key.
+/// Lower scores indicate canonical/preferred keys, higher scores indicate terminal equivalents.
+/// This helps ensure deterministic selection when multiple keybindings exist for an action.
+fn keybinding_priority_score(key: &KeyCode) -> u32 {
+	match key {
+		// Terminal equivalents get higher scores (deprioritized)
+		KeyCode::Char('@') => 100, // Equivalent of Space
+		KeyCode::Char('7') => 100, // Equivalent of /
+		KeyCode::Char('_') => 100, // Equivalent of -
+		// Ctrl+H as backspace equivalent is handled differently (only plain Ctrl+H)
+		// All other keys get default priority
+		_ => 0,
+	}
+}
+
+/// Returns terminal key equivalents for a given key combination.
+///
+/// Some key combinations are sent differently by terminals:
+/// - Ctrl+/ is often sent as Ctrl+7
+/// - Ctrl+Backspace is often sent as Ctrl+H
+/// - Ctrl+Space is often sent as Ctrl+@ (NUL)
+/// - Ctrl+[ is often sent as Escape
+///
+/// This function returns any equivalent key combinations that should be
+/// treated as aliases for the given key.
+pub fn terminal_key_equivalents(
+	key: KeyCode,
+	modifiers: KeyModifiers,
+) -> Vec<(KeyCode, KeyModifiers)> {
+	let mut equivalents = Vec::new();
+
+	// Only consider equivalents when Ctrl is pressed
+	if modifiers.contains(KeyModifiers::CONTROL) {
+		let base_modifiers = modifiers; // Keep all modifiers including Ctrl
+
+		match key {
+			// Ctrl+/ is often sent as Ctrl+7
+			KeyCode::Char('/') => {
+				equivalents.push((KeyCode::Char('7'), base_modifiers));
+			}
+			KeyCode::Char('7') => {
+				equivalents.push((KeyCode::Char('/'), base_modifiers));
+			}
+
+			// Ctrl+Backspace is often sent as Ctrl+H
+			KeyCode::Backspace => {
+				equivalents.push((KeyCode::Char('h'), base_modifiers));
+			}
+			KeyCode::Char('h') if modifiers == KeyModifiers::CONTROL => {
+				// Only add Backspace equivalent for plain Ctrl+H (not Ctrl+Shift+H etc.)
+				equivalents.push((KeyCode::Backspace, base_modifiers));
+			}
+
+			// Ctrl+Space is often sent as Ctrl+@ (NUL character, code 0)
+			KeyCode::Char(' ') => {
+				equivalents.push((KeyCode::Char('@'), base_modifiers));
+			}
+			KeyCode::Char('@') => {
+				equivalents.push((KeyCode::Char(' '), base_modifiers));
+			}
+
+			// Ctrl+- is often sent as Ctrl+_
+			KeyCode::Char('-') => {
+				equivalents.push((KeyCode::Char('_'), base_modifiers));
+			}
+			KeyCode::Char('_') => {
+				equivalents.push((KeyCode::Char('-'), base_modifiers));
+			}
+
+			_ => {}
+		}
+	}
+
+	equivalents
+}
+
+/// Context in which a keybinding is active
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum KeyContext {
+	/// Global bindings that work in all contexts (checked first with highest priority)
+	Global,
+	/// Normal editing mode
+	Normal,
+	/// Prompt/minibuffer is active
+	Prompt,
+	/// A find/replace search prompt is active. A narrowing of `Prompt`: it
+	/// owns the match-mode toggles (case / whole word / regex / confirm-each)
+	/// and falls through to `Prompt` for every generic editing/navigation key.
+	/// Keeping these toggles out of the broad `Prompt` scope is what stops
+	/// e.g. Alt+W from flipping whole-word match mode while an unrelated
+	/// prompt (the save/discard/cancel close confirmation) is up.
+	SearchPrompt,
+	/// Popup window is visible
+	Popup,
+	/// Completion popup is visible (LSP or non-LSP). Takes precedence over `Popup`
+	/// for `PopupKind::Completion` so accept/dismiss can be bound independently
+	/// of the generic popup keys (Enter/Esc/Up/Down/PageUp/PageDown).
+	Completion,
+	/// File explorer has focus
+	FileExplorer,
+	/// The editor-global orchestrator dock has focus. Like
+	/// `FileExplorer` it is a persistent, non-modal chrome region, but
+	/// it is owned by the `Editor` (not per-window) — it shows all
+	/// sessions and survives session switches.
+	Dock,
+	/// Menu bar is active
+	Menu,
+	/// Terminal has focus
+	Terminal,
+	/// Settings modal is active
+	Settings,
+	/// Composite buffer (side-by-side diff) has focus
+	CompositeBuffer,
+	/// Buffer-local mode context (e.g. "search-replace-list")
+	Mode(String),
+}
+
+impl KeyContext {
+	/// Whether this context should allow all Normal-context bindings as fallbacks.
+	///
+	/// CompositeBuffer is a specialized Normal view with extra context-specific
+	/// bindings layered on top. All standard navigation bindings (arrows,
+	/// PageUp/Down, etc.) should still work, so it falls through fully to
+	/// Normal rather than restricting to application-wide actions only.
+	pub fn allows_normal_fallthrough(&self) -> bool {
+		matches!(self, Self::CompositeBuffer)
+	}
+
+	/// Whether this context should allow Normal-context bindings to fall
+	/// through when the action is in the curated UI / navigation set
+	/// (`is_terminal_ui_action`): tab/buffer switching, split navigation,
+	/// palette, settings, etc. These actions don't depend on a text cursor
+	/// and naturally apply to whichever buffer is currently active, so
+	/// users expect them to work even when keyboard focus is elsewhere
+	/// (e.g. on the file explorer). Issue #1903.
+	///
+	/// Also true for plugin `Mode(_)` contexts so that focus inside a
+	/// panel (search/replace, dashboard, git log, …) doesn't swallow
+	/// global navigation keys. `is_terminal_ui_action` is the curated
+	/// whitelist (split nav, palette, save, quit, help, …) — none of
+	/// which a sensible plugin mode would want to suppress. See §18 of
+	/// `docs/internal/search-replace-scope-replan-on-widgets.md`.
+	pub fn allows_ui_fallthrough(&self) -> bool {
+		matches!(self, Self::FileExplorer | Self::Dock | Self::Mode(_))
+	}
+
+	/// Check if a context should allow input
+	pub fn allows_text_input(&self) -> bool {
+		matches!(self, Self::Normal | Self::Prompt | Self::SearchPrompt | Self::FileExplorer)
+	}
+
+	/// The context whose bindings this context inherits when it has no binding
+	/// of its own for a key. `SearchPrompt` is a narrowing of `Prompt`, so it
+	/// inherits all of `Prompt`'s editing/navigation/confirm keys and only
+	/// adds (or overrides) the few search-option toggles it owns. Checked
+	/// after this context's own bindings but before the Normal fallthrough.
+	pub fn parent_context(&self) -> Option<Self> {
+		match self {
+			Self::SearchPrompt => Some(Self::Prompt),
+			_ => None,
+		}
+	}
+
+	/// Parse context from a "when" string
+	pub fn from_when_clause(when: &str) -> Option<Self> {
+		let trimmed = when.trim();
+		if let Some(mode_name) = trimmed.strip_prefix("mode:") {
+			return Some(Self::Mode(mode_name.to_string()));
+		}
+		Some(match trimmed {
+			"global" => Self::Global,
+			"prompt" => Self::Prompt,
+			"searchPrompt" | "search_prompt" => Self::SearchPrompt,
+			"popup" => Self::Popup,
+			"completion" => Self::Completion,
+			"fileExplorer" | "file_explorer" => Self::FileExplorer,
+			"dock" => Self::Dock,
+			"normal" => Self::Normal,
+			"menu" => Self::Menu,
+			"terminal" => Self::Terminal,
+			"settings" => Self::Settings,
+			"compositeBuffer" | "composite_buffer" => Self::CompositeBuffer,
+			_ => return None,
+		})
+	}
+
+	/// Convert context to "when" clause string
+	pub fn to_when_clause(&self) -> String {
+		match self {
+			Self::Global => "global".to_string(),
+			Self::Normal => "normal".to_string(),
+			Self::Prompt => "prompt".to_string(),
+			Self::SearchPrompt => "searchPrompt".to_string(),
+			Self::Popup => "popup".to_string(),
+			Self::Completion => "completion".to_string(),
+			Self::FileExplorer => "fileExplorer".to_string(),
+			Self::Dock => "dock".to_string(),
+			Self::Menu => "menu".to_string(),
+			Self::Terminal => "terminal".to_string(),
+			Self::Settings => "settings".to_string(),
+			Self::CompositeBuffer => "compositeBuffer".to_string(),
+			Self::Mode(name) => format!("mode:{}", name),
+		}
+	}
+}
+
+/// High-level actions that can be performed in the editor
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Action {
+	// Character input
+	InsertChar(char),
+	InsertNewline,
+	InsertTab,
+
+	// Basic movement
+	MoveLeft,
+	MoveRight,
+	MoveUp,
+	MoveDown,
+	ViMoveUp,   // Vim 'k' - move up, clamping the caret to the line's last char
+	ViMoveDown, // Vim 'j' - move down, clamping the caret to the line's last char
+	MoveWordLeft,
+	MoveWordRight,
+	MoveWordEnd,     // Move to end of current word (Ctrl+Right style, past the end)
+	ViMoveWordEnd,   // Vim 'e' - move to end of word (ON last char, advances from word-end)
+	MoveLeftInLine,  // Move left without crossing line boundaries
+	MoveRightInLine, // Move right without crossing line boundaries
+	MoveLineStart,
+	MoveLineEnd,
+	MoveLineUp,
+	MoveLineDown,
+	MoveToParagraphUp,
+	MoveToParagraphDown,
+	MovePageUp,
+	MovePageDown,
+	MoveDocumentStart,
+	MoveDocumentEnd,
+
+	// Selection movement (extends selection while moving)
+	SelectLeft,
+	SelectRight,
+	SelectUp,
+	SelectDown,
+	SelectToParagraphUp,   // Jump to previous empty line with selection
+	SelectToParagraphDown, // Jump to next empty line with selection
+	SelectWordLeft,
+	SelectWordRight,
+	SelectWordEnd,   // Select to end of current word
+	ViSelectWordEnd, // Vim 'e' selection - select to end of word (ON last char)
+	SelectLineStart,
+	SelectLineEnd,
+	SelectDocumentStart,
+	SelectDocumentEnd,
+	SelectPageUp,
+	SelectPageDown,
+	SelectAll,
+	SelectWord,
+	SelectLine,
+	ExpandSelection,
+
+	// Block/rectangular selection (column-wise)
+	BlockSelectLeft,
+	BlockSelectRight,
+	BlockSelectUp,
+	BlockSelectDown,
+
+	// Editing
+	DeleteBackward,
+	DeleteForward,
+	DeleteWordBackward,
+	DeleteWordForward,
+	DeleteLine,
+	DeleteToLineEnd,
+	DeleteToLineStart,
+	DeleteViWordEnd, // Delete from cursor to end of word (vim de)
+	TransposeChars,
+	OpenLine,
+	DuplicateLine,
+
+	// View
+	Recenter,
+
+	// Selection
+	SetMark,
+	CancelMark,
+	ClearMark,
+
+	// Clipboard
+	Copy,
+	CopyWithTheme(String),
+	Cut,
+	Paste,
+	/// Copy the absolute filesystem path of the active buffer's file to the clipboard.
+	CopyFilePath,
+	/// Copy the active buffer's file path relative to the workspace root, falling
+	/// back to the absolute path if the file lives outside the workspace.
+	CopyRelativeFilePath,
+
+	// Vi-style yank (copy without selection, then restore cursor)
+	YankWordForward,
+	YankWordBackward,
+	YankToLineEnd,
+	YankToLineStart,
+	YankViWordEnd, // Yank from cursor to end of word (vim ye)
+
+	// Multi-cursor
+	AddCursorAbove,
+	AddCursorBelow,
+	AddCursorNextMatch,
+	AddCursorsToLineEnds,
+	RemoveSecondaryCursors,
+
+	// File operations
+	Save,
+	SaveAs,
+	Open,
+	SwitchProject,
+	New,
+	Close,
+	CloseTab,
+	Quit,
+	ForceQuit,
+	Detach,
+	Revert,
+	ToggleAutoRevert,
+	FormatBuffer,
+	TrimTrailingWhitespace,
+	EnsureFinalNewline,
+
+	// Navigation
+	GotoLine,
+	ScanLineIndex,
+	GoToMatchingBracket,
+	JumpToNextError,
+	JumpToPreviousError,
+
+	// Smart editing
+	SmartHome,
+	DedentSelection,
+	ToggleComment,
+	DabbrevExpand,
+	ToggleFold,
+
+	// Bookmarks
+	SetBookmark(char),
+	JumpToBookmark(char),
+	ClearBookmark(char),
+	ListBookmarks,
+
+	// Search options
+	ToggleSearchCaseSensitive,
+	ToggleSearchWholeWord,
+	ToggleSearchRegex,
+	ToggleSearchConfirmEach,
+
+	// Macros
+	StartMacroRecording,
+	StopMacroRecording,
+	PlayMacro(char),
+	ToggleMacroRecording(char),
+	ShowMacro(char),
+	ListMacros,
+	PromptRecordMacro,
+	PromptPlayMacro,
+	PlayLastMacro,
+	/// Prompt for a register, then append its macro to `init.ts` as an
+	/// editable `editor.defineMacro(...)` block and reload.
+	PromptSaveMacroToInit,
+	/// Prompt for a register, then append its macro to `init.ts` as an
+	/// editable `registerHandler`/`registerCommand` stub and reload.
+	PromptPromoteMacro,
+
+	// Bookmarks (prompt-based)
+	PromptSetBookmark,
+	PromptJumpToBookmark,
+
+	// Undo/redo
+	Undo,
+	Redo,
+
+	// View
+	ScrollUp,
+	ScrollDown,
+	ShowHelp,
+	ShowKeyboardShortcuts,
+	ShowWarnings,
+	ShowStatusLog,
+	ShowLspStatus,
+	ShowRemoteIndicatorMenu,
+	ShowReadOnlyMenu,
+	ClearWarnings,
+	CommandPalette, // Alias for QuickOpen — kept for keymap/plugin compatibility
+	/// Quick Open - unified prompt with prefix-based provider routing
+	QuickOpen,
+	/// Quick Open - buffers (prefix: "#")
+	QuickOpenBuffers,
+	/// Quick Open - files (empty prefix)
+	QuickOpenFiles,
+	/// Open Live Grep as a floating overlay (issue #1796).
+	OpenLiveGrep,
+	/// Re-open Live Grep with the prior query and selection.
+	ResumeLiveGrep,
+	/// Toggle focus on the Utility Dock. If the dock exists and is not
+	/// focused, focus it. If it is focused, return focus to the
+	/// previously active editor split.
+	ToggleUtilityDock,
+	/// Open a terminal inside the Utility Dock (creates the dock if
+	/// absent; otherwise swaps the active dock buffer to a terminal).
+	OpenTerminalInDock,
+	/// Switch the Live Grep overlay to the next available registered
+	/// search provider (skipping unavailable ones), then re-run the
+	/// current query under it. Plumbs through to the
+	/// `live_grep_cycle_provider` plugin handler.
+	CycleLiveGrepProvider,
+	ToggleLineWrap,
+	ToggleCurrentLineHighlight,
+	ToggleOccurrenceHighlight,
+	ToggleReadOnly,
+	TogglePageView,
+	SetPageWidth,
+	InspectThemeAtCursor,
+	SelectTheme,
+	SelectKeybindingMap,
+	SelectCursorStyle,
+	SelectLocale,
+
+	// Buffer/tab navigation
+	NextBuffer,
+	PrevBuffer,
+	SwitchToPreviousTab,
+	SwitchToTabByName,
+
+	// Tab scrolling
+	ScrollTabsLeft,
+	ScrollTabsRight,
+
+	// Position history navigation
+	NavigateBack,
+	NavigateForward,
+
+	// Split view operations
+	SplitHorizontal,
+	SplitVertical,
+	CloseSplit,
+	NextSplit,
+	PrevSplit,
+	NextWindow,
+	PrevWindow,
+	IncreaseSplitSize,
+	DecreaseSplitSize,
+	ToggleMaximizeSplit,
+
+	// Prompt mode actions
+	PromptConfirm,
+	/// PromptConfirm with recorded text for macro playback
+	PromptConfirmWithText(String),
+	PromptCancel,
+	PromptBackspace,
+	PromptDelete,
+	PromptMoveLeft,
+	PromptMoveRight,
+	PromptMoveStart,
+	PromptMoveEnd,
+	PromptSelectPrev,
+	PromptSelectNext,
+	PromptPageUp,
+	PromptPageDown,
+	PromptAcceptSuggestion,
+	PromptMoveWordLeft,
+	PromptMoveWordRight,
+	// Advanced prompt editing (word operations, clipboard)
+	PromptDeleteWordForward,
+	PromptDeleteWordBackward,
+	PromptDeleteToLineEnd,
+	PromptCopy,
+	PromptCut,
+	PromptPaste,
+	// Prompt selection actions
+	PromptMoveLeftSelecting,
+	PromptMoveRightSelecting,
+	PromptMoveHomeSelecting,
+	PromptMoveEndSelecting,
+	PromptSelectWordLeft,
+	PromptSelectWordRight,
+	PromptSelectAll,
+
+	// File browser actions
+	FileBrowserToggleHidden,
+	FileBrowserToggleDetectEncoding,
+
+	// Popup mode actions
+	PopupSelectNext,
+	PopupSelectPrev,
+	PopupPageUp,
+	PopupPageDown,
+	PopupConfirm,
+	PopupCancel,
+	/// Transfer keyboard focus to the topmost visible popup. LSP popups
+	/// are shown unfocused (so they don't silently swallow keystrokes);
+	/// this action lets the user grab them with the keyboard. Default
+	/// binding is `Alt+T` and is configurable via the keybinding map.
+	PopupFocus,
+
+	// Completion popup actions (override generic Popup keys for PopupKind::Completion)
+	CompletionAccept,
+	CompletionDismiss,
+
+	// File explorer operations
+	ToggleFileExplorer,
+	// File explorer side (left/right) toggle
+	ToggleFileExplorerSide,
+	// Menu bar visibility
+	ToggleMenuBar,
+	// Tab bar visibility
+	ToggleTabBar,
+	// Status bar visibility
+	ToggleStatusBar,
+	// Prompt line visibility
+	TogglePromptLine,
+	// Scrollbar visibility
+	ToggleVerticalScrollbar,
+	ToggleHorizontalScrollbar,
+	FocusFileExplorer,
+	FocusEditor,
+	/// Toggle keyboard focus between the editor/explorer area and the
+	/// persistent orchestrator dock (the left session column). When the
+	/// dock is hidden, this opens and focuses it.
+	ToggleDockFocus,
+	FileExplorerUp,
+	FileExplorerDown,
+	FileExplorerPageUp,
+	FileExplorerPageDown,
+	FileExplorerExpand,
+	FileExplorerCollapse,
+	FileExplorerOpen,
+	FileExplorerRefresh,
+	FileExplorerNewFile,
+	FileExplorerNewDirectory,
+	FileExplorerDelete,
+	FileExplorerRename,
+	FileExplorerToggleHidden,
+	FileExplorerToggleGitignored,
+	FileExplorerSearchClear,
+	FileExplorerSearchBackspace,
+	FileExplorerCopy,
+	FileExplorerCut,
+	FileExplorerPaste,
+	FileExplorerDuplicate,
+	FileExplorerCopyFullPath,
+	FileExplorerCopyRelativePath,
+	FileExplorerExtendSelectionUp,
+	FileExplorerExtendSelectionDown,
+	FileExplorerToggleSelect,
+	FileExplorerSelectAll,
+
+	// LSP operations
+	LspCompletion,
+	LspGotoDefinition,
+	LspReferences,
+	LspImplementation,
+	LspRename,
+	LspHover,
+	LspSignatureHelp,
+	LspCodeActions,
+	LspRestart,
+	LspStop,
+	LspToggleForBuffer,
+	ToggleInlayHints,
+	ToggleMouseHover,
+
+	// View toggles
+	ToggleLineNumbers,
+	/// Toggle line-number visibility for the current buffer only (per-buffer
+	/// override that persists across restart, without touching the global
+	/// default or other buffers).
+	ToggleLineNumbersCurrentBuffer,
+	/// Toggle line wrap for the current buffer only (per-buffer override that
+	/// persists across restart, without touching the global default or other
+	/// buffers).
+	ToggleLineWrapCurrentBuffer,
+	/// Toggle virtual space (off ↔ on) for the current buffer only
+	ToggleVirtualSpaceCurrentBuffer,
+	/// Playful full-screen wave that bounces all painted content around.
+	TriggerWaveAnimation,
+	ToggleScrollSync,
+	ToggleMouseCapture,
+	ToggleDebugHighlights, // Debug mode: show highlight/overlay byte ranges
+	SetBackground,
+	SetBackgroundBlend,
+
+	// Buffer settings (per-buffer overrides)
+	SetTabSize,
+	SetLineEnding,
+	SetEncoding,
+	ReloadWithEncoding,
+	SetLanguage,
+	ToggleIndentationStyle,
+	ToggleTabIndicators,
+	ToggleWhitespaceIndicators,
+	ResetBufferSettings,
+	AddRuler,
+	RemoveRuler,
+
+	// Config operations
+	DumpConfig,
+
+	// Force a full terminal clear + redraw (fixes display corruption from external output)
+	RedrawScreen,
+
+	// Search and replace
+	Search,
+	FindInSelection,
+	FindNext,
+	FindPrevious,
+	FindSelectionNext,     // Quick find next occurrence of selection (Ctrl+F3)
+	FindSelectionPrevious, // Quick find previous occurrence of selection (Ctrl+Shift+F3)
+	ClearSearch,           // Clear active search highlights (no-op if no search is active)
+	Replace,
+	QueryReplace, // Interactive replace (y/n/!/q for each match)
+
+	// Menu navigation
+	MenuActivate,     // Open menu bar (Alt or F10)
+	MenuClose,        // Close menu (Esc)
+	MenuLeft,         // Navigate to previous menu
+	MenuRight,        // Navigate to next menu
+	MenuUp,           // Navigate to previous item in menu
+	MenuDown,         // Navigate to next item in menu
+	MenuExecute,      // Execute selected menu item (Enter)
+	MenuOpen(String), // Open a specific menu by name (e.g., "File", "Edit")
+
+	// Keybinding map switching
+	SwitchKeybindingMap(String), // Switch to a named keybinding map (e.g., "default", "emacs", "vscode")
+
+	// Plugin custom actions
+	PluginAction(String),
+
+	// Settings operations
+	OpenSettings,        // Open the settings modal
+	CloseSettings,       // Close the settings modal
+	SettingsSave,        // Save settings changes
+	SettingsReset,       // Reset current setting to default
+	SettingsToggleFocus, // Toggle focus between category and settings panels
+	SettingsActivate,    // Activate/toggle the current setting
+	SettingsSearch,      // Start search in settings
+	SettingsHelp,        // Show settings help overlay
+	SettingsIncrement,   // Increment number value or next dropdown option
+	SettingsDecrement,   // Decrement number value or previous dropdown option
+	SettingsInherit,     // Set nullable setting to null (inherit value)
+
+	// Terminal operations
+	OpenTerminal,            // Open a new terminal in the current split
+	OpenTerminalRight,       // Open a new terminal in a split to the right (vertical split)
+	OpenTerminalBelow,       // Open a new terminal in a split below (horizontal split)
+	CloseTerminal,           // Close the current terminal
+	FocusTerminal,           // Focus the terminal buffer (if viewing terminal, focus input)
+	TerminalEscape,          // Escape from terminal mode back to editor
+	ToggleKeyboardCapture,   // Toggle keyboard capture mode (all keys go to terminal)
+	TerminalPaste,           // Paste clipboard contents into terminal as a single batch
+	SendSelectionToTerminal, // Run the selection (or current line) in the last-focused terminal
+
+	// Shell command operations
+	ShellCommand,        // Run shell command on buffer/selection, output to new buffer
+	ShellCommandReplace, // Run shell command on buffer/selection, replace content
+
+	// Case conversion
+	ToUpperCase, // Convert selection to uppercase
+	ToLowerCase, // Convert selection to lowercase
+	ToggleCase,  // Toggle case of character under cursor (vim ~)
+	SortLines,   // Sort selected lines alphabetically
+
+	// Input calibration
+	CalibrateInput, // Open the input calibration wizard
+
+	// Event debug
+	EventDebug, // Open the event debug dialog
+
+	// Process control
+	SuspendProcess, // Suspend the editor process (SIGTSTP on Unix); resume with `fg`
+
+	// Keybinding editor
+	OpenKeybindingEditor, // Open the keybinding editor modal
+
+	// Plugin development
+	LoadPluginFromBuffer, // Load current buffer as a plugin
+
+	// User init.ts (design M4, M5, M6)
+	InitReload, // Reload ~/.config/dx/init.ts via the existing plugin pipeline
+	InitEdit,   // Open ~/.config/dx/init.ts (creates from template if missing)
+	InitCheck,  // Syntax-check ~/.config/dx/init.ts via oxc
+
+	// Composite buffer (side-by-side diff) hunk navigation
+	CompositeNextHunk, // Navigate to the next hunk in a composite diff view
+	CompositePrevHunk, // Navigate to the previous hunk in a composite diff view
+
+	// Workspace trust (per-project process-execution policy)
+	WorkspaceTrustTrust,    // Trust this workspace: allow all process execution
+	WorkspaceTrustRestrict, // Restrict: no repo-controlled execution (the safe default)
+	WorkspaceTrustBlock,    // Block: no process execution at all
+	WorkspaceTrustPrompt,   // Open the workspace-trust dialog to change the level
+
+	// No-op
+	None,
+}
+
+/// Macro that generates both `Action::from_str` and `Action::all_action_names` from a single
+/// definition, ensuring the list of valid action name strings is always in sync at compile time.
+///
+/// The first argument (`$args_name`) is the identifier used for the args parameter in custom
+/// bodies. This is needed so that macro hygiene allows the custom body expressions to reference
+/// the function parameter (both the definition and usage share the call-site span).
+///
+/// Four categories of action mappings:
+/// - `simple`: `"name" => Variant` — no args needed
+/// - `alias`: `"name" => Variant` — like simple, but only for from_str (not to_action_str)
+/// - `with_char`: `"name" => Variant` — passes through `with_char(args, ...)` for char-arg actions
+/// - `custom`: `"name" => { body }` — arbitrary expression using `$args_name` for complex arg parsing
+macro_rules! define_action_str_mapping {
+    (
+        $args_name:ident;
+        simple { $($s_name:literal => $s_variant:ident),* $(,)? }
+        alias { $($a_name:literal => $a_variant:ident),* $(,)? }
+        with_char { $($c_name:literal => $c_variant:ident),* $(,)? }
+        custom { $($x_name:literal => $x_variant:ident : $x_body:expr),* $(,)? }
+    ) => {
+        /// Parse action from string (used when loading from config)
+        pub fn from_str(s: &str, $args_name: &HashMap<String, serde_json::Value>) -> Option<Self> {
+            Some(match s {
+                $($s_name => Self::$s_variant,)*
+                $($a_name => Self::$a_variant,)*
+                $($c_name => return Self::with_char($args_name, Self::$c_variant),)*
+                $($x_name => $x_body,)*
+                // Unrecognized action names are treated as plugin actions, allowing
+                // keybindings for plugin-registered commands to load from config.
+                _ => Self::PluginAction(s.to_string()),
+            })
+        }
+
+        /// Convert an action back to its string name (inverse of from_str).
+        /// Returns the canonical action name string.
+        pub fn to_action_str(&self) -> String {
+            match self {
+                $(Self::$s_variant => $s_name.to_string(),)*
+                $(Self::$c_variant(_) => $c_name.to_string(),)*
+                $(Self::$x_variant(_) => $x_name.to_string(),)*
+                Self::PluginAction(name) => name.clone(),
+            }
+        }
+
+        /// All valid action name strings, sorted alphabetically.
+        /// Generated from the same macro as `from_str`, guaranteeing compile-time completeness.
+        pub fn all_action_names() -> Vec<String> {
+            let mut names = vec![
+                $($s_name.to_string(),)*
+                $($a_name.to_string(),)*
+                $($c_name.to_string(),)*
+                $($x_name.to_string(),)*
+            ];
+            names.sort();
+            names
+        }
+    };
+}
+
+impl Action {
+	fn with_char(
+		args: &HashMap<String, serde_json::Value>,
+		make_action: impl FnOnce(char) -> Self,
+	) -> Option<Self> {
+		if let Some(serde_json::Value::String(value)) = args.get("char") {
+			value.chars().next().map(make_action)
+		} else {
+			None
+		}
+	}
+
+	define_action_str_mapping! {
+			args;
+			simple {
+					"insert_newline" => InsertNewline,
+					"insert_tab" => InsertTab,
+
+					"move_left" => MoveLeft,
+					"move_right" => MoveRight,
+					"move_up" => MoveUp,
+					"move_down" => MoveDown,
+					"vi_move_up" => ViMoveUp,
+					"vi_move_down" => ViMoveDown,
+					"move_word_left" => MoveWordLeft,
+					"move_word_right" => MoveWordRight,
+					"move_word_end" => MoveWordEnd,
+					"vi_move_word_end" => ViMoveWordEnd,
+					"move_left_in_line" => MoveLeftInLine,
+					"move_right_in_line" => MoveRightInLine,
+					"move_line_start" => MoveLineStart,
+					"move_line_end" => MoveLineEnd,
+					"move_line_up" => MoveLineUp,
+					"move_line_down" => MoveLineDown,
+					"move_page_up" => MovePageUp,
+					"move_page_down" => MovePageDown,
+					"move_document_start" => MoveDocumentStart,
+					"move_document_end" => MoveDocumentEnd,
+					"move_to_paragraph_up" => MoveToParagraphUp,
+					"move_to_paragraph_down" => MoveToParagraphDown,
+
+					"select_left" => SelectLeft,
+					"select_right" => SelectRight,
+					"select_up" => SelectUp,
+					"select_down" => SelectDown,
+					"select_to_paragraph_up" => SelectToParagraphUp,
+					"select_to_paragraph_down" => SelectToParagraphDown,
+					"select_word_left" => SelectWordLeft,
+					"select_word_right" => SelectWordRight,
+					"select_word_end" => SelectWordEnd,
+					"vi_select_word_end" => ViSelectWordEnd,
+					"select_line_start" => SelectLineStart,
+					"select_line_end" => SelectLineEnd,
+					"select_document_start" => SelectDocumentStart,
+					"select_document_end" => SelectDocumentEnd,
+					"select_page_up" => SelectPageUp,
+					"select_page_down" => SelectPageDown,
+					"select_all" => SelectAll,
+					"select_word" => SelectWord,
+					"select_line" => SelectLine,
+					"expand_selection" => ExpandSelection,
+
+					"block_select_left" => BlockSelectLeft,
+					"block_select_right" => BlockSelectRight,
+					"block_select_up" => BlockSelectUp,
+					"block_select_down" => BlockSelectDown,
+
+					"delete_backward" => DeleteBackward,
+					"delete_forward" => DeleteForward,
+					"delete_word_backward" => DeleteWordBackward,
+					"delete_word_forward" => DeleteWordForward,
+					"delete_line" => DeleteLine,
+					"delete_to_line_end" => DeleteToLineEnd,
+					"delete_to_line_start" => DeleteToLineStart,
+					"delete_vi_word_end" => DeleteViWordEnd,
+					"transpose_chars" => TransposeChars,
+					"open_line" => OpenLine,
+					"duplicate_line" => DuplicateLine,
+					"recenter" => Recenter,
+					"set_mark" => SetMark,
+					"cancel_mark" => CancelMark,
+					"clear_mark" => ClearMark,
+
+					"copy" => Copy,
+					"cut" => Cut,
+					"paste" => Paste,
+					"copy_file_path" => CopyFilePath,
+					"copy_relative_file_path" => CopyRelativeFilePath,
+
+					"yank_word_forward" => YankWordForward,
+					"yank_word_backward" => YankWordBackward,
+					"yank_to_line_end" => YankToLineEnd,
+					"yank_to_line_start" => YankToLineStart,
+					"yank_vi_word_end" => YankViWordEnd,
+
+					"add_cursor_above" => AddCursorAbove,
+					"add_cursor_below" => AddCursorBelow,
+					"add_cursor_next_match" => AddCursorNextMatch,
+					"add_cursors_to_line_ends" => AddCursorsToLineEnds,
+					"remove_secondary_cursors" => RemoveSecondaryCursors,
+
+					"save" => Save,
+					"save_as" => SaveAs,
+					"open" => Open,
+					"switch_project" => SwitchProject,
+					"new" => New,
+					"close" => Close,
+					"close_tab" => CloseTab,
+					"quit" => Quit,
+					"force_quit" => ForceQuit,
+					"detach" => Detach,
+					"revert" => Revert,
+					"toggle_auto_revert" => ToggleAutoRevert,
+					"format_buffer" => FormatBuffer,
+					"trim_trailing_whitespace" => TrimTrailingWhitespace,
+					"ensure_final_newline" => EnsureFinalNewline,
+					"goto_line" => GotoLine,
+					"scan_line_index" => ScanLineIndex,
+					"goto_matching_bracket" => GoToMatchingBracket,
+					"jump_to_next_error" => JumpToNextError,
+					"jump_to_previous_error" => JumpToPreviousError,
+
+					"smart_home" => SmartHome,
+					"dedent_selection" => DedentSelection,
+					"toggle_comment" => ToggleComment,
+					"dabbrev_expand" => DabbrevExpand,
+					"toggle_fold" => ToggleFold,
+
+					"list_bookmarks" => ListBookmarks,
+
+					"toggle_search_case_sensitive" => ToggleSearchCaseSensitive,
+					"toggle_search_whole_word" => ToggleSearchWholeWord,
+					"toggle_search_regex" => ToggleSearchRegex,
+					"toggle_search_confirm_each" => ToggleSearchConfirmEach,
+
+					"start_macro_recording" => StartMacroRecording,
+					"stop_macro_recording" => StopMacroRecording,
+
+					"list_macros" => ListMacros,
+					"prompt_record_macro" => PromptRecordMacro,
+					"prompt_play_macro" => PromptPlayMacro,
+					"play_last_macro" => PlayLastMacro,
+					"prompt_save_macro_to_init" => PromptSaveMacroToInit,
+					"prompt_promote_macro" => PromptPromoteMacro,
+					"prompt_set_bookmark" => PromptSetBookmark,
+					"prompt_jump_to_bookmark" => PromptJumpToBookmark,
+
+					"undo" => Undo,
+					"redo" => Redo,
+
+					"scroll_up" => ScrollUp,
+					"scroll_down" => ScrollDown,
+					"show_help" => ShowHelp,
+					"keyboard_shortcuts" => ShowKeyboardShortcuts,
+					"show_warnings" => ShowWarnings,
+					"show_status_log" => ShowStatusLog,
+					"show_lsp_status" => ShowLspStatus,
+					"show_remote_indicator_menu" => ShowRemoteIndicatorMenu,
+					"show_read_only_menu" => ShowReadOnlyMenu,
+					"clear_warnings" => ClearWarnings,
+					"command_palette" => CommandPalette,
+					"quick_open" => QuickOpen,
+					"quick_open_buffers" => QuickOpenBuffers,
+					"quick_open_files" => QuickOpenFiles,
+					"open_live_grep" => OpenLiveGrep,
+					"resume_live_grep" => ResumeLiveGrep,
+					"toggle_utility_dock" => ToggleUtilityDock,
+					"open_terminal_in_dock" => OpenTerminalInDock,
+					"cycle_live_grep_provider" => CycleLiveGrepProvider,
+					"toggle_line_wrap" => ToggleLineWrap,
+					"toggle_current_line_highlight" => ToggleCurrentLineHighlight,
+					"toggle_occurrence_highlight" => ToggleOccurrenceHighlight,
+					"toggle_read_only" => ToggleReadOnly,
+					"toggle_page_view" => TogglePageView,
+					"set_page_width" => SetPageWidth,
+
+					"next_buffer" => NextBuffer,
+					"prev_buffer" => PrevBuffer,
+					"switch_to_previous_tab" => SwitchToPreviousTab,
+					"switch_to_tab_by_name" => SwitchToTabByName,
+					"scroll_tabs_left" => ScrollTabsLeft,
+					"scroll_tabs_right" => ScrollTabsRight,
+
+					"navigate_back" => NavigateBack,
+					"navigate_forward" => NavigateForward,
+
+					"split_horizontal" => SplitHorizontal,
+					"split_vertical" => SplitVertical,
+					"close_split" => CloseSplit,
+					"next_split" => NextSplit,
+					"prev_split" => PrevSplit,
+					"next_window" => NextWindow,
+					"prev_window" => PrevWindow,
+					"increase_split_size" => IncreaseSplitSize,
+					"decrease_split_size" => DecreaseSplitSize,
+					"toggle_maximize_split" => ToggleMaximizeSplit,
+
+					"prompt_confirm" => PromptConfirm,
+					"prompt_cancel" => PromptCancel,
+					"prompt_backspace" => PromptBackspace,
+					"prompt_move_left" => PromptMoveLeft,
+					"prompt_move_right" => PromptMoveRight,
+					"prompt_move_start" => PromptMoveStart,
+					"prompt_move_end" => PromptMoveEnd,
+					"prompt_select_prev" => PromptSelectPrev,
+					"prompt_select_next" => PromptSelectNext,
+					"prompt_page_up" => PromptPageUp,
+					"prompt_page_down" => PromptPageDown,
+					"prompt_accept_suggestion" => PromptAcceptSuggestion,
+					"prompt_delete_word_forward" => PromptDeleteWordForward,
+					"prompt_delete_word_backward" => PromptDeleteWordBackward,
+					"prompt_delete_to_line_end" => PromptDeleteToLineEnd,
+					"prompt_copy" => PromptCopy,
+					"prompt_cut" => PromptCut,
+					"prompt_paste" => PromptPaste,
+					"prompt_move_left_selecting" => PromptMoveLeftSelecting,
+					"prompt_move_right_selecting" => PromptMoveRightSelecting,
+					"prompt_move_home_selecting" => PromptMoveHomeSelecting,
+					"prompt_move_end_selecting" => PromptMoveEndSelecting,
+					"prompt_select_word_left" => PromptSelectWordLeft,
+					"prompt_select_word_right" => PromptSelectWordRight,
+					"prompt_select_all" => PromptSelectAll,
+					"file_browser_toggle_hidden" => FileBrowserToggleHidden,
+					"file_browser_toggle_detect_encoding" => FileBrowserToggleDetectEncoding,
+					"prompt_move_word_left" => PromptMoveWordLeft,
+					"prompt_move_word_right" => PromptMoveWordRight,
+					"prompt_delete" => PromptDelete,
+
+					"popup_select_next" => PopupSelectNext,
+					"popup_select_prev" => PopupSelectPrev,
+					"popup_page_up" => PopupPageUp,
+					"popup_page_down" => PopupPageDown,
+					"popup_confirm" => PopupConfirm,
+					"popup_cancel" => PopupCancel,
+					"popup_focus" => PopupFocus,
+
+					"completion_accept" => CompletionAccept,
+					"completion_dismiss" => CompletionDismiss,
+
+					"toggle_file_explorer" => ToggleFileExplorer,
+					"toggle_file_explorer_side" => ToggleFileExplorerSide,
+					"toggle_menu_bar" => ToggleMenuBar,
+					"toggle_tab_bar" => ToggleTabBar,
+					"toggle_status_bar" => ToggleStatusBar,
+					"toggle_prompt_line" => TogglePromptLine,
+					"toggle_vertical_scrollbar" => ToggleVerticalScrollbar,
+					"toggle_horizontal_scrollbar" => ToggleHorizontalScrollbar,
+					"focus_file_explorer" => FocusFileExplorer,
+					"focus_editor" => FocusEditor,
+					"toggle_dock_focus" => ToggleDockFocus,
+					"file_explorer_up" => FileExplorerUp,
+					"file_explorer_down" => FileExplorerDown,
+					"file_explorer_page_up" => FileExplorerPageUp,
+					"file_explorer_page_down" => FileExplorerPageDown,
+					"file_explorer_expand" => FileExplorerExpand,
+					"file_explorer_collapse" => FileExplorerCollapse,
+					"file_explorer_open" => FileExplorerOpen,
+					"file_explorer_refresh" => FileExplorerRefresh,
+					"file_explorer_new_file" => FileExplorerNewFile,
+					"file_explorer_new_directory" => FileExplorerNewDirectory,
+					"file_explorer_delete" => FileExplorerDelete,
+					"file_explorer_rename" => FileExplorerRename,
+					"file_explorer_toggle_hidden" => FileExplorerToggleHidden,
+					"file_explorer_toggle_gitignored" => FileExplorerToggleGitignored,
+					"file_explorer_search_clear" => FileExplorerSearchClear,
+					"file_explorer_search_backspace" => FileExplorerSearchBackspace,
+					"file_explorer_copy" => FileExplorerCopy,
+					"file_explorer_cut" => FileExplorerCut,
+					"file_explorer_paste" => FileExplorerPaste,
+					"file_explorer_duplicate" => FileExplorerDuplicate,
+					"file_explorer_copy_full_path" => FileExplorerCopyFullPath,
+					"file_explorer_copy_relative_path" => FileExplorerCopyRelativePath,
+					"file_explorer_extend_selection_up" => FileExplorerExtendSelectionUp,
+					"file_explorer_extend_selection_down" => FileExplorerExtendSelectionDown,
+					"file_explorer_toggle_select" => FileExplorerToggleSelect,
+					"file_explorer_select_all" => FileExplorerSelectAll,
+
+					"lsp_completion" => LspCompletion,
+					"lsp_goto_definition" => LspGotoDefinition,
+					"lsp_references" => LspReferences,
+					"lsp_implementation" => LspImplementation,
+					"lsp_rename" => LspRename,
+					"lsp_hover" => LspHover,
+					"lsp_signature_help" => LspSignatureHelp,
+					"lsp_code_actions" => LspCodeActions,
+					"lsp_restart" => LspRestart,
+					"lsp_stop" => LspStop,
+					"lsp_toggle_for_buffer" => LspToggleForBuffer,
+					"toggle_inlay_hints" => ToggleInlayHints,
+					"toggle_mouse_hover" => ToggleMouseHover,
+
+					"toggle_line_numbers" => ToggleLineNumbers,
+					"toggle_line_numbers_current_buffer" => ToggleLineNumbersCurrentBuffer,
+					"toggle_line_wrap_current_buffer" => ToggleLineWrapCurrentBuffer,
+					"toggle_virtual_space_current_buffer" => ToggleVirtualSpaceCurrentBuffer,
+					"trigger_wave_animation" => TriggerWaveAnimation,
+					"toggle_scroll_sync" => ToggleScrollSync,
+					"toggle_mouse_capture" => ToggleMouseCapture,
+					"toggle_debug_highlights" => ToggleDebugHighlights,
+					"set_background" => SetBackground,
+					"set_background_blend" => SetBackgroundBlend,
+					"inspect_theme_at_cursor" => InspectThemeAtCursor,
+					"select_theme" => SelectTheme,
+					"select_keybinding_map" => SelectKeybindingMap,
+					"select_cursor_style" => SelectCursorStyle,
+					"select_locale" => SelectLocale,
+
+					"set_tab_size" => SetTabSize,
+					"set_line_ending" => SetLineEnding,
+					"set_encoding" => SetEncoding,
+					"reload_with_encoding" => ReloadWithEncoding,
+					"set_language" => SetLanguage,
+					"toggle_indentation_style" => ToggleIndentationStyle,
+					"toggle_tab_indicators" => ToggleTabIndicators,
+					"toggle_whitespace_indicators" => ToggleWhitespaceIndicators,
+					"reset_buffer_settings" => ResetBufferSettings,
+					"add_ruler" => AddRuler,
+					"remove_ruler" => RemoveRuler,
+
+					"dump_config" => DumpConfig,
+					"redraw_screen" => RedrawScreen,
+
+					"search" => Search,
+					"find_in_selection" => FindInSelection,
+					"find_next" => FindNext,
+					"find_previous" => FindPrevious,
+					"find_selection_next" => FindSelectionNext,
+					"find_selection_previous" => FindSelectionPrevious,
+					"clear_search" => ClearSearch,
+					"replace" => Replace,
+					"query_replace" => QueryReplace,
+
+					"menu_activate" => MenuActivate,
+					"menu_close" => MenuClose,
+					"menu_left" => MenuLeft,
+					"menu_right" => MenuRight,
+					"menu_up" => MenuUp,
+					"menu_down" => MenuDown,
+					"menu_execute" => MenuExecute,
+
+					"open_terminal" => OpenTerminal,
+					"open_terminal_right" => OpenTerminalRight,
+					"open_terminal_below" => OpenTerminalBelow,
+					"close_terminal" => CloseTerminal,
+					"focus_terminal" => FocusTerminal,
+					"terminal_escape" => TerminalEscape,
+					"toggle_keyboard_capture" => ToggleKeyboardCapture,
+					"terminal_paste" => TerminalPaste,
+					"send_selection_to_terminal" => SendSelectionToTerminal,
+
+					"shell_command" => ShellCommand,
+					"shell_command_replace" => ShellCommandReplace,
+
+					"to_upper_case" => ToUpperCase,
+					"to_lower_case" => ToLowerCase,
+					"toggle_case" => ToggleCase,
+					"sort_lines" => SortLines,
+
+					"calibrate_input" => CalibrateInput,
+					"event_debug" => EventDebug,
+					"suspend_process" => SuspendProcess,
+					"load_plugin_from_buffer" => LoadPluginFromBuffer,
+					"init_reload" => InitReload,
+					"init_edit" => InitEdit,
+					"init_check" => InitCheck,
+					"open_keybinding_editor" => OpenKeybindingEditor,
+
+					"composite_next_hunk" => CompositeNextHunk,
+					"composite_prev_hunk" => CompositePrevHunk,
+
+					"workspace_trust_trust" => WorkspaceTrustTrust,
+					"workspace_trust_restrict" => WorkspaceTrustRestrict,
+					"workspace_trust_block" => WorkspaceTrustBlock,
+					"workspace_trust_prompt" => WorkspaceTrustPrompt,
+
+					"noop" => None,
+
+					"open_settings" => OpenSettings,
+					"close_settings" => CloseSettings,
+					"settings_save" => SettingsSave,
+					"settings_reset" => SettingsReset,
+					"settings_toggle_focus" => SettingsToggleFocus,
+					"settings_activate" => SettingsActivate,
+					"settings_search" => SettingsSearch,
+					"settings_help" => SettingsHelp,
+					"settings_increment" => SettingsIncrement,
+					"settings_decrement" => SettingsDecrement,
+					"settings_inherit" => SettingsInherit,
+			}
+			alias {
+					"toggle_compose_mode" => TogglePageView,
+					"set_compose_width" => SetPageWidth,
+					// Common synonym users reach for when trying to disable a
+					// default binding (issue #2030). Without this alias,
+					// `Action::from_str` returns `None` for `"none"` and the
+					// user's override silently fails to load.
+					"none" => None,
+			}
+			with_char {
+					"insert_char" => InsertChar,
+					"set_bookmark" => SetBookmark,
+					"jump_to_bookmark" => JumpToBookmark,
+					"clear_bookmark" => ClearBookmark,
+					"play_macro" => PlayMacro,
+					"toggle_macro_recording" => ToggleMacroRecording,
+					"show_macro" => ShowMacro,
+			}
+			custom {
+					"copy_with_theme" => CopyWithTheme : {
+							// Empty theme = open theme picker prompt
+							let theme = args.get("theme").and_then(|v| v.as_str()).unwrap_or("");
+							Self::CopyWithTheme(theme.to_string())
+					},
+					"menu_open" => MenuOpen : {
+							let name = args.get("name")?.as_str()?;
+							Self::MenuOpen(name.to_string())
+					},
+					"switch_keybinding_map" => SwitchKeybindingMap : {
+							let map_name = args.get("map")?.as_str()?;
+							Self::SwitchKeybindingMap(map_name.to_string())
+					},
+					"prompt_confirm_with_text" => PromptConfirmWithText : {
+							let text = args.get("text")?.as_str()?;
+							Self::PromptConfirmWithText(text.to_string())
+					},
+			}
+	}
+
+	/// For action names whose string form takes a string-typed arg, return the
+	/// arg-map key that carries the variant value (e.g. `menu_open` → `"name"`).
+	/// Returns `None` for actions with no enumerable string variant.
+	///
+	/// Drives the keybinding editor's qualified-name syntax
+	/// (`menu_open:File` ↔ `{action: "menu_open", args: {name: "File"}}`).
+	pub fn variant_arg_key(bare_action: &str) -> Option<&'static str> {
+		match bare_action {
+			"menu_open" => Some("name"),
+			"switch_keybinding_map" => Some("map"),
+			_ => None,
+		}
+	}
+
+	/// Collapse an `(action, args)` pair into a qualified action string.
+	/// Parameterised actions with a string variant become `bare:value`
+	/// (e.g. `menu_open:File`); everything else is returned unchanged.
+	pub fn qualify_action(bare_action: &str, args: &HashMap<String, serde_json::Value>) -> String {
+		if let Some(key) = Self::variant_arg_key(bare_action) {
+			if let Some(v) = args.get(key).and_then(|v| v.as_str()) {
+				return format!("{}:{}", bare_action, v);
+			}
+		}
+		bare_action.to_string()
+	}
+
+	/// Qualified string for this Action value — the inverse of
+	/// [`Self::unqualify_action`]. Used when we already hold an `Action`
+	/// enum (e.g. from a plugin mode's default bindings) and want the same
+	/// qualified form the editor uses elsewhere.
+	pub fn to_qualified_action_str(&self) -> String {
+		match self {
+			Self::MenuOpen(name) => format!("menu_open:{}", name),
+			Self::SwitchKeybindingMap(map) => format!("switch_keybinding_map:{}", map),
+			other => other.to_action_str(),
+		}
+	}
+
+	/// Render this action as an [`ActionSpec`] — its canonical name plus the
+	/// payload args needed to reconstruct it via [`Self::from_str`]. This is
+	/// the inverse of `from_str`/`with_char`/`custom`, and the keystone of the
+	/// macro<->code bridge: a recorded `Vec<Action>` maps through here into the
+	/// exact `ActionSpec[]` shape `editor.executeActions` consumes, so a macro
+	/// and its replay script are one representation.
+	///
+	/// `count` is always 1 — recorded macros carry one Action per step; the
+	/// repeat-count sugar is a hand-authoring convenience, not something we
+	/// emit. Payload variants populate `args` with the same keys `from_str`
+	/// reads (`char`, `text`, `theme`, `name`, `map`); everything else gets an
+	/// empty map.
+	pub fn to_action_spec(&self) -> dx_core::api::ActionSpec {
+		use serde_json::Value;
+		let mut args: HashMap<String, Value> = HashMap::new();
+		match self {
+			// `with_char` family — all carry a single `char` arg.
+			Self::InsertChar(c)
+			| Self::SetBookmark(c)
+			| Self::JumpToBookmark(c)
+			| Self::ClearBookmark(c)
+			| Self::PlayMacro(c)
+			| Self::ToggleMacroRecording(c)
+			| Self::ShowMacro(c) => {
+				args.insert("char".to_string(), Value::String(c.to_string()));
+			}
+			// `custom` family — each carries a distinct string-keyed arg.
+			Self::CopyWithTheme(theme) => {
+				args.insert("theme".to_string(), Value::String(theme.clone()));
+			}
+			Self::MenuOpen(name) => {
+				args.insert("name".to_string(), Value::String(name.clone()));
+			}
+			Self::SwitchKeybindingMap(map) => {
+				args.insert("map".to_string(), Value::String(map.clone()));
+			}
+			Self::PromptConfirmWithText(text) => {
+				args.insert("text".to_string(), Value::String(text.clone()));
+			}
+			// No-arg actions (motions, edits, commands): empty args.
+			_ => {}
+		}
+		dx_core::api::ActionSpec { action: self.to_action_str(), count: 1, args }
+	}
+
+	/// Inverse of [`qualify_action`]: split a qualified action string into the
+	/// bare action name and the args map it implies. For unqualified strings
+	/// (or suffix syntax used on an action with no variant arg) returns the
+	/// input unchanged with empty args.
+	pub fn unqualify_action(qualified: &str) -> (String, HashMap<String, serde_json::Value>) {
+		if let Some((bare, suffix)) = qualified.split_once(':') {
+			if let Some(arg_key) = Self::variant_arg_key(bare) {
+				let mut args = HashMap::new();
+				args.insert(arg_key.to_string(), serde_json::Value::String(suffix.to_string()));
+				return (bare.to_string(), args);
+			}
+		}
+		(qualified.to_string(), HashMap::new())
+	}
+
+	/// Check if this action is a movement or editing action that should be
+	/// ignored in virtual buffers with hidden cursors.
+	pub fn is_movement_or_editing(&self) -> bool {
+		matches!(
+			self,
+			// Movement actions
+			Action::MoveLeft
+                | Action::MoveRight
+                | Action::MoveUp
+                | Action::MoveDown
+                | Action::ViMoveUp
+                | Action::ViMoveDown
+                | Action::MoveWordLeft
+                | Action::MoveWordRight
+                | Action::MoveWordEnd
+                | Action::ViMoveWordEnd
+                | Action::MoveLeftInLine
+                | Action::MoveRightInLine
+                | Action::MoveLineStart
+                | Action::MoveLineEnd
+                | Action::MovePageUp
+                | Action::MovePageDown
+                | Action::MoveDocumentStart
+                | Action::MoveDocumentEnd
+                | Action::MoveToParagraphUp
+                | Action::MoveToParagraphDown
+                // Selection actions
+                | Action::SelectLeft
+                | Action::SelectRight
+                | Action::SelectUp
+                | Action::SelectDown
+                | Action::SelectToParagraphUp
+                | Action::SelectToParagraphDown
+                | Action::SelectWordLeft
+                | Action::SelectWordRight
+                | Action::SelectWordEnd
+                | Action::ViSelectWordEnd
+                | Action::SelectLineStart
+                | Action::SelectLineEnd
+                | Action::SelectDocumentStart
+                | Action::SelectDocumentEnd
+                | Action::SelectPageUp
+                | Action::SelectPageDown
+                | Action::SelectAll
+                | Action::SelectWord
+                | Action::SelectLine
+                | Action::ExpandSelection
+                // Block selection
+                | Action::BlockSelectLeft
+                | Action::BlockSelectRight
+                | Action::BlockSelectUp
+                | Action::BlockSelectDown
+                // Editing actions
+                | Action::InsertChar(_)
+                | Action::InsertNewline
+                | Action::InsertTab
+                | Action::DeleteBackward
+                | Action::DeleteForward
+                | Action::DeleteWordBackward
+                | Action::DeleteWordForward
+                | Action::DeleteLine
+                | Action::DeleteToLineEnd
+                | Action::DeleteToLineStart
+                | Action::TransposeChars
+                | Action::OpenLine
+                | Action::DuplicateLine
+                | Action::MoveLineUp
+                | Action::MoveLineDown
+                // Clipboard editing (but not Copy)
+                | Action::Cut
+                | Action::Paste
+                // Undo/Redo
+                | Action::Undo
+                | Action::Redo
+		)
+	}
+
+	/// Check if this action modifies buffer content (for block selection conversion).
+	/// Block selections should be converted to multi-cursor before these actions.
+	pub fn is_editing(&self) -> bool {
+		matches!(
+			self,
+			Action::InsertChar(_)
+				| Action::InsertNewline
+				| Action::InsertTab
+				| Action::DeleteBackward
+				| Action::DeleteForward
+				| Action::DeleteWordBackward
+				| Action::DeleteWordForward
+				| Action::DeleteLine
+				| Action::DeleteToLineEnd
+				| Action::DeleteToLineStart
+				| Action::DeleteViWordEnd
+				| Action::TransposeChars
+				| Action::OpenLine
+				| Action::DuplicateLine
+				| Action::MoveLineUp
+				| Action::MoveLineDown
+				| Action::Cut
+				| Action::Paste
+		)
+	}
+}
+
+/// Result of chord resolution
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChordResolution {
+	/// Complete match: execute the action
+	Complete(Action),
+	/// Partial match: continue waiting for more keys in the sequence
+	Partial,
+	/// No match: the sequence doesn't match any binding
+	NoMatch,
+}
+
+/// Resolves key events to actions based on configuration
+#[derive(Clone)]
+pub struct KeybindingResolver {
+	/// Map from context to key bindings (single key bindings)
+	/// Context-specific bindings have priority over normal bindings
+	bindings: HashMap<KeyContext, HashMap<(KeyCode, KeyModifiers), Action>>,
+
+	/// Default bindings for each context (single key bindings)
+	default_bindings: HashMap<KeyContext, HashMap<(KeyCode, KeyModifiers), Action>>,
+
+	/// Plugin default bindings (third tier, after custom and keymap defaults)
+	/// Used for mode bindings registered by plugins via defineMode()
+	plugin_defaults: HashMap<KeyContext, HashMap<(KeyCode, KeyModifiers), Action>>,
+
+	/// Chord bindings (multi-key sequences)
+	/// Maps context -> sequence -> action
+	chord_bindings: HashMap<KeyContext, HashMap<Vec<(KeyCode, KeyModifiers)>, Action>>,
+
+	/// Default chord bindings for each context
+	default_chord_bindings: HashMap<KeyContext, HashMap<Vec<(KeyCode, KeyModifiers)>, Action>>,
+
+	/// Plugin default chord bindings (for mode chord bindings from defineMode)
+	plugin_chord_defaults: HashMap<KeyContext, HashMap<Vec<(KeyCode, KeyModifiers)>, Action>>,
+
+	/// Plugin modes that want unbound keys to fall through to Normal
+	/// bindings (motion, selection, copy). Populated by `defineMode` when
+	/// `inheritNormalBindings: true`.
+	inheriting_modes: std::collections::HashSet<String>,
+}
+
+impl KeybindingResolver {
+	/// Create a new resolver from configuration
+	pub fn new(config: &Config) -> Self {
+		let mut resolver = Self {
+			bindings: HashMap::new(),
+			default_bindings: HashMap::new(),
+			plugin_defaults: HashMap::new(),
+			chord_bindings: HashMap::new(),
+			default_chord_bindings: HashMap::new(),
+			plugin_chord_defaults: HashMap::new(),
+			inheriting_modes: std::collections::HashSet::new(),
+		};
+
+		// Load bindings from the active keymap (with inheritance resolution) into default_bindings
+		let map_bindings = config.resolve_keymap(&config.active_keybinding_map);
+		resolver.load_default_bindings_from_vec(&map_bindings);
+
+		// Then, load custom keybindings (these override the default map bindings)
+		resolver.load_bindings_from_vec(&config.keybindings);
+
+		resolver
+	}
+
+	/// Reload all configuration-derived bindings from `config` while
+	/// preserving plugin-contributed runtime state.
+	///
+	/// The keymap bindings (`default_bindings` / `default_chord_bindings`) and
+	/// the user's custom overrides (`bindings` / `chord_bindings`) are rebuilt
+	/// from scratch exactly as [`KeybindingResolver::new`] does. Plugin state —
+	/// mode bindings registered at runtime via `defineMode` (`plugin_defaults`,
+	/// `plugin_chord_defaults`) and the set of modes inheriting Normal bindings
+	/// (`inheriting_modes`) — is not represented in `config`, so it is carried
+	/// over untouched.
+	///
+	/// Use this instead of replacing the resolver with a fresh
+	/// [`KeybindingResolver::new`] whenever a config change forces a rebuild
+	/// (switching the active keybinding map, saving settings, editing
+	/// keybindings). Otherwise every plugin-contributed binding is dropped until
+	/// the next restart (issue #2307).
+	pub fn reload_from_config(&mut self, config: &Config) {
+		let mut rebuilt = Self::new(config);
+		// Carry over runtime plugin state, which lives only in the resolver.
+		rebuilt.plugin_defaults = std::mem::take(&mut self.plugin_defaults);
+		rebuilt.plugin_chord_defaults = std::mem::take(&mut self.plugin_chord_defaults);
+		rebuilt.inheriting_modes = std::mem::take(&mut self.inheriting_modes);
+		*self = rebuilt;
+	}
+
+	/// Load default bindings from a vector of keybinding definitions (into default_bindings/default_chord_bindings)
+	fn load_default_bindings_from_vec(&mut self, bindings: &[crate::config::Keybinding]) {
+		for binding in bindings {
+			// Determine context from "when" clause
+			let context = if let Some(ref when) = binding.when {
+				KeyContext::from_when_clause(when).unwrap_or(KeyContext::Normal)
+			} else {
+				KeyContext::Normal
+			};
+
+			if let Some(action) = Action::from_str(&binding.action, &binding.args) {
+				// Check if this is a chord binding (has keys field)
+				if !binding.keys.is_empty() {
+					// Parse the chord sequence
+					let mut sequence = Vec::new();
+					for key_press in &binding.keys {
+						if let Some(key_code) = Self::parse_key(&key_press.key) {
+							let modifiers = Self::parse_modifiers(&key_press.modifiers);
+							sequence.push((key_code, modifiers));
+						} else {
+							// Invalid key in sequence, skip this binding
+							break;
+						}
+					}
+
+					// Only add if all keys in sequence were valid
+					if sequence.len() == binding.keys.len() && !sequence.is_empty() {
+						self.default_chord_bindings.entry(context).or_default().insert(sequence, action);
+					}
+				} else if let Some(key_code) = Self::parse_key(&binding.key) {
+					// Single key binding (legacy format)
+					let modifiers = Self::parse_modifiers(&binding.modifiers);
+
+					// Insert the primary binding
+					self.insert_binding_with_equivalents(context, key_code, modifiers, action, &binding.key);
+				}
+			}
+		}
+	}
+
+	/// Insert a binding and automatically add terminal key equivalents.
+	/// Logs a warning if an equivalent key is already bound to a different action.
+	fn insert_binding_with_equivalents(
+		&mut self,
+		context: KeyContext,
+		key_code: KeyCode,
+		modifiers: KeyModifiers,
+		action: Action,
+		key_name: &str,
+	) {
+		let context_bindings = self.default_bindings.entry(context.clone()).or_default();
+
+		// Insert the primary binding
+		context_bindings.insert((key_code, modifiers), action.clone());
+
+		// Get terminal key equivalents and add them as aliases
+		let equivalents = terminal_key_equivalents(key_code, modifiers);
+		for (equiv_key, equiv_mods) in equivalents {
+			// Check if this equivalent is already bound
+			if let Some(existing_action) = context_bindings.get(&(equiv_key, equiv_mods)) {
+				// Only warn if bound to a DIFFERENT action
+				if existing_action != &action {
+					let equiv_name = format!("{:?}", equiv_key);
+					tracing::warn!(
+						"Terminal key equivalent conflict in {:?} context: {} (equivalent of {}) \
+                         is bound to {:?}, but {} is bound to {:?}. \
+                         The explicit binding takes precedence.",
+						context,
+						equiv_name,
+						key_name,
+						existing_action,
+						key_name,
+						action
+					);
+				}
+				// Don't override explicit bindings with auto-generated equivalents
+			} else {
+				// Add the equivalent binding
+				context_bindings.insert((equiv_key, equiv_mods), action.clone());
+			}
+		}
+	}
+
+	/// Load custom bindings from a vector of keybinding definitions (into bindings/chord_bindings)
+	fn load_bindings_from_vec(&mut self, bindings: &[crate::config::Keybinding]) {
+		for binding in bindings {
+			// Determine context from "when" clause
+			let context = if let Some(ref when) = binding.when {
+				KeyContext::from_when_clause(when).unwrap_or(KeyContext::Normal)
+			} else {
+				KeyContext::Normal
+			};
+
+			if let Some(action) = Action::from_str(&binding.action, &binding.args) {
+				// Check if this is a chord binding (has keys field)
+				if !binding.keys.is_empty() {
+					// Parse the chord sequence
+					let mut sequence = Vec::new();
+					for key_press in &binding.keys {
+						if let Some(key_code) = Self::parse_key(&key_press.key) {
+							let modifiers = Self::parse_modifiers(&key_press.modifiers);
+							sequence.push((key_code, modifiers));
+						} else {
+							// Invalid key in sequence, skip this binding
+							break;
+						}
+					}
+
+					// Only add if all keys in sequence were valid
+					if sequence.len() == binding.keys.len() && !sequence.is_empty() {
+						self.chord_bindings.entry(context).or_default().insert(sequence, action);
+					}
+				} else if let Some(key_code) = Self::parse_key(&binding.key) {
+					// Single key binding (legacy format)
+					let modifiers = Self::parse_modifiers(&binding.modifiers);
+					self.bindings.entry(context).or_default().insert((key_code, modifiers), action);
+				}
+			}
+		}
+	}
+
+	/// Load a plugin default binding (for mode bindings registered via defineMode)
+	pub fn load_plugin_default(
+		&mut self,
+		context: KeyContext,
+		key_code: KeyCode,
+		modifiers: KeyModifiers,
+		action: Action,
+	) {
+		self.plugin_defaults.entry(context).or_default().insert((key_code, modifiers), action);
+	}
+
+	/// Load a plugin default chord binding (for mode chord bindings from defineMode)
+	pub fn load_plugin_chord_default(
+		&mut self,
+		context: KeyContext,
+		sequence: Vec<(KeyCode, KeyModifiers)>,
+		action: Action,
+	) {
+		self.plugin_chord_defaults.entry(context).or_default().insert(sequence, action);
+	}
+
+	/// Clear all plugin default bindings (single-key and chord) for a specific mode
+	pub fn clear_plugin_defaults_for_mode(&mut self, mode_name: &str) {
+		let context = KeyContext::Mode(mode_name.to_string());
+		self.plugin_defaults.remove(&context);
+		self.plugin_chord_defaults.remove(&context);
+		self.inheriting_modes.remove(mode_name);
+	}
+
+	/// Mark (or unmark) a plugin mode as inheriting Normal-context bindings
+	/// for keys it doesn't bind itself.
+	pub fn set_mode_inherits_normal_bindings(&mut self, mode_name: &str, inherit: bool) {
+		if inherit {
+			self.inheriting_modes.insert(mode_name.to_string());
+		} else {
+			self.inheriting_modes.remove(mode_name);
+		}
+	}
+
+	/// Get all plugin default bindings (for keybinding editor display)
+	pub fn get_plugin_defaults(
+		&self,
+	) -> &HashMap<KeyContext, HashMap<(KeyCode, KeyModifiers), Action>> {
+		&self.plugin_defaults
+	}
+
+	/// Check if an action is application-wide (should be accessible in all contexts)
+	fn is_application_wide_action(action: &Action) -> bool {
+		matches!(
+			action,
+			Action::Quit
+                | Action::ForceQuit
+                | Action::Save
+                | Action::SaveAs
+                | Action::ShowHelp
+                | Action::ShowKeyboardShortcuts
+                | Action::PromptCancel  // Esc should always cancel
+                | Action::PopupCancel // Esc should always cancel
+		)
+	}
+
+	/// Check if an action is a UI action that should work in terminal mode
+	/// (without keyboard capture). These are general navigation and UI actions
+	/// that don't involve text editing.
+	pub fn is_terminal_ui_action(action: &Action) -> bool {
+		matches!(
+			action,
+			// Global UI actions
+			Action::CommandPalette
+                | Action::QuickOpen
+                | Action::QuickOpenBuffers
+                | Action::QuickOpenFiles
+                | Action::OpenLiveGrep
+                | Action::ResumeLiveGrep
+                | Action::ToggleUtilityDock
+                | Action::OpenTerminalInDock
+                | Action::ToggleDockFocus
+                | Action::CycleLiveGrepProvider
+                | Action::OpenSettings
+                | Action::MenuActivate
+                | Action::MenuOpen(_)
+                | Action::ShowHelp
+                | Action::ShowKeyboardShortcuts
+                | Action::Quit
+                | Action::ForceQuit
+                // Split navigation
+                | Action::NextSplit
+                | Action::PrevSplit
+                // Window navigation
+                | Action::NextWindow
+                | Action::PrevWindow
+                | Action::SplitHorizontal
+                | Action::SplitVertical
+                | Action::CloseSplit
+                | Action::ToggleMaximizeSplit
+                // Tab/buffer navigation
+                | Action::NextBuffer
+                | Action::PrevBuffer
+                | Action::Close
+                | Action::CloseTab
+                | Action::ScrollTabsLeft
+                | Action::ScrollTabsRight
+                // Terminal control
+                | Action::TerminalEscape
+                | Action::ToggleKeyboardCapture
+                | Action::OpenTerminal
+                | Action::OpenTerminalRight
+                | Action::OpenTerminalBelow
+                | Action::CloseTerminal
+                | Action::TerminalPaste
+                // File explorer
+                | Action::ToggleFileExplorer
+                | Action::ToggleFileExplorerSide
+                // Menu bar
+                | Action::ToggleMenuBar
+		)
+	}
+
+	/// Resolve a key event with chord state to check for multi-key sequences
+	/// Returns:
+	/// - Complete(action): The sequence is complete, execute the action
+	/// - Partial: The sequence is partial (prefix of a chord), wait for more keys
+	/// - NoMatch: The sequence doesn't match any chord binding
+	pub fn resolve_chord(
+		&self,
+		chord_state: &[(KeyCode, KeyModifiers)],
+		event: &KeyEvent,
+		context: KeyContext,
+	) -> ChordResolution {
+		// Build the full sequence: existing chord state + new key, all normalized
+		let mut full_sequence: Vec<(KeyCode, KeyModifiers)> =
+			chord_state.iter().map(|(c, m)| normalize_key(*c, *m)).collect();
+		let (norm_code, norm_mods) = normalize_key(event.code, event.modifiers);
+		full_sequence.push((norm_code, norm_mods));
+
+		tracing::trace!(
+			"KeybindingResolver.resolve_chord: sequence={:?}, context={:?}",
+			full_sequence,
+			context
+		);
+
+		// Check all chord binding sources in priority order
+		let search_order = vec![
+			(&self.chord_bindings, &KeyContext::Global, "custom global"),
+			(&self.default_chord_bindings, &KeyContext::Global, "default global"),
+			(&self.chord_bindings, &context, "custom context"),
+			(&self.default_chord_bindings, &context, "default context"),
+			(&self.plugin_chord_defaults, &context, "plugin default context"),
+		];
+
+		let mut has_partial_match = false;
+
+		for (binding_map, bind_context, label) in search_order {
+			if let Some(context_chords) = binding_map.get(bind_context) {
+				// Check for exact match
+				if let Some(action) = context_chords.get(&full_sequence) {
+					tracing::trace!("  -> Complete chord match in {}: {:?}", label, action);
+					return ChordResolution::Complete(action.clone());
+				}
+
+				// Check for partial match (our sequence is a prefix of any binding)
+				for (chord_seq, _) in context_chords.iter() {
+					if chord_seq.len() > full_sequence.len()
+						&& chord_seq[..full_sequence.len()] == full_sequence[..]
+					{
+						tracing::trace!("  -> Partial chord match in {}", label);
+						has_partial_match = true;
+						break;
+					}
+				}
+			}
+		}
+
+		if has_partial_match {
+			ChordResolution::Partial
+		} else {
+			tracing::trace!("  -> No chord match");
+			ChordResolution::NoMatch
+		}
+	}
+
+	/// Resolve a key event to an action in the given context
+	pub fn resolve(&self, event: &KeyEvent, context: KeyContext) -> Action {
+		// Normalize key for lookups (e.g., BackTab+SHIFT → BackTab, Char('T')+SHIFT → Char('t')+SHIFT)
+		// but keep original event for the InsertChar fallback at the end.
+		let (norm_code, norm_mods) = normalize_key(event.code, event.modifiers);
+		let norm = &(norm_code, norm_mods);
+		tracing::trace!(
+			"KeybindingResolver.resolve: code={:?}, modifiers={:?}, context={:?}",
+			event.code,
+			event.modifiers,
+			context
+		);
+
+		// Check Global bindings first (highest priority - work in all contexts)
+		if let Some(global_bindings) = self.bindings.get(&KeyContext::Global) {
+			if let Some(action) = global_bindings.get(norm) {
+				tracing::trace!("  -> Found in custom global bindings: {:?}", action);
+				return action.clone();
+			}
+		}
+
+		if let Some(global_bindings) = self.default_bindings.get(&KeyContext::Global) {
+			if let Some(action) = global_bindings.get(norm) {
+				tracing::trace!("  -> Found in default global bindings: {:?}", action);
+				return action.clone();
+			}
+		}
+
+		// Try context-specific custom bindings
+		if let Some(context_bindings) = self.bindings.get(&context) {
+			if let Some(action) = context_bindings.get(norm) {
+				tracing::trace!("  -> Found in custom {} bindings: {:?}", context.to_when_clause(), action);
+				return action.clone();
+			}
+		}
+
+		// Try context-specific default bindings
+		if let Some(context_bindings) = self.default_bindings.get(&context) {
+			if let Some(action) = context_bindings.get(norm) {
+				tracing::trace!(
+					"  -> Found in default {} bindings: {:?}",
+					context.to_when_clause(),
+					action
+				);
+				return action.clone();
+			}
+		}
+
+		// Try plugin default bindings (mode bindings from defineMode)
+		if let Some(plugin_bindings) = self.plugin_defaults.get(&context) {
+			if let Some(action) = plugin_bindings.get(norm) {
+				tracing::trace!(
+					"  -> Found in plugin default {} bindings: {:?}",
+					context.to_when_clause(),
+					action
+				);
+				return action.clone();
+			}
+		}
+
+		// Fall through to the parent context's bindings (e.g. SearchPrompt →
+		// Prompt) so a narrowed context inherits all of its parent's keys and
+		// only owns/overrides the few it declares. Checked after this context's
+		// own bindings but before the Normal fallthrough below, so the parent's
+		// editing/navigation keys outrank Normal.
+		if let Some(parent) = context.parent_context() {
+			if let Some(parent_bindings) = self.bindings.get(&parent) {
+				if let Some(action) = parent_bindings.get(norm) {
+					return action.clone();
+				}
+			}
+			if let Some(parent_bindings) = self.default_bindings.get(&parent) {
+				if let Some(action) = parent_bindings.get(norm) {
+					return action.clone();
+				}
+			}
+		}
+
+		// Fall back to Normal context bindings.
+		// Contexts with allows_normal_fallthrough (e.g. CompositeBuffer) get ALL
+		// Normal bindings; other contexts only get application-wide actions.
+		if context != KeyContext::Normal {
+			let full_fallthrough = context.allows_normal_fallthrough()
+				|| matches!(&context, KeyContext::Mode(name) if self.inheriting_modes.contains(name));
+
+			let ui_fallthrough = context.allows_ui_fallthrough();
+
+			// A user binding in Normal context shadows the default
+			// Normal binding for the same key — even if the user's
+			// action doesn't qualify for fallthrough (e.g. `noop` to
+			// disable a default). Without this, the resolver fell
+			// through to the default's application-wide entry,
+			// making it impossible to disable application-wide
+			// bindings like `Ctrl+Q → Quit` from a user config
+			// (issue #2030).
+			let custom_normal_has_binding =
+				self.bindings.get(&KeyContext::Normal).and_then(|m| m.get(norm)).is_some();
+
+			if let Some(normal_bindings) = self.bindings.get(&KeyContext::Normal) {
+				if let Some(action) = normal_bindings.get(norm) {
+					if full_fallthrough
+						|| Self::is_application_wide_action(action)
+						|| (ui_fallthrough && Self::is_terminal_ui_action(action))
+					{
+						tracing::trace!(
+							"  -> Found action in custom normal bindings (fallthrough): {:?}",
+							action
+						);
+						return action.clone();
+					}
+				}
+			}
+
+			if !custom_normal_has_binding {
+				if let Some(normal_bindings) = self.default_bindings.get(&KeyContext::Normal) {
+					if let Some(action) = normal_bindings.get(norm) {
+						if full_fallthrough
+							|| Self::is_application_wide_action(action)
+							|| (ui_fallthrough && Self::is_terminal_ui_action(action))
+						{
+							tracing::trace!(
+								"  -> Found action in default normal bindings (fallthrough): {:?}",
+								action
+							);
+							return action.clone();
+						}
+					}
+				}
+			}
+		}
+
+		// Handle regular character input in text input contexts
+		if context.allows_text_input() && is_text_input_modifier(event.modifiers) {
+			if let KeyCode::Char(c) = event.code {
+				tracing::trace!("  -> Character input: '{}'", c);
+				return Action::InsertChar(c);
+			}
+		}
+
+		tracing::trace!("  -> No binding found, returning Action::None");
+		Action::None
+	}
+
+	/// Resolve a key event looking only in the specified context (no Global fallback).
+	/// This is used when a modal context (like Prompt) needs to check if it has
+	/// a specific binding without being overridden by Global bindings.
+	/// Returns None if no binding found in the specified context.
+	pub fn resolve_in_context_only(&self, event: &KeyEvent, context: KeyContext) -> Option<Action> {
+		let norm = normalize_key(event.code, event.modifiers);
+		// Try custom bindings for this context
+		if let Some(context_bindings) = self.bindings.get(&context) {
+			if let Some(action) = context_bindings.get(&norm) {
+				return Some(action.clone());
+			}
+		}
+
+		// Try default bindings for this context
+		if let Some(context_bindings) = self.default_bindings.get(&context) {
+			if let Some(action) = context_bindings.get(&norm) {
+				return Some(action.clone());
+			}
+		}
+
+		None
+	}
+
+	/// `true` iff this context has its own binding for `event` —
+	/// either user-customised, built-in default, or plugin-default
+	/// (from `defineMode`). Unlike [`resolve`], this does **not**
+	/// fall back to Global or Normal-context bindings; it's the
+	/// "did someone *explicitly* claim this key for this mode"
+	/// check used by `dispatch_floating_widget_key` to decide
+	/// whether to let mode dispatch override its smart-key defaults.
+	pub fn has_explicit_binding(&self, event: &KeyEvent, context: &KeyContext) -> bool {
+		let norm = normalize_key(event.code, event.modifiers);
+		if let Some(bindings) = self.bindings.get(context) {
+			if bindings.contains_key(&norm) {
+				return true;
+			}
+		}
+		if let Some(bindings) = self.default_bindings.get(context) {
+			if bindings.contains_key(&norm) {
+				return true;
+			}
+		}
+		if let Some(bindings) = self.plugin_defaults.get(context) {
+			if bindings.contains_key(&norm) {
+				return true;
+			}
+		}
+		false
+	}
+
+	/// Resolve a key event to a UI action for terminal mode.
+	/// Only returns actions that are classified as UI actions (is_terminal_ui_action).
+	/// Returns Action::None if the key doesn't map to a UI action.
+	pub fn resolve_terminal_ui_action(&self, event: &KeyEvent) -> Action {
+		let norm = normalize_key(event.code, event.modifiers);
+		tracing::trace!(
+			"KeybindingResolver.resolve_terminal_ui_action: code={:?}, modifiers={:?}",
+			event.code,
+			event.modifiers
+		);
+
+		// Check Terminal context bindings first (highest priority for terminal mode)
+		for bindings in [&self.bindings, &self.default_bindings] {
+			if let Some(terminal_bindings) = bindings.get(&KeyContext::Terminal) {
+				if let Some(action) = terminal_bindings.get(&norm) {
+					if Self::is_terminal_ui_action(action) {
+						tracing::trace!("  -> Found UI action in terminal bindings: {:?}", action);
+						return action.clone();
+					}
+				}
+			}
+		}
+
+		// Check Global bindings (work in all contexts)
+		for bindings in [&self.bindings, &self.default_bindings] {
+			if let Some(global_bindings) = bindings.get(&KeyContext::Global) {
+				if let Some(action) = global_bindings.get(&norm) {
+					if Self::is_terminal_ui_action(action) {
+						tracing::trace!("  -> Found UI action in global bindings: {:?}", action);
+						return action.clone();
+					}
+				}
+			}
+		}
+
+		// Check Normal context bindings (for actions like next_split that are in Normal context)
+		for bindings in [&self.bindings, &self.default_bindings] {
+			if let Some(normal_bindings) = bindings.get(&KeyContext::Normal) {
+				if let Some(action) = normal_bindings.get(&norm) {
+					if Self::is_terminal_ui_action(action) {
+						tracing::trace!("  -> Found UI action in normal bindings: {:?}", action);
+						return action.clone();
+					}
+				}
+			}
+		}
+
+		tracing::trace!("  -> No UI action found");
+		Action::None
+	}
+
+	/// Find the primary keybinding for a given action (for display in menus)
+	/// Returns a formatted string like "Ctrl+S" or "F12"
+	/// Names of every `PluginAction` bound in any context (custom or
+	/// default). Used to populate `getKeybindingLabel` for plugin actions,
+	/// which aren't in `Action::all_action_names()`.
+	pub fn bound_plugin_action_names(&self) -> std::collections::HashSet<String> {
+		let mut names = std::collections::HashSet::new();
+		for map in self.bindings.values().chain(self.default_bindings.values()) {
+			for action in map.values() {
+				if let Action::PluginAction(name) = action {
+					names.insert(name.clone());
+				}
+			}
+		}
+		names
+	}
+
+	pub fn find_keybinding_for_action(
+		&self,
+		action_name: &str,
+		context: KeyContext,
+	) -> Option<String> {
+		// Parse the action from the action name
+		let target_action = Action::from_str(action_name, &HashMap::new())?;
+
+		// Search in custom bindings first, then default bindings
+		let search_maps = vec![
+			self.bindings.get(&context),
+			self.bindings.get(&KeyContext::Global),
+			self.default_bindings.get(&context),
+			self.default_bindings.get(&KeyContext::Global),
+		];
+
+		for map in search_maps.into_iter().flatten() {
+			// Collect all matching keybindings for deterministic selection
+			let mut matches: Vec<(KeyCode, KeyModifiers)> = map
+				.iter()
+				.filter(|(_, action)| {
+					// PluginAction carries the action name in its payload, so
+					// every plugin action shares one enum discriminant —
+					// match on the inner string instead, or all plugin
+					// actions would collide onto the first binding.
+					match (*action, &target_action) {
+						(Action::PluginAction(a), Action::PluginAction(b)) => a == b,
+						(a, b) => std::mem::discriminant(a) == std::mem::discriminant(b),
+					}
+				})
+				.map(|((key_code, modifiers), _)| (*key_code, *modifiers))
+				.collect();
+
+			if !matches.is_empty() {
+				// Sort to get deterministic order: prefer fewer modifiers, then by key
+				matches.sort_by(|(key_a, mod_a), (key_b, mod_b)| {
+					// Compare by number of modifiers first (prefer simpler bindings)
+					let mod_count_a = mod_a.bits().count_ones();
+					let mod_count_b = mod_b.bits().count_ones();
+					match mod_count_a.cmp(&mod_count_b) {
+						std::cmp::Ordering::Equal => {
+							// Then by modifier bits (for consistent ordering)
+							match mod_a.bits().cmp(&mod_b.bits()) {
+								std::cmp::Ordering::Equal => {
+									// Finally by key code
+									Self::key_code_sort_key(key_a).cmp(&Self::key_code_sort_key(key_b))
+								}
+								other => other,
+							}
+						}
+						other => other,
+					}
+				});
+
+				let (key_code, modifiers) = matches[0];
+				return Some(format_keybinding(&key_code, &modifiers));
+			}
+		}
+
+		None
+	}
+
+	/// Generate a sort key for KeyCode to ensure deterministic ordering
+	fn key_code_sort_key(key_code: &KeyCode) -> (u8, u32) {
+		match key_code {
+			KeyCode::Char(c) => (0, *c as u32),
+			KeyCode::F(n) => (1, *n as u32),
+			KeyCode::Enter => (2, 0),
+			KeyCode::Tab => (2, 1),
+			KeyCode::Backspace => (2, 2),
+			KeyCode::Delete => (2, 3),
+			KeyCode::Esc => (2, 4),
+			KeyCode::Left => (3, 0),
+			KeyCode::Right => (3, 1),
+			KeyCode::Up => (3, 2),
+			KeyCode::Down => (3, 3),
+			KeyCode::Home => (3, 4),
+			KeyCode::End => (3, 5),
+			KeyCode::PageUp => (3, 6),
+			KeyCode::PageDown => (3, 7),
+			_ => (255, 0),
+		}
+	}
+
+	/// Find the mnemonic character for a menu (based on Alt+letter keybindings)
+	/// Returns the character that should be underlined in the menu label
+	pub fn find_menu_mnemonic(&self, menu_name: &str) -> Option<char> {
+		// Search in custom bindings first, then default bindings
+		let search_maps = vec![
+			self.bindings.get(&KeyContext::Normal),
+			self.bindings.get(&KeyContext::Global),
+			self.default_bindings.get(&KeyContext::Normal),
+			self.default_bindings.get(&KeyContext::Global),
+		];
+
+		for map in search_maps.into_iter().flatten() {
+			for ((key_code, modifiers), action) in map {
+				// Check if this is an Alt+letter binding for MenuOpen with matching name
+				if let Action::MenuOpen(name) = action {
+					if name.eq_ignore_ascii_case(menu_name) && *modifiers == KeyModifiers::ALT {
+						// Return the character for Alt+letter bindings
+						if let KeyCode::Char(c) = key_code {
+							return Some(c.to_ascii_lowercase());
+						}
+					}
+				}
+			}
+		}
+
+		None
+	}
+
+	/// Parse a key string to KeyCode
+	fn parse_key(key: &str) -> Option<KeyCode> {
+		let lower = key.to_lowercase();
+		match lower.as_str() {
+			"enter" => Some(KeyCode::Enter),
+			"backspace" => Some(KeyCode::Backspace),
+			"delete" | "del" => Some(KeyCode::Delete),
+			"tab" => Some(KeyCode::Tab),
+			"backtab" => Some(KeyCode::BackTab),
+			"esc" | "escape" => Some(KeyCode::Esc),
+			"space" => Some(KeyCode::Char(' ')),
+
+			"left" => Some(KeyCode::Left),
+			"right" => Some(KeyCode::Right),
+			"up" => Some(KeyCode::Up),
+			"down" => Some(KeyCode::Down),
+			"home" => Some(KeyCode::Home),
+			"end" => Some(KeyCode::End),
+			"pageup" => Some(KeyCode::PageUp),
+			"pagedown" => Some(KeyCode::PageDown),
+
+			s if s.len() == 1 => s.chars().next().map(KeyCode::Char),
+			// Handle function keys like "f1", "f2", ..., "f12"
+			s if s.starts_with('f') && s.len() >= 2 => s[1..].parse::<u8>().ok().map(KeyCode::F),
+			_ => None,
+		}
+	}
+
+	/// Parse modifiers from strings
+	fn parse_modifiers(modifiers: &[String]) -> KeyModifiers {
+		let mut result = KeyModifiers::empty();
+		for m in modifiers {
+			match m.to_lowercase().as_str() {
+				"ctrl" | "control" => result |= KeyModifiers::CONTROL,
+				"shift" => result |= KeyModifiers::SHIFT,
+				"alt" => result |= KeyModifiers::ALT,
+				"super" | "cmd" | "command" | "meta" => result |= KeyModifiers::SUPER,
+				_ => {}
+			}
+		}
+		result
+	}
+
+	/// Create default keybindings organized by context
+	/// Get all keybindings (for help display)
+	/// Returns a Vec of (key_description, action_description)
+	pub fn get_all_bindings(&self) -> Vec<(String, String)> {
+		let mut bindings = Vec::new();
+
+		// Collect all bindings from all contexts
+		for context in &[
+			KeyContext::Normal,
+			KeyContext::Prompt,
+			KeyContext::Popup,
+			KeyContext::FileExplorer,
+			KeyContext::Menu,
+			KeyContext::CompositeBuffer,
+		] {
+			let mut all_keys: HashMap<(KeyCode, KeyModifiers), Action> = HashMap::new();
+
+			// Start with defaults for this context
+			if let Some(context_defaults) = self.default_bindings.get(context) {
+				for (key, action) in context_defaults {
+					all_keys.insert(*key, action.clone());
+				}
+			}
+
+			// Override with custom bindings for this context
+			if let Some(context_bindings) = self.bindings.get(context) {
+				for (key, action) in context_bindings {
+					all_keys.insert(*key, action.clone());
+				}
+			}
+
+			// Convert to readable format with context prefix
+			let context_str = if *context != KeyContext::Normal {
+				format!("[{}] ", context.to_when_clause())
+			} else {
+				String::new()
+			};
+
+			for ((key_code, modifiers), action) in all_keys {
+				let key_str = Self::format_key(key_code, modifiers);
+				let action_str = format!("{}{}", context_str, Self::format_action(&action));
+				bindings.push((key_str, action_str));
+			}
+		}
+
+		// Sort by action description for easier browsing
+		bindings.sort_by(|a, b| a.1.cmp(&b.1));
+
+		bindings
+	}
+
+	/// Format a key combination as a readable string
+	fn format_key(key_code: KeyCode, modifiers: KeyModifiers) -> String {
+		format_keybinding(&key_code, &modifiers)
+	}
+
+	/// Format an action as a readable description
+	pub fn format_action(action: &Action) -> String {
+		match action {
+			Action::InsertChar(c) => t!("action.insert_char", char = c),
+			Action::InsertNewline => t!("action.insert_newline"),
+			Action::InsertTab => t!("action.insert_tab"),
+			Action::MoveLeft => t!("action.move_left"),
+			Action::MoveRight => t!("action.move_right"),
+			Action::MoveUp => t!("action.move_up"),
+			Action::MoveDown => t!("action.move_down"),
+			Action::ViMoveUp => t!("action.move_up"),
+			Action::ViMoveDown => t!("action.move_down"),
+			Action::MoveWordLeft => t!("action.move_word_left"),
+			Action::MoveWordRight => t!("action.move_word_right"),
+			Action::MoveWordEnd => t!("action.move_word_end"),
+			Action::ViMoveWordEnd => t!("action.move_word_end"),
+			Action::MoveLeftInLine => t!("action.move_left"),
+			Action::MoveRightInLine => t!("action.move_right"),
+			Action::MoveLineStart => t!("action.move_line_start"),
+			Action::MoveLineEnd => t!("action.move_line_end"),
+			Action::MoveLineUp => t!("action.move_line_up"),
+			Action::MoveLineDown => t!("action.move_line_down"),
+			Action::MovePageUp => t!("action.move_page_up"),
+			Action::MovePageDown => t!("action.move_page_down"),
+			Action::MoveDocumentStart => t!("action.move_document_start"),
+			Action::MoveDocumentEnd => t!("action.move_document_end"),
+			Action::SelectLeft => t!("action.select_left"),
+			Action::SelectRight => t!("action.select_right"),
+			Action::SelectUp => t!("action.select_up"),
+			Action::SelectDown => t!("action.select_down"),
+			Action::SelectToParagraphUp => t!("action.select_to_paragraph_up"),
+			Action::SelectToParagraphDown => t!("action.select_to_paragraph_down"),
+			Action::MoveToParagraphUp => t!("action.move_to_paragraph_up"),
+			Action::MoveToParagraphDown => t!("action.move_to_paragraph_down"),
+			Action::SelectWordLeft => t!("action.select_word_left"),
+			Action::SelectWordRight => t!("action.select_word_right"),
+			Action::SelectWordEnd => t!("action.select_word_end"),
+			Action::ViSelectWordEnd => t!("action.select_word_end"),
+			Action::SelectLineStart => t!("action.select_line_start"),
+			Action::SelectLineEnd => t!("action.select_line_end"),
+			Action::SelectDocumentStart => t!("action.select_document_start"),
+			Action::SelectDocumentEnd => t!("action.select_document_end"),
+			Action::SelectPageUp => t!("action.select_page_up"),
+			Action::SelectPageDown => t!("action.select_page_down"),
+			Action::SelectAll => t!("action.select_all"),
+			Action::SelectWord => t!("action.select_word"),
+			Action::SelectLine => t!("action.select_line"),
+			Action::ExpandSelection => t!("action.expand_selection"),
+			Action::BlockSelectLeft => t!("action.block_select_left"),
+			Action::BlockSelectRight => t!("action.block_select_right"),
+			Action::BlockSelectUp => t!("action.block_select_up"),
+			Action::BlockSelectDown => t!("action.block_select_down"),
+			Action::DeleteBackward => t!("action.delete_backward"),
+			Action::DeleteForward => t!("action.delete_forward"),
+			Action::DeleteWordBackward => t!("action.delete_word_backward"),
+			Action::DeleteWordForward => t!("action.delete_word_forward"),
+			Action::DeleteLine => t!("action.delete_line"),
+			Action::DeleteToLineEnd => t!("action.delete_to_line_end"),
+			Action::DeleteToLineStart => t!("action.delete_to_line_start"),
+			Action::DeleteViWordEnd => t!("action.delete_word_forward"),
+			Action::TransposeChars => t!("action.transpose_chars"),
+			Action::OpenLine => t!("action.open_line"),
+			Action::DuplicateLine => t!("action.duplicate_line"),
+			Action::Recenter => t!("action.recenter"),
+			Action::SetMark => t!("action.set_mark"),
+			Action::CancelMark => t!("action.cancel_mark"),
+			Action::ClearMark => t!("action.clear_mark"),
+			Action::Copy => t!("action.copy"),
+			Action::CopyWithTheme(theme) if theme.is_empty() => t!("action.copy_with_formatting"),
+			Action::CopyWithTheme(theme) => t!("action.copy_with_theme", theme = theme),
+			Action::Cut => t!("action.cut"),
+			Action::Paste => t!("action.paste"),
+			Action::CopyFilePath => t!("action.copy_file_path"),
+			Action::CopyRelativeFilePath => t!("action.copy_relative_file_path"),
+			Action::YankWordForward => t!("action.yank_word_forward"),
+			Action::YankWordBackward => t!("action.yank_word_backward"),
+			Action::YankToLineEnd => t!("action.yank_to_line_end"),
+			Action::YankToLineStart => t!("action.yank_to_line_start"),
+			Action::YankViWordEnd => t!("action.yank_word_forward"),
+			Action::AddCursorAbove => t!("action.add_cursor_above"),
+			Action::AddCursorBelow => t!("action.add_cursor_below"),
+			Action::AddCursorNextMatch => t!("action.add_cursor_next_match"),
+			Action::AddCursorsToLineEnds => t!("action.add_cursors_to_line_ends"),
+			Action::RemoveSecondaryCursors => t!("action.remove_secondary_cursors"),
+			Action::Save => t!("action.save"),
+			Action::SaveAs => t!("action.save_as"),
+			Action::Open => t!("action.open"),
+			Action::SwitchProject => t!("action.switch_project"),
+			Action::New => t!("action.new"),
+			Action::Close => t!("action.close"),
+			Action::CloseTab => t!("action.close_tab"),
+			Action::Quit => t!("action.quit"),
+			Action::ForceQuit => t!("action.force_quit"),
+			Action::Detach => t!("action.detach"),
+			Action::Revert => t!("action.revert"),
+			Action::ToggleAutoRevert => t!("action.toggle_auto_revert"),
+			Action::FormatBuffer => t!("action.format_buffer"),
+			Action::TrimTrailingWhitespace => t!("action.trim_trailing_whitespace"),
+			Action::EnsureFinalNewline => t!("action.ensure_final_newline"),
+			Action::GotoLine => t!("action.goto_line"),
+			Action::ScanLineIndex => t!("action.scan_line_index"),
+			Action::GoToMatchingBracket => t!("action.goto_matching_bracket"),
+			Action::JumpToNextError => t!("action.jump_to_next_error"),
+			Action::JumpToPreviousError => t!("action.jump_to_previous_error"),
+			Action::SmartHome => t!("action.smart_home"),
+			Action::DedentSelection => t!("action.dedent_selection"),
+			Action::ToggleComment => t!("action.toggle_comment"),
+			Action::DabbrevExpand => std::borrow::Cow::Borrowed("Expand abbreviation (dabbrev)"),
+			Action::ToggleFold => t!("action.toggle_fold"),
+			Action::SetBookmark(c) => t!("action.set_bookmark", key = c),
+			Action::JumpToBookmark(c) => t!("action.jump_to_bookmark", key = c),
+			Action::ClearBookmark(c) => t!("action.clear_bookmark", key = c),
+			Action::ListBookmarks => t!("action.list_bookmarks"),
+			Action::ToggleSearchCaseSensitive => t!("action.toggle_search_case_sensitive"),
+			Action::ToggleSearchWholeWord => t!("action.toggle_search_whole_word"),
+			Action::ToggleSearchRegex => t!("action.toggle_search_regex"),
+			Action::ToggleSearchConfirmEach => t!("action.toggle_search_confirm_each"),
+			Action::StartMacroRecording => t!("action.start_macro_recording"),
+			Action::StopMacroRecording => t!("action.stop_macro_recording"),
+			Action::PlayMacro(c) => t!("action.play_macro", key = c),
+			Action::ToggleMacroRecording(c) => t!("action.toggle_macro_recording", key = c),
+			Action::ShowMacro(c) => t!("action.show_macro", key = c),
+			Action::ListMacros => t!("action.list_macros"),
+			Action::PromptRecordMacro => t!("action.prompt_record_macro"),
+			Action::PromptPlayMacro => t!("action.prompt_play_macro"),
+			Action::PlayLastMacro => t!("action.play_last_macro"),
+			Action::PromptSaveMacroToInit => t!("action.prompt_save_macro_to_init"),
+			Action::PromptPromoteMacro => t!("action.prompt_promote_macro"),
+			Action::PromptSetBookmark => t!("action.prompt_set_bookmark"),
+			Action::PromptJumpToBookmark => t!("action.prompt_jump_to_bookmark"),
+			Action::Undo => t!("action.undo"),
+			Action::Redo => t!("action.redo"),
+			Action::ScrollUp => t!("action.scroll_up"),
+			Action::ScrollDown => t!("action.scroll_down"),
+			Action::ShowHelp => t!("action.show_help"),
+			Action::ShowKeyboardShortcuts => t!("action.show_keyboard_shortcuts"),
+			Action::ShowWarnings => t!("action.show_warnings"),
+			Action::ShowStatusLog => t!("action.show_status_log"),
+			Action::ShowLspStatus => t!("action.show_lsp_status"),
+			Action::ShowRemoteIndicatorMenu => t!("action.show_remote_indicator_menu"),
+			Action::ShowReadOnlyMenu => t!("action.show_read_only_menu"),
+			Action::ClearWarnings => t!("action.clear_warnings"),
+			Action::CommandPalette => t!("action.command_palette"),
+			Action::QuickOpen => t!("action.quick_open"),
+			Action::QuickOpenBuffers => t!("action.quick_open_buffers"),
+			Action::QuickOpenFiles => t!("action.quick_open_files"),
+			Action::OpenLiveGrep => t!("action.open_live_grep"),
+			Action::ResumeLiveGrep => t!("action.resume_live_grep"),
+			Action::ToggleUtilityDock => t!("action.toggle_utility_dock"),
+			Action::OpenTerminalInDock => t!("action.open_terminal_in_dock"),
+			Action::CycleLiveGrepProvider => t!("action.cycle_live_grep_provider"),
+			Action::InspectThemeAtCursor => t!("action.inspect_theme_at_cursor"),
+			Action::ToggleLineWrap => t!("action.toggle_line_wrap"),
+			Action::ToggleCurrentLineHighlight => t!("action.toggle_current_line_highlight"),
+			Action::ToggleOccurrenceHighlight => t!("action.toggle_occurrence_highlight"),
+			Action::ToggleReadOnly => t!("action.toggle_read_only"),
+			Action::TogglePageView => t!("action.toggle_page_view"),
+			Action::SetPageWidth => t!("action.set_page_width"),
+			Action::NextBuffer => t!("action.next_buffer"),
+			Action::PrevBuffer => t!("action.prev_buffer"),
+			Action::NavigateBack => t!("action.navigate_back"),
+			Action::NavigateForward => t!("action.navigate_forward"),
+			Action::SplitHorizontal => t!("action.split_horizontal"),
+			Action::SplitVertical => t!("action.split_vertical"),
+			Action::CloseSplit => t!("action.close_split"),
+			Action::NextSplit => t!("action.next_split"),
+			Action::PrevSplit => t!("action.prev_split"),
+			Action::NextWindow => t!("action.next_window"),
+			Action::PrevWindow => t!("action.prev_window"),
+			Action::IncreaseSplitSize => t!("action.increase_split_size"),
+			Action::DecreaseSplitSize => t!("action.decrease_split_size"),
+			Action::ToggleMaximizeSplit => t!("action.toggle_maximize_split"),
+			Action::PromptConfirm => t!("action.prompt_confirm"),
+			Action::PromptConfirmWithText(ref text) => {
+				format!("{} ({})", t!("action.prompt_confirm"), text).into()
+			}
+			Action::PromptCancel => t!("action.prompt_cancel"),
+			Action::PromptBackspace => t!("action.prompt_backspace"),
+			Action::PromptDelete => t!("action.prompt_delete"),
+			Action::PromptMoveLeft => t!("action.prompt_move_left"),
+			Action::PromptMoveRight => t!("action.prompt_move_right"),
+			Action::PromptMoveStart => t!("action.prompt_move_start"),
+			Action::PromptMoveEnd => t!("action.prompt_move_end"),
+			Action::PromptSelectPrev => t!("action.prompt_select_prev"),
+			Action::PromptSelectNext => t!("action.prompt_select_next"),
+			Action::PromptPageUp => t!("action.prompt_page_up"),
+			Action::PromptPageDown => t!("action.prompt_page_down"),
+			Action::PromptAcceptSuggestion => t!("action.prompt_accept_suggestion"),
+			Action::PromptMoveWordLeft => t!("action.prompt_move_word_left"),
+			Action::PromptMoveWordRight => t!("action.prompt_move_word_right"),
+			Action::PromptDeleteWordForward => t!("action.prompt_delete_word_forward"),
+			Action::PromptDeleteWordBackward => t!("action.prompt_delete_word_backward"),
+			Action::PromptDeleteToLineEnd => t!("action.prompt_delete_to_line_end"),
+			Action::PromptCopy => t!("action.prompt_copy"),
+			Action::PromptCut => t!("action.prompt_cut"),
+			Action::PromptPaste => t!("action.prompt_paste"),
+			Action::PromptMoveLeftSelecting => t!("action.prompt_move_left_selecting"),
+			Action::PromptMoveRightSelecting => t!("action.prompt_move_right_selecting"),
+			Action::PromptMoveHomeSelecting => t!("action.prompt_move_home_selecting"),
+			Action::PromptMoveEndSelecting => t!("action.prompt_move_end_selecting"),
+			Action::PromptSelectWordLeft => t!("action.prompt_select_word_left"),
+			Action::PromptSelectWordRight => t!("action.prompt_select_word_right"),
+			Action::PromptSelectAll => t!("action.prompt_select_all"),
+			Action::FileBrowserToggleHidden => t!("action.file_browser_toggle_hidden"),
+			Action::FileBrowserToggleDetectEncoding => {
+				t!("action.file_browser_toggle_detect_encoding")
+			}
+			Action::PopupSelectNext => t!("action.popup_select_next"),
+			Action::PopupSelectPrev => t!("action.popup_select_prev"),
+			Action::PopupPageUp => t!("action.popup_page_up"),
+			Action::PopupPageDown => t!("action.popup_page_down"),
+			Action::PopupConfirm => t!("action.popup_confirm"),
+			Action::PopupCancel => t!("action.popup_cancel"),
+			Action::PopupFocus => t!("action.popup_focus"),
+			Action::CompletionAccept => t!("action.completion_accept"),
+			Action::CompletionDismiss => t!("action.completion_dismiss"),
+			Action::ToggleFileExplorer => t!("action.toggle_file_explorer"),
+			Action::ToggleFileExplorerSide => t!("action.toggle_file_explorer_side"),
+			Action::ToggleMenuBar => t!("action.toggle_menu_bar"),
+			Action::ToggleTabBar => t!("action.toggle_tab_bar"),
+			Action::ToggleStatusBar => t!("action.toggle_status_bar"),
+			Action::TogglePromptLine => t!("action.toggle_prompt_line"),
+			Action::ToggleVerticalScrollbar => t!("action.toggle_vertical_scrollbar"),
+			Action::ToggleHorizontalScrollbar => t!("action.toggle_horizontal_scrollbar"),
+			Action::FocusFileExplorer => t!("action.focus_file_explorer"),
+			Action::FocusEditor => t!("action.focus_editor"),
+			Action::ToggleDockFocus => t!("action.toggle_dock_focus"),
+			Action::FileExplorerUp => t!("action.file_explorer_up"),
+			Action::FileExplorerDown => t!("action.file_explorer_down"),
+			Action::FileExplorerPageUp => t!("action.file_explorer_page_up"),
+			Action::FileExplorerPageDown => t!("action.file_explorer_page_down"),
+			Action::FileExplorerExpand => t!("action.file_explorer_expand"),
+			Action::FileExplorerCollapse => t!("action.file_explorer_collapse"),
+			Action::FileExplorerOpen => t!("action.file_explorer_open"),
+			Action::FileExplorerRefresh => t!("action.file_explorer_refresh"),
+			Action::FileExplorerNewFile => t!("action.file_explorer_new_file"),
+			Action::FileExplorerNewDirectory => t!("action.file_explorer_new_directory"),
+			Action::FileExplorerDelete => t!("action.file_explorer_delete"),
+			Action::FileExplorerRename => t!("action.file_explorer_rename"),
+			Action::FileExplorerToggleHidden => t!("action.file_explorer_toggle_hidden"),
+			Action::FileExplorerToggleGitignored => t!("action.file_explorer_toggle_gitignored"),
+			Action::FileExplorerSearchClear => t!("action.file_explorer_search_clear"),
+			Action::FileExplorerSearchBackspace => t!("action.file_explorer_search_backspace"),
+			Action::FileExplorerCopy => t!("action.file_explorer_copy"),
+			Action::FileExplorerCut => t!("action.file_explorer_cut"),
+			Action::FileExplorerPaste => t!("action.file_explorer_paste"),
+			Action::FileExplorerDuplicate => t!("action.file_explorer_duplicate"),
+			Action::FileExplorerCopyFullPath => t!("action.file_explorer_copy_full_path"),
+			Action::FileExplorerCopyRelativePath => t!("action.file_explorer_copy_relative_path"),
+			Action::FileExplorerExtendSelectionUp => t!("action.file_explorer_extend_selection_up"),
+			Action::FileExplorerExtendSelectionDown => {
+				t!("action.file_explorer_extend_selection_down")
+			}
+			Action::FileExplorerToggleSelect => t!("action.file_explorer_toggle_select"),
+			Action::FileExplorerSelectAll => t!("action.file_explorer_select_all"),
+			Action::LspCompletion => t!("action.lsp_completion"),
+			Action::LspGotoDefinition => t!("action.lsp_goto_definition"),
+			Action::LspReferences => t!("action.lsp_references"),
+			Action::LspImplementation => t!("action.lsp_implementation"),
+			Action::LspRename => t!("action.lsp_rename"),
+			Action::LspHover => t!("action.lsp_hover"),
+			Action::LspSignatureHelp => t!("action.lsp_signature_help"),
+			Action::LspCodeActions => t!("action.lsp_code_actions"),
+			Action::LspRestart => t!("action.lsp_restart"),
+			Action::LspStop => t!("action.lsp_stop"),
+			Action::LspToggleForBuffer => t!("action.lsp_toggle_for_buffer"),
+			Action::ToggleInlayHints => t!("action.toggle_inlay_hints"),
+			Action::ToggleMouseHover => t!("action.toggle_mouse_hover"),
+			Action::ToggleLineNumbers => t!("action.toggle_line_numbers"),
+			Action::ToggleLineNumbersCurrentBuffer => {
+				t!("action.toggle_line_numbers_current_buffer")
+			}
+			Action::ToggleLineWrapCurrentBuffer => t!("action.toggle_line_wrap_current_buffer"),
+			Action::ToggleVirtualSpaceCurrentBuffer => {
+				t!("action.toggle_virtual_space_current_buffer")
+			}
+			Action::TriggerWaveAnimation => t!("action.trigger_wave_animation"),
+			Action::ToggleScrollSync => t!("action.toggle_scroll_sync"),
+			Action::ToggleMouseCapture => t!("action.toggle_mouse_capture"),
+			Action::ToggleDebugHighlights => t!("action.toggle_debug_highlights"),
+			Action::SetBackground => t!("action.set_background"),
+			Action::SetBackgroundBlend => t!("action.set_background_blend"),
+			Action::AddRuler => t!("action.add_ruler"),
+			Action::RemoveRuler => t!("action.remove_ruler"),
+			Action::SetTabSize => t!("action.set_tab_size"),
+			Action::SetLineEnding => t!("action.set_line_ending"),
+			Action::SetEncoding => t!("action.set_encoding"),
+			Action::ReloadWithEncoding => t!("action.reload_with_encoding"),
+			Action::SetLanguage => t!("action.set_language"),
+			Action::ToggleIndentationStyle => t!("action.toggle_indentation_style"),
+			Action::ToggleTabIndicators => t!("action.toggle_tab_indicators"),
+			Action::ToggleWhitespaceIndicators => t!("action.toggle_whitespace_indicators"),
+			Action::ResetBufferSettings => t!("action.reset_buffer_settings"),
+			Action::DumpConfig => t!("action.dump_config"),
+			Action::RedrawScreen => t!("action.redraw_screen"),
+			Action::Search => t!("action.search"),
+			Action::FindInSelection => t!("action.find_in_selection"),
+			Action::FindNext => t!("action.find_next"),
+			Action::FindPrevious => t!("action.find_previous"),
+			Action::FindSelectionNext => t!("action.find_selection_next"),
+			Action::FindSelectionPrevious => t!("action.find_selection_previous"),
+			Action::ClearSearch => t!("action.clear_search"),
+			Action::Replace => t!("action.replace"),
+			Action::QueryReplace => t!("action.query_replace"),
+			Action::MenuActivate => t!("action.menu_activate"),
+			Action::MenuClose => t!("action.menu_close"),
+			Action::MenuLeft => t!("action.menu_left"),
+			Action::MenuRight => t!("action.menu_right"),
+			Action::MenuUp => t!("action.menu_up"),
+			Action::MenuDown => t!("action.menu_down"),
+			Action::MenuExecute => t!("action.menu_execute"),
+			Action::MenuOpen(name) => t!("action.menu_open", name = name),
+			Action::SwitchKeybindingMap(map) => t!("action.switch_keybinding_map", map = map),
+			Action::PluginAction(name) => t!("action.plugin_action", name = name),
+			Action::ScrollTabsLeft => t!("action.scroll_tabs_left"),
+			Action::ScrollTabsRight => t!("action.scroll_tabs_right"),
+			Action::SelectTheme => t!("action.select_theme"),
+			Action::SelectKeybindingMap => t!("action.select_keybinding_map"),
+			Action::SelectCursorStyle => t!("action.select_cursor_style"),
+			Action::SelectLocale => t!("action.select_locale"),
+			Action::SwitchToPreviousTab => t!("action.switch_to_previous_tab"),
+			Action::SwitchToTabByName => t!("action.switch_to_tab_by_name"),
+			Action::OpenTerminal => t!("action.open_terminal"),
+			Action::OpenTerminalRight => t!("action.open_terminal_right"),
+			Action::OpenTerminalBelow => t!("action.open_terminal_below"),
+			Action::CloseTerminal => t!("action.close_terminal"),
+			Action::FocusTerminal => t!("action.focus_terminal"),
+			Action::TerminalEscape => t!("action.terminal_escape"),
+			Action::ToggleKeyboardCapture => t!("action.toggle_keyboard_capture"),
+			Action::TerminalPaste => t!("action.terminal_paste"),
+			Action::SendSelectionToTerminal => t!("action.send_selection_to_terminal"),
+			Action::OpenSettings => t!("action.open_settings"),
+			Action::CloseSettings => t!("action.close_settings"),
+			Action::SettingsSave => t!("action.settings_save"),
+			Action::SettingsReset => t!("action.settings_reset"),
+			Action::SettingsToggleFocus => t!("action.settings_toggle_focus"),
+			Action::SettingsActivate => t!("action.settings_activate"),
+			Action::SettingsSearch => t!("action.settings_search"),
+			Action::SettingsHelp => t!("action.settings_help"),
+			Action::SettingsIncrement => t!("action.settings_increment"),
+			Action::SettingsDecrement => t!("action.settings_decrement"),
+			Action::SettingsInherit => t!("action.settings_inherit"),
+			Action::ShellCommand => t!("action.shell_command"),
+			Action::ShellCommandReplace => t!("action.shell_command_replace"),
+			Action::ToUpperCase => t!("action.to_uppercase"),
+			Action::ToLowerCase => t!("action.to_lowercase"),
+			Action::ToggleCase => t!("action.to_uppercase"),
+			Action::SortLines => t!("action.sort_lines"),
+			Action::CalibrateInput => t!("action.calibrate_input"),
+			Action::EventDebug => t!("action.event_debug"),
+			Action::SuspendProcess => t!("action.suspend_process"),
+			Action::LoadPluginFromBuffer => "Load Plugin from Buffer".into(),
+			Action::InitReload => "Reload init.ts".into(),
+			Action::InitEdit => "Edit init.ts".into(),
+			Action::InitCheck => "Check init.ts".into(),
+			Action::OpenKeybindingEditor => "Keybinding Editor".into(),
+			Action::CompositeNextHunk => t!("action.composite_next_hunk"),
+			Action::CompositePrevHunk => t!("action.composite_prev_hunk"),
+			Action::WorkspaceTrustTrust => t!("action.workspace_trust_trust"),
+			Action::WorkspaceTrustRestrict => t!("action.workspace_trust_restrict"),
+			Action::WorkspaceTrustBlock => t!("action.workspace_trust_block"),
+			Action::WorkspaceTrustPrompt => t!("action.workspace_trust_prompt"),
+			Action::None => t!("action.none"),
+		}
+		.to_string()
+	}
+
+	/// Public wrapper for parse_key (for keybinding editor)
+	pub fn parse_key_public(key: &str) -> Option<KeyCode> {
+		Self::parse_key(key)
+	}
+
+	/// Public wrapper for parse_modifiers (for keybinding editor)
+	pub fn parse_modifiers_public(modifiers: &[String]) -> KeyModifiers {
+		Self::parse_modifiers(modifiers)
+	}
+
+	/// Format an action name string as a human-readable description.
+	/// Used by the keybinding editor to display action names without needing
+	/// a full Action enum parse.
+	pub fn format_action_from_str(action_name: &str) -> String {
+		Self::format_action_from_str_with_args(action_name, &std::collections::HashMap::new())
+	}
+
+	/// Like `format_action_from_str` but uses the provided args so parameterised
+	/// actions (e.g. `menu_open` with `{"name": "File"}`) produce distinct,
+	/// informative descriptions instead of a generic fallback.
+	pub fn format_action_from_str_with_args(
+		action_name: &str,
+		args: &std::collections::HashMap<String, serde_json::Value>,
+	) -> String {
+		// Try to parse as Action enum first
+		if let Some(action) = Action::from_str(action_name, args) {
+			Self::format_action(&action)
+		} else {
+			// Fallback: convert snake_case to Title Case
+			action_name
+				.split('_')
+				.map(|word| {
+					let mut chars = word.chars();
+					match chars.next() {
+						Some(c) => {
+							let upper: String = c.to_uppercase().collect();
+							format!("{}{}", upper, chars.as_str())
+						}
+						None => String::new(),
+					}
+				})
+				.collect::<Vec<_>>()
+				.join(" ")
+		}
+	}
+
+	/// Return a sorted list of all valid action name strings.
+	/// Delegates to `Action::all_action_names()` which is generated by the
+	/// `define_action_str_mapping!` macro (same source of truth as `Action::from_str`).
+	pub fn all_action_names() -> Vec<String> {
+		Action::all_action_names()
+	}
+
+	/// Get the keybinding string for an action in a specific context
+	/// Returns the first keybinding found (prioritizing custom bindings over defaults)
+	/// When multiple keybindings exist for the same action, prefers canonical keys over
+	/// terminal equivalents (e.g., "Space" over "@")
+	/// Returns None if no binding is found
+	pub fn get_keybinding_for_action(&self, action: &Action, context: KeyContext) -> Option<String> {
+		self.get_keybinding_event_for_action(action, context).map(|(k, m)| format_keybinding(&k, &m))
+	}
+
+	/// Raw-event counterpart to `get_keybinding_for_action`: returns the
+	/// `(KeyCode, KeyModifiers)` pair bound to `action` in `context` — or
+	/// falls through to the same Normal-context chain the string version
+	/// does — so callers (notably tests simulating user input) can feed
+	/// the bound key through the editor's key dispatcher without
+	/// hardcoding a default that a rebind would invalidate.
+	pub fn get_keybinding_event_for_action(
+		&self,
+		action: &Action,
+		context: KeyContext,
+	) -> Option<(KeyCode, KeyModifiers)> {
+		// Helper to collect all matching keybindings from a map and pick the best one
+		fn find_best_keybinding(
+			bindings: &HashMap<(KeyCode, KeyModifiers), Action>,
+			action: &Action,
+		) -> Option<(KeyCode, KeyModifiers)> {
+			let matches: Vec<_> =
+				bindings.iter().filter(|(_, a)| *a == action).map(|((k, m), _)| (*k, *m)).collect();
+
+			if matches.is_empty() {
+				return None;
+			}
+
+			// Sort to prefer canonical keys over terminal equivalents
+			// Terminal equivalents like '@' (for space), '7' (for '/'), etc. should be deprioritized
+			let mut sorted = matches;
+			sorted.sort_by(|(k1, m1), (k2, m2)| {
+				let score1 = keybinding_priority_score(k1);
+				let score2 = keybinding_priority_score(k2);
+				// Lower score = higher priority
+				match score1.cmp(&score2) {
+					std::cmp::Ordering::Equal => {
+						// Tie-break by formatted string for full determinism
+						let s1 = format_keybinding(k1, m1);
+						let s2 = format_keybinding(k2, m2);
+						s1.cmp(&s2)
+					}
+					other => other,
+				}
+			});
+
+			sorted.into_iter().next()
+		}
+
+		// Check custom bindings first (higher priority)
+		if let Some(context_bindings) = self.bindings.get(&context) {
+			if let Some(hit) = find_best_keybinding(context_bindings, action) {
+				return Some(hit);
+			}
+		}
+
+		// Check default bindings for this context
+		if let Some(context_bindings) = self.default_bindings.get(&context) {
+			if let Some(hit) = find_best_keybinding(context_bindings, action) {
+				return Some(hit);
+			}
+		}
+
+		// For certain contexts, also check Normal context for fallthrough actions
+		if context != KeyContext::Normal
+			&& (context.allows_normal_fallthrough()
+				|| Self::is_application_wide_action(action)
+				|| (context.allows_ui_fallthrough() && Self::is_terminal_ui_action(action)))
+		{
+			// Check custom normal bindings
+			if let Some(normal_bindings) = self.bindings.get(&KeyContext::Normal) {
+				if let Some(hit) = find_best_keybinding(normal_bindings, action) {
+					return Some(hit);
+				}
+			}
+
+			// Check default normal bindings
+			if let Some(normal_bindings) = self.default_bindings.get(&KeyContext::Normal) {
+				if let Some(hit) = find_best_keybinding(normal_bindings, action) {
+					return Some(hit);
+				}
+			}
+		}
+
+		None
+	}
+
+	/// Reload bindings from config (for hot reload)
+	pub fn reload(&mut self, config: &Config) {
+		self.bindings.clear();
+		for binding in &config.keybindings {
+			if let Some(key_code) = Self::parse_key(&binding.key) {
+				let modifiers = Self::parse_modifiers(&binding.modifiers);
+				if let Some(action) = Action::from_str(&binding.action, &binding.args) {
+					// Determine context from "when" clause
+					let context = if let Some(ref when) = binding.when {
+						KeyContext::from_when_clause(when).unwrap_or(KeyContext::Normal)
+					} else {
+						KeyContext::Normal
+					};
+
+					self.bindings.entry(context).or_default().insert((key_code, modifiers), action);
+				}
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn test_parse_key() {
+		assert_eq!(KeybindingResolver::parse_key("enter"), Some(KeyCode::Enter));
+		assert_eq!(KeybindingResolver::parse_key("backspace"), Some(KeyCode::Backspace));
+		assert_eq!(KeybindingResolver::parse_key("tab"), Some(KeyCode::Tab));
+		assert_eq!(KeybindingResolver::parse_key("backtab"), Some(KeyCode::BackTab));
+		assert_eq!(KeybindingResolver::parse_key("BackTab"), Some(KeyCode::BackTab));
+		assert_eq!(KeybindingResolver::parse_key("a"), Some(KeyCode::Char('a')));
+	}
+
+	#[test]
+	fn test_parse_modifiers() {
+		let mods = vec!["ctrl".to_string()];
+		assert_eq!(KeybindingResolver::parse_modifiers(&mods), KeyModifiers::CONTROL);
+
+		let mods = vec!["ctrl".to_string(), "shift".to_string()];
+		assert_eq!(
+			KeybindingResolver::parse_modifiers(&mods),
+			KeyModifiers::CONTROL | KeyModifiers::SHIFT
+		);
+	}
+
+	#[test]
+	fn test_format_action_from_str_distinguishes_menu_open_by_name() {
+		// Regression test for #1407: all menu_open bindings used to render with
+		// the identical "Menu Open" fallback because the args weren't considered.
+		let mut file_args = HashMap::new();
+		file_args.insert("name".to_string(), serde_json::Value::String("File".to_string()));
+		let mut edit_args = HashMap::new();
+		edit_args.insert("name".to_string(), serde_json::Value::String("Edit".to_string()));
+
+		let file_display =
+			KeybindingResolver::format_action_from_str_with_args("menu_open", &file_args);
+		let edit_display =
+			KeybindingResolver::format_action_from_str_with_args("menu_open", &edit_args);
+		let no_args_display = KeybindingResolver::format_action_from_str("menu_open");
+
+		assert_ne!(
+			file_display, edit_display,
+			"menu_open with different names should produce different descriptions"
+		);
+		assert!(
+			file_display.contains("File"),
+			"expected the File menu description to contain \"File\", got {file_display:?}"
+		);
+		assert!(
+			edit_display.contains("Edit"),
+			"expected the Edit menu description to contain \"Edit\", got {edit_display:?}"
+		);
+		// Without args the parameterised action can't be reconstructed, so the
+		// generic fallback is used — which is the bug this fix routes around
+		// whenever callers have the args available.
+		assert_eq!(no_args_display, "Menu Open");
+	}
+
+	#[test]
+	fn test_format_action_word_end_actions_are_localized() {
+		// Regression test for #1878: `action.move_word_end` and
+		// `action.select_word_end` were referenced via `t!()` from
+		// `format_action` but missing from every locale file, so the
+		// Keyboard Shortcuts menu rendered the raw key as the description.
+		crate::i18n::set_locale("en");
+
+		let move_desc = KeybindingResolver::format_action(&Action::MoveWordEnd);
+		assert_ne!(
+			move_desc, "action.move_word_end",
+			"MoveWordEnd should resolve to a translated description"
+		);
+		let select_desc = KeybindingResolver::format_action(&Action::SelectWordEnd);
+		assert_ne!(
+			select_desc, "action.select_word_end",
+			"SelectWordEnd should resolve to a translated description"
+		);
+
+		// Vim aliases share the same translation keys.
+		assert_eq!(KeybindingResolver::format_action(&Action::ViMoveWordEnd), move_desc,);
+		assert_eq!(KeybindingResolver::format_action(&Action::ViSelectWordEnd), select_desc,);
+	}
+
+	#[test]
+	fn test_qualify_and_unqualify_roundtrip_menu_open() {
+		let mut args = HashMap::new();
+		args.insert("name".to_string(), serde_json::Value::String("File".to_string()));
+
+		let qualified = Action::qualify_action("menu_open", &args);
+		assert_eq!(qualified, "menu_open:File");
+
+		let (bare, parsed_args) = Action::unqualify_action(&qualified);
+		assert_eq!(bare, "menu_open");
+		assert_eq!(parsed_args.get("name").and_then(|v| v.as_str()), Some("File"));
+	}
+
+	#[test]
+	fn test_qualify_action_passthrough_for_unparameterised() {
+		// Non-parameterised actions should round-trip as-is, with no suffix.
+		let args = HashMap::new();
+		assert_eq!(Action::qualify_action("save", &args), "save");
+		let (bare, parsed) = Action::unqualify_action("save");
+		assert_eq!(bare, "save");
+		assert!(parsed.is_empty());
+	}
+
+	#[test]
+	fn test_qualify_action_no_suffix_when_arg_missing() {
+		// A parameterised action without its variant arg keeps the bare form —
+		// caller (the editor) treats this as "needs a variant picked".
+		let args = HashMap::new();
+		assert_eq!(Action::qualify_action("menu_open", &args), "menu_open");
+	}
+
+	#[test]
+	fn test_unqualify_action_ignores_colon_on_unknown_action() {
+		// Plugin action names aren't the variant-arg kind, so the colon must
+		// not be treated as a variant separator.
+		let (bare, parsed) = Action::unqualify_action("my_plugin:action_with:colons");
+		assert_eq!(bare, "my_plugin:action_with:colons");
+		assert!(parsed.is_empty());
+	}
+
+	#[test]
+	fn test_to_qualified_action_str_for_menu_open() {
+		let action = Action::MenuOpen("Edit".to_string());
+		assert_eq!(action.to_qualified_action_str(), "menu_open:Edit");
+	}
+
+	#[test]
+	fn test_resolve_basic() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		let event = KeyEvent::new(KeyCode::Left, KeyModifiers::empty());
+		assert_eq!(resolver.resolve(&event, KeyContext::Normal), Action::MoveLeft);
+
+		let event = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty());
+		assert_eq!(resolver.resolve(&event, KeyContext::Normal), Action::InsertChar('a'));
+	}
+
+	/// Editor-global navigation actions (split nav, save, palette, …)
+	/// must resolve when a plugin `Mode(_)` context is active, even
+	/// though the mode itself doesn't bind those keys. Without this,
+	/// focus inside a panel (search/replace, dashboard, git log, …)
+	/// swallows `Alt+]`, `Ctrl+S`, `Ctrl+P`, etc. Regression guard for
+	/// §18 of `docs/internal/search-replace-scope-replan-on-widgets.md`.
+	#[test]
+	fn test_panel_mode_passthrough_for_ui_actions() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+		let mode_ctx = KeyContext::Mode("search-replace-list".to_string());
+
+		// Alt+] is bound to next_split in the keymap (Normal context).
+		let alt_close = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT);
+		assert_eq!(
+			resolver.resolve(&alt_close, mode_ctx.clone()),
+			Action::NextSplit,
+			"Alt+] should fall through to next_split inside a panel mode"
+		);
+
+		// Alt+[ → prev_split.
+		let alt_open = KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT);
+		assert_eq!(
+			resolver.resolve(&alt_open, mode_ctx.clone()),
+			Action::PrevSplit,
+			"Alt+[ should fall through to prev_split inside a panel mode"
+		);
+
+		// Ctrl+S is application-wide (covered by `is_application_wide_action`),
+		// but also `is_terminal_ui_action`-true — verify the UI fallthrough
+		// path doesn't accidentally exclude it.
+		let ctrl_s = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+		assert_eq!(
+			resolver.resolve(&ctrl_s, mode_ctx.clone()),
+			Action::Save,
+			"Ctrl+S should still save while a panel mode is active"
+		);
+
+		// Editing actions on the source buffer must NOT pass through.
+		// Ctrl+D (add cursor next match) is editor-only and absent from
+		// `is_terminal_ui_action`.
+		let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+		assert_ne!(
+			resolver.resolve(&ctrl_d, mode_ctx),
+			Action::AddCursorNextMatch,
+			"Ctrl+D (add cursor next match) must not pass through to a panel mode"
+		);
+	}
+
+	#[test]
+	fn test_shift_backspace_matches_backspace() {
+		// Regression test for https://github.com/anomalyco/dx/issues/1588
+		// Shift+Backspace should resolve to the same action as plain Backspace
+		// in every context where Backspace has a binding.
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		let backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::empty());
+		let shift_backspace = KeyEvent::new(KeyCode::Backspace, KeyModifiers::SHIFT);
+
+		// Normal context: backspace deletes backward
+		assert_eq!(
+			resolver.resolve(&backspace, KeyContext::Normal),
+			Action::DeleteBackward,
+			"Backspace should resolve to DeleteBackward in Normal context"
+		);
+		assert_eq!(
+			resolver.resolve(&shift_backspace, KeyContext::Normal),
+			Action::DeleteBackward,
+			"Shift+Backspace should resolve to DeleteBackward (same as Backspace) in Normal context"
+		);
+
+		// Prompt context: prompt_backspace
+		assert_eq!(
+			resolver.resolve(&backspace, KeyContext::Prompt),
+			Action::PromptBackspace,
+			"Backspace should resolve to PromptBackspace in Prompt context"
+		);
+		assert_eq!(
+			resolver.resolve(&shift_backspace, KeyContext::Prompt),
+			Action::PromptBackspace,
+			"Shift+Backspace should resolve to PromptBackspace (same as Backspace) in Prompt context"
+		);
+
+		// FileExplorer context: file_explorer_search_backspace
+		assert_eq!(
+			resolver.resolve(&backspace, KeyContext::FileExplorer),
+			Action::FileExplorerSearchBackspace,
+			"Backspace should resolve to FileExplorerSearchBackspace in FileExplorer context"
+		);
+		assert_eq!(
+			resolver.resolve(&shift_backspace, KeyContext::FileExplorer),
+			Action::FileExplorerSearchBackspace,
+			"Shift+Backspace should resolve to FileExplorerSearchBackspace (same as Backspace) in FileExplorer context"
+		);
+	}
+
+	#[test]
+	fn test_shift_letter_binding_works_without_terminal_shift_modifier() {
+		// Regression test for https://github.com/anomalyco/dx/issues/1899
+		// Most terminals don't report the SHIFT modifier when sending an
+		// uppercase letter — the case carries the shift information instead.
+		// A binding defined as `Shift+P` (key=p, modifiers=[shift]) must
+		// still trigger when the terminal sends `Char('P')` with no modifiers.
+		let mut config = Config::default();
+		config.keybindings.push(crate::config::Keybinding {
+			key: "p".to_string(),
+			modifiers: vec!["shift".to_string()],
+			keys: Vec::new(),
+			action: "save".to_string(),
+			args: HashMap::new(),
+			when: Some("normal".to_string()),
+		});
+		let resolver = KeybindingResolver::new(&config);
+
+		// Case 1: kitty keyboard protocol — explicit SHIFT modifier alongside uppercase.
+		let kitty_upper_shift = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+		assert_eq!(
+			resolver.resolve(&kitty_upper_shift, KeyContext::Normal),
+			Action::Save,
+			"Char('P')+SHIFT should match Shift+P binding"
+		);
+
+		// Case 2: kitty protocol with lowercased char (caps lock or some terminals).
+		let kitty_lower_shift = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::SHIFT);
+		assert_eq!(
+			resolver.resolve(&kitty_lower_shift, KeyContext::Normal),
+			Action::Save,
+			"Char('p')+SHIFT should match Shift+P binding"
+		);
+
+		// Case 3: typical terminal without kitty protocol — uppercase only, no modifier.
+		// This is the case that failed before the fix.
+		let plain_upper = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&plain_upper, KeyContext::Normal),
+			Action::Save,
+			"Char('P') with no modifier should match Shift+P binding \
+             (typical terminal behavior — case alone carries shift)"
+		);
+	}
+
+	#[test]
+	fn test_alt_shift_letter_binding_matches_across_terminal_encodings() {
+		// Alt+Shift+F is encoded differently by different terminals: some send
+		// `Char('F')` + ALT (no SHIFT bit — the case carries the shift), others
+		// send `Char('F')` + ALT + SHIFT. Both must match an `Alt+Shift+F`
+		// binding, and both must stay distinct from a plain `Alt+F` (Alt+f).
+		let mut config = Config::default();
+		config.keybindings.push(crate::config::Keybinding {
+			key: "f".to_string(),
+			modifiers: vec!["alt".to_string(), "shift".to_string()],
+			keys: Vec::new(),
+			action: "save".to_string(),
+			args: HashMap::new(),
+			when: Some("normal".to_string()),
+		});
+		let resolver = KeybindingResolver::new(&config);
+
+		// Encoding A: uppercase + ALT, terminal omits the SHIFT bit.
+		let no_shift_bit = KeyEvent::new(KeyCode::Char('F'), KeyModifiers::ALT);
+		assert_eq!(
+			resolver.resolve(&no_shift_bit, KeyContext::Normal),
+			Action::Save,
+			"Char('F')+ALT (no SHIFT bit) should match Alt+Shift+F"
+		);
+
+		// Encoding B: uppercase + ALT + SHIFT, terminal reports the SHIFT bit.
+		let with_shift_bit = KeyEvent::new(KeyCode::Char('F'), KeyModifiers::ALT | KeyModifiers::SHIFT);
+		assert_eq!(
+			resolver.resolve(&with_shift_bit, KeyContext::Normal),
+			Action::Save,
+			"Char('F')+ALT+SHIFT should match Alt+Shift+F"
+		);
+
+		// Plain Alt+f (no shift) must NOT match the Alt+Shift+F binding.
+		let alt_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::ALT);
+		assert_ne!(
+			resolver.resolve(&alt_f, KeyContext::Normal),
+			Action::Save,
+			"Alt+f (lowercase, no shift) must stay distinct from Alt+Shift+F"
+		);
+	}
+
+	#[test]
+	fn test_capslock_ctrl_letter_still_matches_ctrl_letter_binding() {
+		// The fix above must not regress the long-standing behavior where
+		// CapsLock+Ctrl+A is treated equivalently to Ctrl+A. When the
+		// character arrives uppercase with another modifier (CONTROL), we
+		// don't infer SHIFT — that case is ambiguous and the existing intent
+		// is to fold caps lock away.
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Ctrl+A (lowercase, real key press).
+		let ctrl_a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL);
+		let action_ctrl_a = resolver.resolve(&ctrl_a, KeyContext::Normal);
+
+		// CapsLock+Ctrl+A (uppercase from caps, CONTROL modifier only).
+		let caps_ctrl_a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::CONTROL);
+		let action_caps_ctrl_a = resolver.resolve(&caps_ctrl_a, KeyContext::Normal);
+
+		assert_eq!(
+			action_ctrl_a, action_caps_ctrl_a,
+			"CapsLock+Ctrl+A must resolve to the same action as Ctrl+A"
+		);
+	}
+
+	#[test]
+	fn test_uppercase_without_binding_falls_through_to_insert_char() {
+		// When there's no binding for a Shift+letter, an uppercase letter must
+		// still be inserted as text. The fix to normalize uppercase → SHIFT
+		// for lookup must not interfere with the InsertChar fallback (which
+		// uses the original event, not the normalized one).
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// 'Z' has no Shift+z binding in the default config.
+		let upper_z_no_mod = KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&upper_z_no_mod, KeyContext::Normal),
+			Action::InsertChar('Z'),
+			"Char('Z') with no modifier should still be inserted as 'Z'"
+		);
+
+		let upper_z_shift = KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT);
+		assert_eq!(
+			resolver.resolve(&upper_z_shift, KeyContext::Normal),
+			Action::InsertChar('Z'),
+			"Char('Z')+SHIFT should still be inserted as 'Z'"
+		);
+	}
+
+	#[test]
+	fn test_file_explorer_ui_fallthrough() {
+		// Regression test for https://github.com/anomalyco/dx/issues/1903
+		// From the FileExplorer context, application-level UI / navigation
+		// bindings (next/prev buffer, scroll tabs, close tab, next/prev
+		// split, ...) bound only in Normal must still fire — the user
+		// expects to act on the "tabbed files" without first transferring
+		// focus out of the explorer.
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		let cases = [
+			(KeyCode::PageUp, KeyModifiers::CONTROL, Action::PrevBuffer, "Ctrl+PageUp -> prev_buffer"),
+			(
+				KeyCode::PageDown,
+				KeyModifiers::CONTROL,
+				Action::NextBuffer,
+				"Ctrl+PageDown -> next_buffer",
+			),
+			(
+				KeyCode::PageUp,
+				KeyModifiers::ALT,
+				Action::ScrollTabsLeft,
+				"Alt+PageUp -> scroll_tabs_left",
+			),
+			(
+				KeyCode::PageDown,
+				KeyModifiers::ALT,
+				Action::ScrollTabsRight,
+				"Alt+PageDown -> scroll_tabs_right",
+			),
+			(KeyCode::Char('w'), KeyModifiers::ALT, Action::CloseTab, "Alt+W -> close_tab"),
+		];
+
+		for (code, mods, expected, label) in cases {
+			let event = KeyEvent::new(code, mods);
+			assert_eq!(
+				resolver.resolve(&event, KeyContext::FileExplorer),
+				expected,
+				"{label} should fall through from FileExplorer to Normal"
+			);
+		}
+
+		// Cursor-level Normal bindings (e.g. arrow keys for cursor movement)
+		// must NOT fall through — the explorer has its own arrow handlers.
+		// Up arrow in FileExplorer is bound to file_explorer_up; verify
+		// the explorer binding wins over a hypothetical Normal MoveUp.
+		let up = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&up, KeyContext::FileExplorer),
+			Action::FileExplorerUp,
+			"Up must continue to navigate the explorer, not move the cursor"
+		);
+
+		// Plain InsertChar fallthrough must NOT happen for non-UI Normal
+		// bindings: 'd' (without Alt/Ctrl) is part of FileExplorer text
+		// input (search-as-you-type), it must remain InsertChar and not
+		// resolve to AddCursorNextMatch (Ctrl+D) or anything else.
+		let plain_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&plain_d, KeyContext::FileExplorer),
+			Action::InsertChar('d'),
+			"Plain 'd' must remain text input for explorer search-as-you-type"
+		);
+	}
+
+	#[test]
+	fn to_action_spec_round_trips_through_from_str() {
+		// A representative spread: no-arg, char-payload, and string-payload
+		// actions. Each must survive Action -> ActionSpec -> Action unchanged,
+		// which is the invariant the macro<->code bridge relies on.
+		let cases = vec![
+			Action::MoveLeft,
+			Action::DeleteLine,
+			Action::InsertChar('x'),
+			Action::InsertChar(' '),
+			Action::SetBookmark('3'),
+			Action::PlayMacro('q'),
+			Action::ShowMacro('0'),
+			Action::PromptConfirmWithText("hello world".to_string()),
+			Action::MenuOpen("File".to_string()),
+			Action::SwitchKeybindingMap("emacs".to_string()),
+			Action::CopyWithTheme("one-dark".to_string()),
+		];
+		for action in cases {
+			let spec = action.to_action_spec();
+			assert_eq!(spec.count, 1, "to_action_spec emits count == 1");
+			let back = Action::from_str(&spec.action, &spec.args)
+				.unwrap_or_else(|| panic!("from_str failed for {:?}", action));
+			assert_eq!(back, action, "round-trip mismatch via spec {:?}", spec);
+		}
+	}
+
+	#[test]
+	fn to_action_spec_omits_args_for_plain_actions() {
+		assert!(Action::MoveRight.to_action_spec().args.is_empty());
+		// Char actions carry their payload.
+		let spec = Action::InsertChar('z').to_action_spec();
+		assert_eq!(spec.args.get("char").and_then(|v| v.as_str()), Some("z"));
+	}
+
+	#[test]
+	fn test_action_from_str() {
+		let args = HashMap::new();
+		assert_eq!(Action::from_str("move_left", &args), Some(Action::MoveLeft));
+		assert_eq!(Action::from_str("save", &args), Some(Action::Save));
+		// Unknown action names are treated as plugin actions
+		assert_eq!(
+			Action::from_str("unknown", &args),
+			Some(Action::PluginAction("unknown".to_string()))
+		);
+
+		// Test new context-specific actions
+		assert_eq!(Action::from_str("keyboard_shortcuts", &args), Some(Action::ShowKeyboardShortcuts));
+		assert_eq!(Action::from_str("prompt_confirm", &args), Some(Action::PromptConfirm));
+		assert_eq!(Action::from_str("popup_cancel", &args), Some(Action::PopupCancel));
+
+		// Test calibrate_input action
+		assert_eq!(Action::from_str("calibrate_input", &args), Some(Action::CalibrateInput));
+	}
+
+	#[test]
+	fn test_key_context_from_when_clause() {
+		assert_eq!(KeyContext::from_when_clause("normal"), Some(KeyContext::Normal));
+		assert_eq!(KeyContext::from_when_clause("prompt"), Some(KeyContext::Prompt));
+		assert_eq!(KeyContext::from_when_clause("searchPrompt"), Some(KeyContext::SearchPrompt));
+		assert_eq!(KeyContext::from_when_clause("search_prompt"), Some(KeyContext::SearchPrompt));
+		assert_eq!(KeyContext::from_when_clause("popup"), Some(KeyContext::Popup));
+		assert_eq!(KeyContext::from_when_clause("help"), None);
+		assert_eq!(KeyContext::from_when_clause("  help  "), None); // Test trimming
+		assert_eq!(KeyContext::from_when_clause("unknown"), None);
+		assert_eq!(KeyContext::from_when_clause(""), None);
+	}
+
+	#[test]
+	fn test_key_context_to_when_clause() {
+		assert_eq!(KeyContext::Normal.to_when_clause(), "normal");
+		assert_eq!(KeyContext::Prompt.to_when_clause(), "prompt");
+		assert_eq!(KeyContext::SearchPrompt.to_when_clause(), "searchPrompt");
+		assert_eq!(KeyContext::Popup.to_when_clause(), "popup");
+		// Round-trips through from_when_clause.
+		assert_eq!(
+			KeyContext::from_when_clause(&KeyContext::SearchPrompt.to_when_clause()),
+			Some(KeyContext::SearchPrompt)
+		);
+	}
+
+	#[test]
+	fn test_context_specific_bindings() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Test prompt context bindings
+		let enter_event = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+		assert_eq!(resolver.resolve(&enter_event, KeyContext::Prompt), Action::PromptConfirm);
+		assert_eq!(resolver.resolve(&enter_event, KeyContext::Normal), Action::InsertNewline);
+
+		// Test popup context bindings
+		let up_event = KeyEvent::new(KeyCode::Up, KeyModifiers::empty());
+		assert_eq!(resolver.resolve(&up_event, KeyContext::Popup), Action::PopupSelectPrev);
+		assert_eq!(resolver.resolve(&up_event, KeyContext::Normal), Action::MoveUp);
+	}
+
+	#[test]
+	fn test_search_prompt_owns_toggles_and_inherits_prompt() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		let alt_w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::ALT);
+
+		// Alt+W toggles whole-word ONLY in the SearchPrompt context.
+		assert_eq!(resolver.resolve(&alt_w, KeyContext::SearchPrompt), Action::ToggleSearchWholeWord,);
+		// In the broad Prompt context (e.g. the save/discard/cancel close
+		// confirmation) Alt+W must NOT toggle whole-word — that was the bug.
+		assert_ne!(resolver.resolve(&alt_w, KeyContext::Prompt), Action::ToggleSearchWholeWord,);
+
+		// The other match-mode toggles are likewise SearchPrompt-only.
+		let alt_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT);
+		let alt_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+		assert_eq!(
+			resolver.resolve(&alt_c, KeyContext::SearchPrompt),
+			Action::ToggleSearchCaseSensitive,
+		);
+		assert_eq!(resolver.resolve(&alt_r, KeyContext::SearchPrompt), Action::ToggleSearchRegex,);
+
+		// SearchPrompt inherits all generic editing/navigation keys from its
+		// parent Prompt context (Enter confirms, Esc cancels, text types).
+		let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&enter, KeyContext::SearchPrompt),
+			resolver.resolve(&enter, KeyContext::Prompt),
+		);
+		let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&esc, KeyContext::SearchPrompt),
+			resolver.resolve(&esc, KeyContext::Prompt),
+		);
+		assert_eq!(
+			resolver.resolve(
+				&KeyEvent::new(KeyCode::Char('x'), KeyModifiers::empty()),
+				KeyContext::SearchPrompt,
+			),
+			Action::InsertChar('x'),
+		);
+	}
+
+	#[test]
+	fn test_context_fallback_to_normal() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Ctrl+S should work in all contexts (falls back to normal)
+		let save_event = KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL);
+		assert_eq!(resolver.resolve(&save_event, KeyContext::Normal), Action::Save);
+		assert_eq!(resolver.resolve(&save_event, KeyContext::Popup), Action::Save);
+		// Note: Prompt context might handle this differently in practice
+	}
+
+	#[test]
+	fn test_context_priority_resolution() {
+		use crate::config::Keybinding;
+
+		// Create a config with a custom binding that overrides default in help context
+		let mut config = Config::default();
+		config.keybindings.push(Keybinding {
+			key: "esc".to_string(),
+			modifiers: vec![],
+			keys: vec![],
+			action: "quit".to_string(), // Override Esc in popup context to quit
+			args: HashMap::new(),
+			when: Some("popup".to_string()),
+		});
+
+		let resolver = KeybindingResolver::new(&config);
+		let esc_event = KeyEvent::new(KeyCode::Esc, KeyModifiers::empty());
+
+		// In popup context, custom binding should override default PopupCancel
+		assert_eq!(resolver.resolve(&esc_event, KeyContext::Popup), Action::Quit);
+
+		// In normal context, should still be RemoveSecondaryCursors
+		assert_eq!(resolver.resolve(&esc_event, KeyContext::Normal), Action::RemoveSecondaryCursors);
+	}
+
+	#[test]
+	fn test_character_input_in_contexts() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		let char_event = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::empty());
+
+		// Character input should work in Normal and Prompt contexts
+		assert_eq!(resolver.resolve(&char_event, KeyContext::Normal), Action::InsertChar('a'));
+		assert_eq!(resolver.resolve(&char_event, KeyContext::Prompt), Action::InsertChar('a'));
+
+		// But not in Popup contexts (returns None)
+		assert_eq!(resolver.resolve(&char_event, KeyContext::Popup), Action::None);
+	}
+
+	#[test]
+	fn test_custom_keybinding_loading() {
+		use crate::config::Keybinding;
+
+		let mut config = Config::default();
+
+		// Add a custom keybinding for normal context
+		config.keybindings.push(Keybinding {
+			key: "f".to_string(),
+			modifiers: vec!["ctrl".to_string()],
+			keys: vec![],
+			action: "command_palette".to_string(),
+			args: HashMap::new(),
+			when: None, // Default to normal context
+		});
+
+		let resolver = KeybindingResolver::new(&config);
+
+		// Test normal context custom binding
+		let ctrl_f = KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL);
+		assert_eq!(resolver.resolve(&ctrl_f, KeyContext::Normal), Action::CommandPalette);
+
+		// Test prompt context custom binding
+		let ctrl_k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL);
+		assert_eq!(resolver.resolve(&ctrl_k, KeyContext::Prompt), Action::PromptDeleteToLineEnd);
+		assert_eq!(resolver.resolve(&ctrl_k, KeyContext::Normal), Action::DeleteToLineEnd);
+	}
+
+	#[test]
+	fn test_all_context_default_bindings_exist() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Verify that default bindings exist for all contexts
+		assert!(resolver.default_bindings.contains_key(&KeyContext::Normal));
+		assert!(resolver.default_bindings.contains_key(&KeyContext::Prompt));
+		assert!(resolver.default_bindings.contains_key(&KeyContext::Popup));
+		assert!(resolver.default_bindings.contains_key(&KeyContext::FileExplorer));
+		assert!(resolver.default_bindings.contains_key(&KeyContext::Menu));
+
+		// Verify each context has some bindings
+		assert!(!resolver.default_bindings[&KeyContext::Normal].is_empty());
+		assert!(!resolver.default_bindings[&KeyContext::Prompt].is_empty());
+		assert!(!resolver.default_bindings[&KeyContext::Popup].is_empty());
+		assert!(!resolver.default_bindings[&KeyContext::FileExplorer].is_empty());
+		assert!(!resolver.default_bindings[&KeyContext::Menu].is_empty());
+	}
+
+	/// Validate that every action name in every built-in keymap resolves to a
+	/// known built-in action, not a `PluginAction`.  This catches typos like
+	/// `"prompt_delete_to_end"` (should be `"prompt_delete_to_line_end"`).
+	///
+	/// A built-in keymap may also legitimately bind to a plugin action when
+	/// the plugin ships with the editor and the host has no native equivalent
+	/// (e.g. Alt+A → search/replace, see §10 of
+	/// docs/internal/search-replace-scope-replan-on-widgets.md). Such actions
+	/// are listed in `ALLOWED_PLUGIN_ACTIONS_IN_DEFAULTS` below; any new
+	/// addition must be added there explicitly so genuine typos still fail.
+	#[test]
+	fn test_all_builtin_keymaps_have_valid_action_names() {
+		let known_actions: std::collections::HashSet<String> =
+			Action::all_action_names().into_iter().collect();
+
+		const ALLOWED_PLUGIN_ACTIONS_IN_DEFAULTS: &[&str] = &[
+			"start_search_replace",
+			// Project Search & Replace match navigation (issue #2434) —
+			// handled by the search_replace plugin; bound in the default
+			// keymap so reviewing a result set costs one keystroke per
+			// match from the editor.
+			"search_replace_next_match",
+			"search_replace_prev_match",
+			// Universal Search scope toggles — handled by the live_grep
+			// plugin; dispatched as plugin actions from the prompt context.
+			"live_grep_toggle_files",
+			"live_grep_toggle_ignored",
+			"live_grep_toggle_buffers",
+			"live_grep_toggle_terminals",
+			"live_grep_toggle_diagnostics",
+			"live_grep_toggle_word",
+			"live_grep_toggle_regex",
+			// Export current Live Grep results to the Quickfix dock panel
+			// — handled by the live_grep plugin (Finder panel), dispatched
+			// as a plugin action from the prompt context.
+			"live_grep_export_quickfix",
+		];
+
+		let config = Config::default();
+
+		for map_name in crate::config::KeybindingMapName::BUILTIN_OPTIONS {
+			let bindings = config.resolve_keymap(map_name);
+			for binding in &bindings {
+				let is_known_builtin = known_actions.contains(&binding.action);
+				let is_allowed_plugin =
+					ALLOWED_PLUGIN_ACTIONS_IN_DEFAULTS.contains(&binding.action.as_str());
+				assert!(
+					is_known_builtin || is_allowed_plugin,
+					"Keymap '{}' contains unknown action '{}' (key: '{}', when: {:?}). \
+                     This will be treated as a plugin action at runtime. \
+                     Check for typos in the keymap JSON file, or add the action to \
+                     ALLOWED_PLUGIN_ACTIONS_IN_DEFAULTS if it's an intentional \
+                     plugin-action binding.",
+					map_name,
+					binding.action,
+					binding.key,
+					binding.when,
+				);
+			}
+		}
+	}
+
+	#[test]
+	fn test_resolve_determinism() {
+		// Property: Resolving the same key in the same context should always return the same action
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		let test_cases = vec![
+			(KeyCode::Left, KeyModifiers::empty(), KeyContext::Normal),
+			(KeyCode::Esc, KeyModifiers::empty(), KeyContext::FileExplorer),
+			(KeyCode::Enter, KeyModifiers::empty(), KeyContext::Prompt),
+			(KeyCode::Down, KeyModifiers::empty(), KeyContext::Popup),
+		];
+
+		for (key_code, modifiers, context) in test_cases {
+			let event = KeyEvent::new(key_code, modifiers);
+			let action1 = resolver.resolve(&event, context.clone());
+			let action2 = resolver.resolve(&event, context.clone());
+			let action3 = resolver.resolve(&event, context);
+
+			assert_eq!(action1, action2, "Resolve should be deterministic");
+			assert_eq!(action2, action3, "Resolve should be deterministic");
+		}
+	}
+
+	#[test]
+	fn test_modifier_combinations() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Test that modifier combinations are distinguished correctly
+		let char_s = KeyCode::Char('s');
+
+		let no_mod = KeyEvent::new(char_s, KeyModifiers::empty());
+		let ctrl = KeyEvent::new(char_s, KeyModifiers::CONTROL);
+		let shift = KeyEvent::new(char_s, KeyModifiers::SHIFT);
+		let ctrl_shift = KeyEvent::new(char_s, KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+
+		let action_no_mod = resolver.resolve(&no_mod, KeyContext::Normal);
+		let action_ctrl = resolver.resolve(&ctrl, KeyContext::Normal);
+		let action_shift = resolver.resolve(&shift, KeyContext::Normal);
+		let action_ctrl_shift = resolver.resolve(&ctrl_shift, KeyContext::Normal);
+
+		// These should all be different actions (or at least distinguishable)
+		assert_eq!(action_no_mod, Action::InsertChar('s'));
+		assert_eq!(action_ctrl, Action::Save);
+		assert_eq!(action_shift, Action::InsertChar('s')); // Shift alone is still character input
+		// Ctrl+Shift+S is not bound by default, should return None
+		assert_eq!(action_ctrl_shift, Action::None);
+	}
+
+	#[test]
+	fn test_scroll_keybindings() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Test Ctrl+Up -> ScrollUp
+		let ctrl_up = KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL);
+		assert_eq!(
+			resolver.resolve(&ctrl_up, KeyContext::Normal),
+			Action::ScrollUp,
+			"Ctrl+Up should resolve to ScrollUp"
+		);
+
+		// Test Ctrl+Down -> ScrollDown
+		let ctrl_down = KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL);
+		assert_eq!(
+			resolver.resolve(&ctrl_down, KeyContext::Normal),
+			Action::ScrollDown,
+			"Ctrl+Down should resolve to ScrollDown"
+		);
+	}
+
+	#[test]
+	fn test_lsp_completion_keybinding() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Test Ctrl+Space -> LspCompletion
+		let ctrl_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL);
+		assert_eq!(
+			resolver.resolve(&ctrl_space, KeyContext::Normal),
+			Action::LspCompletion,
+			"Ctrl+Space should resolve to LspCompletion"
+		);
+	}
+
+	#[test]
+	fn test_terminal_key_equivalents() {
+		// Test that terminal_key_equivalents returns correct mappings
+		let ctrl = KeyModifiers::CONTROL;
+
+		// Ctrl+/ <-> Ctrl+7
+		let slash_equivs = terminal_key_equivalents(KeyCode::Char('/'), ctrl);
+		assert_eq!(slash_equivs, vec![(KeyCode::Char('7'), ctrl)]);
+
+		let seven_equivs = terminal_key_equivalents(KeyCode::Char('7'), ctrl);
+		assert_eq!(seven_equivs, vec![(KeyCode::Char('/'), ctrl)]);
+
+		// Ctrl+Backspace <-> Ctrl+H
+		let backspace_equivs = terminal_key_equivalents(KeyCode::Backspace, ctrl);
+		assert_eq!(backspace_equivs, vec![(KeyCode::Char('h'), ctrl)]);
+
+		let h_equivs = terminal_key_equivalents(KeyCode::Char('h'), ctrl);
+		assert_eq!(h_equivs, vec![(KeyCode::Backspace, ctrl)]);
+
+		// No equivalents for regular keys
+		let a_equivs = terminal_key_equivalents(KeyCode::Char('a'), ctrl);
+		assert!(a_equivs.is_empty());
+
+		// No equivalents without Ctrl
+		let slash_no_ctrl = terminal_key_equivalents(KeyCode::Char('/'), KeyModifiers::empty());
+		assert!(slash_no_ctrl.is_empty());
+	}
+
+	#[test]
+	fn test_terminal_key_equivalents_auto_binding() {
+		let config = Config::default();
+		let resolver = KeybindingResolver::new(&config);
+
+		// Ctrl+/ should be bound to toggle_comment
+		let ctrl_slash = KeyEvent::new(KeyCode::Char('/'), KeyModifiers::CONTROL);
+		let action_slash = resolver.resolve(&ctrl_slash, KeyContext::Normal);
+		assert_eq!(action_slash, Action::ToggleComment, "Ctrl+/ should resolve to ToggleComment");
+
+		// Ctrl+7 should also be bound to toggle_comment (auto-generated equivalent)
+		let ctrl_7 = KeyEvent::new(KeyCode::Char('7'), KeyModifiers::CONTROL);
+		let action_7 = resolver.resolve(&ctrl_7, KeyContext::Normal);
+		assert_eq!(
+			action_7,
+			Action::ToggleComment,
+			"Ctrl+7 should resolve to ToggleComment (terminal equivalent of Ctrl+/)"
+		);
+	}
+
+	#[test]
+	fn test_terminal_key_equivalents_normalization() {
+		// This test verifies that all terminal key equivalents are correctly mapped
+		// These mappings exist because terminals send different key codes for certain
+		// key combinations due to historical terminal emulation reasons.
+
+		let ctrl = KeyModifiers::CONTROL;
+
+		// === Ctrl+/ <-> Ctrl+7 ===
+		// Most terminals send Ctrl+7 (0x1F) when user presses Ctrl+/
+		let slash_equivs = terminal_key_equivalents(KeyCode::Char('/'), ctrl);
+		assert_eq!(slash_equivs, vec![(KeyCode::Char('7'), ctrl)], "Ctrl+/ should map to Ctrl+7");
+		let seven_equivs = terminal_key_equivalents(KeyCode::Char('7'), ctrl);
+		assert_eq!(seven_equivs, vec![(KeyCode::Char('/'), ctrl)], "Ctrl+7 should map back to Ctrl+/");
+
+		// === Ctrl+Backspace <-> Ctrl+H ===
+		// Many terminals send Ctrl+H (0x08, ASCII backspace) for Ctrl+Backspace
+		let backspace_equivs = terminal_key_equivalents(KeyCode::Backspace, ctrl);
+		assert_eq!(
+			backspace_equivs,
+			vec![(KeyCode::Char('h'), ctrl)],
+			"Ctrl+Backspace should map to Ctrl+H"
+		);
+		let h_equivs = terminal_key_equivalents(KeyCode::Char('h'), ctrl);
+		assert_eq!(
+			h_equivs,
+			vec![(KeyCode::Backspace, ctrl)],
+			"Ctrl+H should map back to Ctrl+Backspace"
+		);
+
+		// === Ctrl+Space <-> Ctrl+@ ===
+		// Ctrl+Space sends NUL (0x00), same as Ctrl+@
+		let space_equivs = terminal_key_equivalents(KeyCode::Char(' '), ctrl);
+		assert_eq!(space_equivs, vec![(KeyCode::Char('@'), ctrl)], "Ctrl+Space should map to Ctrl+@");
+		let at_equivs = terminal_key_equivalents(KeyCode::Char('@'), ctrl);
+		assert_eq!(at_equivs, vec![(KeyCode::Char(' '), ctrl)], "Ctrl+@ should map back to Ctrl+Space");
+
+		// === Ctrl+- <-> Ctrl+_ ===
+		// Ctrl+- and Ctrl+_ both send 0x1F in some terminals
+		let minus_equivs = terminal_key_equivalents(KeyCode::Char('-'), ctrl);
+		assert_eq!(minus_equivs, vec![(KeyCode::Char('_'), ctrl)], "Ctrl+- should map to Ctrl+_");
+		let underscore_equivs = terminal_key_equivalents(KeyCode::Char('_'), ctrl);
+		assert_eq!(
+			underscore_equivs,
+			vec![(KeyCode::Char('-'), ctrl)],
+			"Ctrl+_ should map back to Ctrl+-"
+		);
+
+		// === No equivalents for regular keys ===
+		assert!(
+			terminal_key_equivalents(KeyCode::Char('a'), ctrl).is_empty(),
+			"Ctrl+A should have no terminal equivalents"
+		);
+		assert!(
+			terminal_key_equivalents(KeyCode::Char('z'), ctrl).is_empty(),
+			"Ctrl+Z should have no terminal equivalents"
+		);
+		assert!(
+			terminal_key_equivalents(KeyCode::Enter, ctrl).is_empty(),
+			"Ctrl+Enter should have no terminal equivalents"
+		);
+
+		// === No equivalents without Ctrl modifier ===
+		assert!(
+			terminal_key_equivalents(KeyCode::Char('/'), KeyModifiers::empty()).is_empty(),
+			"/ without Ctrl should have no equivalents"
+		);
+		assert!(
+			terminal_key_equivalents(KeyCode::Char('7'), KeyModifiers::SHIFT).is_empty(),
+			"Shift+7 should have no equivalents"
+		);
+		assert!(
+			terminal_key_equivalents(KeyCode::Char('h'), KeyModifiers::ALT).is_empty(),
+			"Alt+H should have no equivalents"
+		);
+
+		// === Ctrl+H only maps to Backspace when ONLY Ctrl is pressed ===
+		// Ctrl+Shift+H or Ctrl+Alt+H should NOT map to Backspace
+		let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+		let ctrl_shift_h_equivs = terminal_key_equivalents(KeyCode::Char('h'), ctrl_shift);
+		assert!(ctrl_shift_h_equivs.is_empty(), "Ctrl+Shift+H should NOT map to Ctrl+Shift+Backspace");
+	}
+
+	#[test]
+	fn test_no_duplicate_keybindings_in_keymaps() {
+		// Load all keymaps and check for duplicate bindings within the same context
+		// A duplicate is when the same key+modifiers+context is defined more than once
+		use std::collections::HashMap;
+
+		let keymaps: &[(&str, &str)] = &[
+			("default", include_str!("../../keymaps/default.json")),
+			("macos", include_str!("../../keymaps/macos.json")),
+		];
+
+		for (keymap_name, json_content) in keymaps {
+			let keymap: crate::config::KeymapConfig = serde_json::from_str(json_content)
+				.unwrap_or_else(|e| panic!("Failed to parse keymap '{}': {}", keymap_name, e));
+
+			// Track seen bindings per context: (key, modifiers, context) -> action
+			let mut seen: HashMap<(String, Vec<String>, String), String> = HashMap::new();
+			let mut duplicates: Vec<String> = Vec::new();
+
+			for binding in &keymap.bindings {
+				let when = binding.when.clone().unwrap_or_default();
+				let key_id = (binding.key.clone(), binding.modifiers.clone(), when.clone());
+
+				if let Some(existing_action) = seen.get(&key_id) {
+					duplicates.push(format!(
+						"Duplicate in '{}': key='{}', modifiers={:?}, when='{}' -> '{}' vs '{}'",
+						keymap_name, binding.key, binding.modifiers, when, existing_action, binding.action
+					));
+				} else {
+					seen.insert(key_id, binding.action.clone());
+				}
+			}
+
+			assert!(duplicates.is_empty(), "Found duplicate keybindings:\n{}", duplicates.join("\n"));
+		}
+	}
+
+	/// `reload_from_config` rebuilds config-derived bindings but must preserve
+	/// plugin-contributed runtime state — single keys, chords, and the
+	/// inheriting-modes set — that does not live in config (issue #2307).
+	#[test]
+	fn test_reload_from_config_preserves_plugin_state() {
+		let config = Config::default();
+		let mut resolver = KeybindingResolver::new(&config);
+
+		let mode_ctx = KeyContext::Mode("test-plugin-mode".to_string());
+		let single_action = Action::PluginAction("test-plugin.single".to_string());
+		let chord_action = Action::PluginAction("test-plugin.chord".to_string());
+
+		// Simulate a plugin's defineMode(): a single key, a chord, and a
+		// request to inherit Normal bindings.
+		resolver.load_plugin_default(
+			mode_ctx.clone(),
+			KeyCode::Char('z'),
+			KeyModifiers::NONE,
+			single_action.clone(),
+		);
+		resolver.load_plugin_chord_default(
+			mode_ctx.clone(),
+			vec![(KeyCode::Char('g'), KeyModifiers::NONE), (KeyCode::Char('g'), KeyModifiers::NONE)],
+			chord_action.clone(),
+		);
+		resolver.set_mode_inherits_normal_bindings("test-plugin-mode", true);
+
+		// A config-triggered rebuild (e.g. switching the active keybinding map).
+		resolver.reload_from_config(&config);
+
+		// Single-key plugin binding survives.
+		let single_event = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+		assert_eq!(
+			resolver.resolve(&single_event, mode_ctx.clone()),
+			single_action,
+			"single-key plugin binding must survive reload_from_config"
+		);
+
+		// Chord plugin binding survives: feed the first `g` as chord state and
+		// the second `g` as the new event to complete the `g g` sequence.
+		let chord_prefix = [(KeyCode::Char('g'), KeyModifiers::NONE)];
+		let second_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::NONE);
+		assert_eq!(
+			resolver.resolve_chord(&chord_prefix, &second_g, mode_ctx.clone()),
+			ChordResolution::Complete(chord_action),
+			"chord plugin binding must survive reload_from_config"
+		);
+
+		// The inheriting-modes set survives: an unbound key falls through to a
+		// Normal binding (Left → MoveLeft) only when the mode inherits.
+		let left = KeyEvent::new(KeyCode::Left, KeyModifiers::empty());
+		assert_eq!(
+			resolver.resolve(&left, mode_ctx),
+			Action::MoveLeft,
+			"inheriting-modes membership must survive reload_from_config"
+		);
+	}
+}

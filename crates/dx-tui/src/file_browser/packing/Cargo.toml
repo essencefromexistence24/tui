@@ -1,0 +1,29 @@
+[package]
+name = "fb-packing"
+description            = "DX TUI file-browser packaging"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[package.metadata.deb]
+name                      = "yazi"
+license-file              = [ "../LICENSE", "0" ]
+depends                   = "file, ffmpeg, 7zip, jq, poppler-utils, fd-find|fd, ripgrep, fzf, zoxide, imagemagick, xsel|xclip|wl-clipboard"
+recommends                = "bash-completion"
+extended-description-file = "README.md"
+section                   = "utility"
+priority                  = "optional"
+assets                    = [
+	[ "target/release/ya", "usr/bin/", "755" ],
+	[ "target/release/yazi", "usr/bin/", "755" ],
+	[ "../README.md",  "usr/share/doc/yazi/README", "644" ],
+	[ "../yazi-cli/completions/ya.bash", "usr/share/bash-completion/completions/ya", "644" ],
+	[ "../yazi-boot/completions/yazi.bash", "usr/share/bash-completion/completions/yazi", "644" ],
+]

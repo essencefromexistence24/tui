@@ -1,0 +1,2 @@
+# Clippy configuration for dx-tui
+# Lint levels are defined in workspace Cargo.toml under [workspace.lints.clippy]

@@ -609,6 +609,11 @@ pub struct AppView {
     pub current_ui: xai_grok_shell::agent::config::UiConfig,
     /// Working directory.
     pub cwd: PathBuf,
+    /// Whether the project picker question has already been shown this session.
+    pub project_picker_shown: bool,
+    /// "Don't ask me again" opt-out from [`xai_grok_shell::util::config::resolve_hints`];
+    /// TUI writes to user `config.toml` only.
+    pub project_picker_disabled: bool,
     /// Whether the cwd is inside a git repository (any ancestor has `.git`).
     /// Pre-computed at startup so dispatch stays free of filesystem I/O.
     pub cwd_has_git_ancestor: bool,
@@ -623,6 +628,8 @@ pub struct AppView {
     pub cursor: CursorState,
     /// Pending double-press confirmation (quit, etc.).
     pub pending_action: Option<PendingAction>,
+    /// Deadline for the non-blocking DX train outro started by confirmed quit.
+    pub dx_exit_at: Option<Instant>,
     /// Pending exit-session confirmation for slash command path.
     /// Set when `/home` is first typed; confirmed on second invocation within TTL.
     pub exit_session_pending: Option<Instant>,
@@ -785,6 +792,9 @@ pub struct AppView {
     /// Whether the welcome screen prompt is currently capturing focus (user typed in it).
     /// When true, menu shortcuts like n/w/q are disabled and Escape unfocuses the prompt.
     pub welcome_prompt_focused: bool,
+    /// If set, the next new session opens directly into this DX view instead of
+    /// the normal Chat screen (←/→/↓ arrow shortcuts on the welcome screen).
+    pub welcome_post_new_view: Option<crate::dx::DxView>,
     /// Sticky flag: set once the user types in the welcome prompt, hides the
     /// tip for the rest of the session (even if the input is cleared).
     pub welcome_tip_typing_dismissed: bool,
@@ -1402,6 +1412,8 @@ impl AppView {
             settings_registry: Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+            project_picker_shown: false,
+            project_picker_disabled: false,
             cwd_has_git_ancestor: std::env::current_dir()
                 .ok()
                 .is_some_and(|c| c.ancestors().any(|p| p.join(".git").exists())),
@@ -1410,6 +1422,7 @@ impl AppView {
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            dx_exit_at: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::from_settings(),
@@ -1432,6 +1445,7 @@ impl AppView {
             slash_mru,
             command_tags,
             welcome_prompt_focused: true,
+            welcome_post_new_view: None,
             welcome_tip_typing_dismissed: false,
             pending_effects: Vec::new(),
             pending_editor: None,
@@ -1613,12 +1627,13 @@ impl AppView {
     /// [`take_deferred_model_switch`](crate::app::dispatch::session::lifecycle::take_deferred_model_switch);
     /// resolving it here would use the pre-session dashboard catalog and a
     /// remapped menu id could resolve differently.
-    pub fn deferred_model_switch_from_cli(&self) -> Option<crate::app::agent::DeferredModelSwitch> {
-        Some(crate::app::agent::DeferredModelSwitch {
-            model_id: self.cli_model_override.clone()?,
-            effort: None,
-            prev_model_id: None,
-        })
+    pub fn deferred_model_switch_from_cli(
+        &self,
+    ) -> Option<(
+        acp::ModelId,
+        Option<xai_grok_shell::sampling::types::ReasoningEffort>,
+    )> {
+        Some((self.cli_model_override.clone()?, None))
     }
     /// Voice capture is armed: the in-prompt dictation overlay can show and
     /// Ctrl+Space can start capture.
@@ -1972,6 +1987,16 @@ impl AppView {
             _ => None,
         }
     }
+    /// Whether the project picker should intercept the next prompt.
+    pub fn needs_project_picker(&self) -> bool {
+        !self.project_picker_shown
+            && !self.project_picker_disabled
+            && !crate::project_picker::detection::is_project_dir(&self.cwd)
+    }
+    /// Mark the project picker as resolved so it won't fire again.
+    pub fn mark_project_picker_done(&mut self) {
+        self.project_picker_shown = true;
+    }
     /// Show a toast on the currently active view.
     ///
     /// From the dashboard, toasts route into the dispatch input's inline
@@ -2152,8 +2177,12 @@ impl AppView {
     /// Apply a (possibly hot-reloaded) appearance config to all agents.
     pub fn set_appearance(&mut self, config: AppearanceConfig) {
         for agent in self.agents.values_mut() {
+            agent.dx_ui.intro_enabled = config.animation.intro;
+            agent.dx_ui.outro_enabled = config.animation.outro;
             agent.scrollback.set_appearance(config.clone());
             for child in agent.subagent_views.values_mut() {
+                child.dx_ui.intro_enabled = config.animation.intro;
+                child.dx_ui.outro_enabled = config.animation.outro;
                 child.scrollback.set_appearance(config.clone());
                 child.prompt.sync_tab_width_from_appearance();
             }
@@ -2394,10 +2423,54 @@ impl AppView {
             }
             self.pending_action = None;
         }
+        if let Event::Mouse(mouse) = ev
+            && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
+            && let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+            && agent
+                .dx_ui
+                .sidebar
+                .panel_area
+                .contains((mouse.column, mouse.row).into())
+        {
+            agent.dx_ui.sidebar.scroll_by(match direction {
+                ScrollDirection::Up => -3,
+                ScrollDirection::Down => 3,
+            });
+            self.last_mouse_pos = Some((mouse.column, mouse.row));
+            self.scroll_state.cancel_stream();
+            return InputOutcome::Changed;
+        }
+        if let Event::Mouse(mouse) = ev
+            && ScrollDirection::from_mouse_event(mouse).is_some()
+            && let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+            && agent.dx_ui.view == crate::dx::DxView::FileBrowser
+        {
+            if let Err(error) = agent.dx_ui.file_browser.handle_mouse(*mouse) {
+                tracing::warn!(%error, "File Browser mouse input failed");
+            }
+            self.last_mouse_pos = Some((mouse.column, mouse.row));
+            self.scroll_state.cancel_stream();
+            return InputOutcome::Changed;
+        }
         let modal_open = self.is_scroll_blocking_modal_open();
+        // Full-screen DX surfaces own wheel input. Let the agent-level diff
+        // handler consume it instead of translating it into chat scrollback.
+        let dx_surface_owns_scroll = matches!(
+            self.active_view,
+            ActiveView::Agent(id)
+                if self.agents.get(&id).is_some_and(|agent| {
+                    matches!(
+                        agent.dx_ui.view,
+                        crate::dx::DxView::Diff | crate::dx::DxView::FileBrowser
+                    )
+                })
+        );
         if let Event::Mouse(mouse) = ev
             && let Some(direction) = ScrollDirection::from_mouse_event(mouse)
             && !modal_open
+            && !dx_surface_owns_scroll
         {
             let config = self
                 .scroll_config
@@ -2516,6 +2589,7 @@ impl AppView {
                     sp_source_filter: &mut self.session_picker_source_filter,
                     sp_pending_delete: &mut self.session_picker_pending_delete,
                     chat_mode: self.chat_mode,
+                    post_new_view: &mut self.welcome_post_new_view,
                     #[cfg(feature = "local-workspace")]
                     workspace_mode: &mut self.welcome_workspace_mode,
                     #[cfg(feature = "local-workspace")]
@@ -3039,6 +3113,28 @@ impl AppView {
             InputOutcome::Action(Action::Quit)
         }
     }
+
+    pub(crate) fn begin_dx_exit_animation(&mut self) {
+        if let ActiveView::Agent(id) = self.active_view
+            && let Some(agent) = self.agents.get_mut(&id)
+        {
+            let duration = agent.dx_ui.animation.begin_outro();
+            self.dx_exit_at = Some(Instant::now() + duration);
+            agent.dx_ui.view = crate::dx::DxView::Animation;
+            agent.dx_ui.sound.stop_animation_loop();
+            agent.dx_ui.sound.play(crate::dx::sound::SoundCue::Exit);
+        } else {
+            self.dx_exit_at = Some(Instant::now() + std::time::Duration::from_millis(1400));
+        }
+    }
+
+    pub(crate) fn take_dx_exit_ready(&mut self) -> bool {
+        if self.dx_exit_at.is_some_and(|at| Instant::now() >= at) {
+            self.dx_exit_at = None;
+            return true;
+        }
+        false
+    }
     /// Apply exit-session confirmation (double-press). Works like quit confirmation
     /// but transitions to the welcome screen instead of quitting.
     fn apply_exit_session_confirmation(
@@ -3151,6 +3247,9 @@ struct WelcomeInputCtx<'a> {
     /// Process-wide `--chat`: the session picker hides its source filter
     /// (conversations-only list), so `f` must not cycle it.
     chat_mode: bool,
+    /// When set, the next new session created by this welcome screen will
+    /// open directly into the given DX view (←/→/↓ shortcuts).
+    post_new_view: &'a mut Option<crate::dx::DxView>,
     #[cfg(feature = "local-workspace")]
     workspace_mode: &'a mut crate::views::welcome::WelcomeWorkspaceMode,
     #[cfg(feature = "local-workspace")]
@@ -3507,10 +3606,9 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 None => return InputOutcome::Changed,
             },
             PickerOutcome::SubmitQuery => {
-                if let Some(sid) =
-                    crate::views::session_picker::session_id_for_direct_load(ctx.sp_state.query())
-                {
-                    return InputOutcome::Action(Action::LoadSession(sid.to_string(), None, false));
+                let query = ctx.sp_state.query().trim().to_string();
+                if !query.is_empty() {
+                    return InputOutcome::Action(Action::LoadSession(query, None, false));
                 }
                 return InputOutcome::Unchanged;
             }
@@ -3650,9 +3748,26 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             );
         }
         if matches!(ctx.auth_state, AuthState::Done)
+            && ctx.prompt.text().trim().is_empty()
+        {
+            if key.code == KeyCode::Left && key.modifiers.is_empty() {
+                *ctx.post_new_view = Some(crate::dx::DxView::FileBrowser);
+                return InputOutcome::Action(Action::NewSession);
+            }
+            if key.code == KeyCode::Right && key.modifiers.is_empty() {
+                *ctx.post_new_view = Some(crate::dx::DxView::Editor);
+                return InputOutcome::Action(Action::NewSession);
+            }
+            if key.code == KeyCode::Down && key.modifiers.is_empty() {
+                *ctx.post_new_view = Some(crate::dx::DxView::Animation);
+                return InputOutcome::Action(Action::NewSession);
+            }
+        }
+        if matches!(ctx.auth_state, AuthState::Done)
             && key!(Enter).matches(key)
             && key.modifiers.is_empty()
         {
+            *ctx.post_new_view = Some(crate::dx::DxView::Animation);
             return InputOutcome::Action(Action::NewSession);
         }
         if matches!(ctx.auth_state, AuthState::Done) {
@@ -3681,6 +3796,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             }
         }
         if matches!(ctx.auth_state, AuthState::Done) && crate::input::key::is_shift_tab(key) {
+            *ctx.post_new_view = Some(crate::dx::DxView::Animation);
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
         if *ctx.prompt_focused
@@ -3689,6 +3805,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             && (crate::input::key::is_text_input_key(key)
                 || (ch == 'v' && crate::input::key::is_paste_key(key)))
         {
+            *ctx.post_new_view = Some(crate::dx::DxView::Animation);
             return InputOutcome::ActionThenForward(Action::NewSession);
         }
         if *ctx.prompt_focused {
@@ -4703,7 +4820,6 @@ impl AppView {
                             } else {
                                 None
                             };
-                        let overlay_can_cycle = position.is_some_and(|(_, n)| n > 1);
                         let (agent_area, header) = if overlay_active {
                             let theme = crate::theme::Theme::current();
                             let title = agents
@@ -4793,7 +4909,6 @@ impl AppView {
                                 },
                                 &self.bundle_state,
                                 overlay_active,
-                                overlay_can_cycle,
                                 link_spans,
                                 AppRenderParams {
                                     voice_available,
@@ -4913,7 +5028,6 @@ impl AppView {
                                                     crate::app::agent_view::BannerSlotParams::none(
                                                     ),
                                                     bundle_state,
-                                                    false,
                                                     false,
                                                     link_spans,
                                                     AppRenderParams {
@@ -5323,10 +5437,18 @@ impl AppView {
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
         {
+            needs_redraw |= matches!(
+                agent.dx_ui.view,
+                crate::dx::DxView::Animation | crate::dx::DxView::FileBrowser
+            );
             needs_redraw |= agent.scrollback.tick();
             needs_redraw |= agent.todo.list_state.tick();
             needs_redraw |= agent.todo.badge_tick();
             needs_redraw |= agent.tasks.tick();
+            // The minimap hover card has a short open-delay; keep requesting
+            // redraws while a turn is hovered so the card actually appears
+            // once the mouse stops moving (no further Moved events fire).
+            needs_redraw |= agent.dx_ui.minimap.hovered_turn.is_some();
             for child_view in agent.subagent_views.values_mut() {
                 needs_redraw |= child_view.scrollback.tick();
                 needs_redraw |= child_view.tick_toast();
@@ -5602,6 +5724,9 @@ impl AppView {
     /// the ~12fps welcome logo shimmer and the macOS Cmd link-hover poll —
     /// so an app that *looks* idle doesn't spin a 30fps loop for them.
     pub fn tick_demand(&self) -> TickDemand {
+        if self.dx_exit_at.is_some() {
+            return TickDemand::Fast;
+        }
         if self.pending_action.is_some() {
             return TickDemand::Fast;
         }
@@ -5639,6 +5764,10 @@ impl AppView {
                     return TickDemand::None;
                 };
                 let fast = agent.scrollback.needs_animation()
+                    || matches!(
+                        agent.dx_ui.view,
+                        crate::dx::DxView::Animation | crate::dx::DxView::FileBrowser
+                    )
                     || agent.todo.list_state.needs_tick()
                     || agent.todo.badge_needs_tick()
                     || agent.tasks.needs_tick()
@@ -5708,6 +5837,9 @@ impl AppView {
                     });
                 if fast {
                     return TickDemand::Fast;
+                }
+                if agent.dx_ui.minimap.hovered_turn.is_some() {
+                    return TickDemand::Slow;
                 }
                 if cfg!(target_os = "macos")
                     && (agent.needs_link_modifier_poll()
@@ -5901,11 +6033,14 @@ pub(crate) mod tests {
             settings_registry: std::sync::Arc::new(crate::settings::SettingsRegistry::defaults()),
             current_ui: xai_grok_shell::agent::config::UiConfig::default(),
             cwd: std::path::PathBuf::from("/tmp"),
+            project_picker_shown: true,
+            project_picker_disabled: false,
             cwd_has_git_ancestor: false,
             acp_tx: tx,
             scratch: crate::scrollback::render::ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            dx_exit_at: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::default(),
@@ -6021,6 +6156,7 @@ pub(crate) mod tests {
             welcome_on_auth_url: false,
             welcome_on_changelog_cta: false,
             welcome_announcement: WelcomeAnnouncementState::default(),
+            welcome_post_new_view: None,
             welcome_auth_fallback_rect: None,
             welcome_refresh_rect: None,
             welcome_gate_url_rect: None,
@@ -6507,6 +6643,17 @@ pub(crate) mod tests {
         assert!(app.needs_animation(), "slow still counts as animating");
         app.session_picker_content_loading = true;
         assert_eq!(app.tick_demand(), TickDemand::Fast);
+    }
+
+    #[test]
+    fn dx_live_surfaces_request_ticks_and_redraw_each_frame() {
+        let mut app = test_app_with_agent();
+        let id = super::super::agent::AgentId(0);
+        for view in [crate::dx::DxView::Animation, crate::dx::DxView::FileBrowser] {
+            app.agents.get_mut(&id).unwrap().dx_ui.view = view;
+            assert_eq!(app.tick_demand(), TickDemand::Fast);
+            assert!(app.tick(), "{view:?} must repaint on every active tick");
+        }
     }
     /// An open modal session picker that is still fetching keeps fast ticks
     /// alive on an otherwise-idle agent (its loading spinner must animate) —
@@ -7484,7 +7631,7 @@ pub(crate) mod tests {
     fn apply_auth_meta_clears_gate_on_subscription() {
         let mut app = test_app();
         app.gate = Some(xai_grok_shell::auth::GateInfo {
-            message: "Subscribe to use Grok Build".into(),
+            message: "Subscribe to use Dx".into(),
             url: Some("https://grok.com/supergrok?referrer=grok-build".into()),
             label: None,
         });
@@ -9831,7 +9978,6 @@ pub(crate) mod tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
             false,
-            false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
         );
@@ -9877,7 +10023,6 @@ pub(crate) mod tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -9928,7 +10073,6 @@ pub(crate) mod tests {
             false,
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
-            false,
             false,
             &mut Vec::new(),
             crate::app::agent_view::AppRenderParams::default(),
@@ -11910,6 +12054,30 @@ pub(crate) mod tests {
             app.agents.contains_key(&id),
             "ExitSession intercept must NOT remove the agent (it only closes the popup)",
         );
+    }
+    #[test]
+    fn needs_project_picker_false_when_disabled() {
+        let mut app = test_app();
+        app.project_picker_shown = false;
+        app.cwd = std::path::PathBuf::from("/tmp");
+        app.project_picker_disabled = true;
+        assert!(!app.needs_project_picker());
+    }
+    #[test]
+    fn needs_project_picker_false_when_already_shown() {
+        let mut app = test_app();
+        app.project_picker_shown = true;
+        app.cwd = std::path::PathBuf::from("/tmp");
+        app.project_picker_disabled = false;
+        assert!(!app.needs_project_picker());
+    }
+    #[test]
+    fn needs_project_picker_true_for_non_project_dir() {
+        let mut app = test_app();
+        app.project_picker_shown = false;
+        app.project_picker_disabled = false;
+        app.cwd = std::path::PathBuf::from("/tmp");
+        assert!(app.needs_project_picker());
     }
     /// Chat mode hides the welcome picker's source filter, so `f` must not
     /// cycle it; Build mode keeps the cycle.

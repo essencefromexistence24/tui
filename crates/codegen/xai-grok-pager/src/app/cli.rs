@@ -52,6 +52,8 @@ pub enum Command {
     Memory(crate::memory_cmd::MemoryArgs),
     /// List available models and exit
     Models,
+    /// Browse and configure AI providers
+    Connect,
     /// List, search, or restore sessions
     Sessions(crate::sessions_cmd::SessionsArgs),
     /// Fetch and install managed configuration
@@ -400,7 +402,7 @@ pub struct LeaderArgs {
 #[command(
     name = "grok",
     version = env!("VERSION_WITH_COMMIT"),
-    about = "Grok Build TUI",
+    about = "Dx TUI",
     disable_version_flag = true,
     next_display_order = None,
     help_template = "\

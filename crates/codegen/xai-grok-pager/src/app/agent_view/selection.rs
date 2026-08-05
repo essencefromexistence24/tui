@@ -918,32 +918,24 @@ impl AgentView {
 
         self.scrollback.set_selected(Some(idx));
 
-        // Expanded verb-group slot, header row (`header_row_click`): the slot
-        // acts as member 0 everywhere else, so the group affordance lives
-        // here — double-click on the header row collapses the group; a
-        // single click just selects. Member rows fall through to the normal
-        // foldable path below.
+        // Expanded verb-group slot, header row (`header_row_click`): single
+        // click on the header row collapses the group; member rows fall through
+        // to the normal foldable path below.
         if header_row_click {
-            if click_count == 2 {
+            if click_count >= 1 {
                 self.scrollback.collapse_group_if_expanded();
                 return (None, show_word_select_tip);
             }
-            if click_count >= 3 {
-                return (None, false);
-            }
         }
 
-        // Double-click on a group header → expand/collapse the group.
+        // Single click on a group header → expand/collapse the group.
         // Both expand ("N more") and collapse ("▾ N tool calls") headers
         // are standalone entries with their own index.
         let is_group_header = self.scrollback.is_selected_group_header();
         if is_group_header {
-            if click_count == 2 {
+            if click_count >= 1 {
                 self.scrollback.toggle_group_expansion();
                 return (None, show_word_select_tip);
-            }
-            if click_count >= 3 {
-                return (None, false);
             }
         }
 
@@ -968,6 +960,9 @@ impl AgentView {
         match click_count {
             1 if is_plan_tool => {
                 self.show_plan_preview();
+            }
+            1 if foldable => {
+                self.scrollback.toggle_fold_selected();
             }
             2 if is_bg_task => {
                 // Double-click bg task: open block viewer (same as Enter).

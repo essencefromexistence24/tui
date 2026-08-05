@@ -76,7 +76,6 @@ fn tmux_facts(
         allow_passthrough_support: TmuxProbeResult::Available(()),
         allow_passthrough: TmuxProbeResult::Available("on".to_owned()),
         control_mode,
-        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -88,7 +87,6 @@ fn unavailable_tmux_facts() -> TmuxProbeFacts {
         allow_passthrough_support: TmuxProbeResult::Unavailable,
         allow_passthrough: TmuxProbeResult::Unavailable,
         control_mode: TmuxProbeResult::Unavailable,
-        client_features: TmuxProbeResult::Unavailable,
     }
 }
 
@@ -105,7 +103,6 @@ fn healthy_report() -> DiagnosticReport {
                 set_clipboard: crate::diagnostics::TmuxOptionFact::Unavailable,
                 allow_passthrough_support: crate::diagnostics::TmuxSupportFact::Unavailable,
                 allow_passthrough: crate::diagnostics::TmuxOptionFact::Unavailable,
-                color_passthrough: crate::diagnostics::TmuxColorPassthrough::Unknown,
             },
             color: ColorFacts {
                 level: RuntimeFact::Available(ColorLevel::TrueColor),
@@ -414,7 +411,6 @@ fn standalone_runtime_and_tmux_are_unavailable_without_false_wezterm_finding() {
             "tmux.set-clipboard",
             "tmux.allow-passthrough-support",
             "tmux.control-mode",
-            "tmux.client-features",
         ]
     );
     let runtime_notes = report

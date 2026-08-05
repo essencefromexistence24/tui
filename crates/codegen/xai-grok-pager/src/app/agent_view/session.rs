@@ -81,6 +81,7 @@ impl AgentView {
         let prompt = PromptWidget::new_with_cwd(&session.cwd);
         let mut view = Self {
             session,
+            dx_ui: crate::dx::DxUiState::default(),
             session_binding_epoch: 0,
             scrollback,
             prompt,
@@ -115,6 +116,7 @@ impl AgentView {
             modal_buttons: Vec::new(),
             modal_hovered_key: None,
             context_state: None,
+            turn_start_total_tokens: None,
             chat_kind: false,
             app_chat_mode: false,
             #[cfg(feature = "local-workspace")]
@@ -199,8 +201,9 @@ impl AgentView {
             hit_queue_badge: Default::default(),
             hit_plan_button: Default::default(),
             hit_plan_approval_status: Default::default(),
+            hit_diff_stats: Default::default(),
             hit_follow_indicator: Default::default(),
-            hit_response_top_indicator: Default::default(),
+            hit_branch: Default::default(),
             hit_cwd: Default::default(),
             hit_cancel_button: Default::default(),
             hit_watching_cue: Default::default(),
@@ -277,7 +280,6 @@ impl AgentView {
             next_perm_req_id: 0,
             permission_stashed_prompt: None,
             permission_stashed_pane: None,
-            permission_pattern_edit: None,
             plan_approval_view: None,
             latest_inline_plan_content: None,
             plan_comments: Vec::new(),
@@ -489,6 +491,9 @@ impl AgentView {
         {
             self.expect_send_now_cancel = None;
         }
+        // Baseline the context total so the turn footer shows this turn's
+        // token delta instead of the accumulated context.
+        self.turn_start_total_tokens = self.context_state.as_ref().map(|c| c.used);
         self.session.start_turn(&mut self.scrollback);
     }
     /// Adopt the in-flight turn another client is driving, conveyed by the

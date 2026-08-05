@@ -53,7 +53,7 @@ impl std::fmt::Display for Scope {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InspectReport {
+pub struct InspectReport {
     pub grok_version: String,
     pub channel: String,
     pub cwd: String,
@@ -82,7 +82,7 @@ pub(crate) struct InspectReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InstructionFile {
+pub struct InstructionFile {
     pub path: String,
     pub scope: Scope,
     pub file_type: String,
@@ -100,7 +100,7 @@ pub(crate) struct InstructionFile {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct PermissionsReport {
+pub struct PermissionsReport {
     pub sources: Vec<String>,
     pub loaded: usize,
     pub skipped: Vec<SkippedRule>,
@@ -124,7 +124,7 @@ pub(crate) struct PermissionsReport {
 /// derives its line from these fields (see `enforced_label`).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct EnforcedPolicy {
+pub struct EnforcedPolicy {
     /// Stable key: "alwaysApprove" | "telemetry" | "feedback".
     pub setting: String,
     /// The enforced value.
@@ -135,7 +135,7 @@ pub(crate) struct EnforcedPolicy {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SkippedRule {
+pub struct SkippedRule {
     pub rule: String,
     pub reason: String,
 }
@@ -145,7 +145,7 @@ pub(crate) struct SkippedRule {
 /// The team pin is admin policy, not a secret, so it is shown verbatim.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct LoginPolicyReport {
+pub struct LoginPolicyReport {
     /// Raw `disable_api_key_auth` knob (env `GROK_DISABLE_API_KEY_AUTH`).
     pub disable_api_key_auth: Option<bool>,
     /// Configured team pin: single string, list, or null when unset.
@@ -156,7 +156,7 @@ pub(crate) struct LoginPolicyReport {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct HookEntry {
+pub struct HookEntry {
     pub event: String,
     pub hook_type: String,
     pub target: String,
@@ -173,7 +173,7 @@ pub(crate) struct HookEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SkillEntry {
+pub struct SkillEntry {
     pub name: String,
     pub description: String,
     pub source: ConfigSource,
@@ -190,7 +190,7 @@ pub(crate) struct SkillEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct AgentEntry {
+pub struct AgentEntry {
     pub name: String,
     pub description: String,
     pub source: ConfigSource,
@@ -217,7 +217,7 @@ pub struct PluginProvides {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct MarketplaceEntry {
+pub struct MarketplaceEntry {
     pub name: String,
     pub path: String,
     pub enabled_plugins: usize,
@@ -243,7 +243,7 @@ pub struct McpServerEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct LspServerEntry {
+pub struct LspServerEntry {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
@@ -256,7 +256,7 @@ pub(crate) struct LspServerEntry {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConfigSources {
+pub struct ConfigSources {
     /// Config layers (system + user managed, user + system requirements, user
     /// config.toml, the macOS MDM managed-preferences layer, and project
     /// .grok/config.toml files). Driven from the same resolvers used at runtime
@@ -269,7 +269,7 @@ pub(crate) struct ConfigSources {
 /// A single config layer entry for `grok inspect`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct ConfigLayer {
+pub struct ConfigLayer {
     /// Logical role of the layer: "system-managed", "managed", "user",
     /// "system-requirements", "requirements", "mdm", or "project".
     pub role: String,

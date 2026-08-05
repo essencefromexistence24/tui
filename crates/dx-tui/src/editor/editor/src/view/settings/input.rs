@@ -1,0 +1,1869 @@
+//! Input handling for the Settings dialog.
+//!
+//! Implements the InputHandler trait for SettingsState, routing input
+//! through the focus hierarchy: Dialog -> Panel -> Control.
+
+use super::items::SettingControl;
+use super::state::{FocusPanel, SettingsState};
+use crate::input::handler::{DeferredAction, InputContext, InputHandler, InputResult};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+/// Button action in entry dialog
+enum ButtonAction {
+	Save,
+	Delete,
+	Cancel,
+}
+
+/// Control activation action in entry dialog
+enum ControlAction {
+	ToggleBool,
+	ToggleDropdown,
+	StartEditing,
+	OpenNestedDialog,
+}
+
+impl InputHandler for SettingsState {
+	fn handle_key_event(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		// Entry-dialog "Delete X?" prompt takes priority over both
+		// the discard prompt and the entry dialog — it's the topmost
+		// overlay.
+		if self.showing_entry_delete_confirm {
+			return self.handle_entry_delete_confirm_input(event);
+		}
+
+		// Entry-dialog "Discard changes?" prompt takes priority over
+		// the entry dialog itself — it's stacked on top.
+		if self.showing_entry_discard_confirm {
+			return self.handle_entry_discard_confirm_input(event);
+		}
+
+		// Entry dialog takes priority when open
+		if self.has_entry_dialog() {
+			return self.handle_entry_dialog_input(event, ctx);
+		}
+
+		// Confirmation dialog takes priority
+		if self.showing_confirm_dialog {
+			return self.handle_confirm_dialog_input(event, ctx);
+		}
+
+		// Reset confirmation dialog takes priority
+		if self.showing_reset_dialog {
+			return self.handle_reset_dialog_input(event);
+		}
+
+		// Help overlay takes priority
+		if self.showing_help {
+			return self.handle_help_input(event, ctx);
+		}
+
+		// Search mode takes priority
+		if self.search_active {
+			return self.handle_search_input(event, ctx);
+		}
+
+		// Global shortcut: Ctrl+S to save
+		if event.modifiers.contains(KeyModifiers::CONTROL)
+			&& matches!(event.code, KeyCode::Char('s') | KeyCode::Char('S'))
+		{
+			ctx.defer(DeferredAction::CloseSettings { save: true });
+			return InputResult::Consumed;
+		}
+
+		// Route to focused panel
+		match self.focus_panel() {
+			FocusPanel::Categories => self.handle_categories_input(event, ctx),
+			FocusPanel::Settings => self.handle_settings_input(event, ctx),
+			FocusPanel::Footer => self.handle_footer_input(event, ctx),
+		}
+	}
+
+	fn is_modal(&self) -> bool {
+		true // Settings dialog consumes all unhandled input
+	}
+}
+
+impl SettingsState {
+	/// Handle input when entry dialog is open
+	///
+	/// Uses the same input flow as the main settings UI:
+	/// 1. If in text editing mode -> handle text input
+	/// 2. If dropdown is open -> handle dropdown navigation
+	/// 3. Otherwise -> handle navigation and control activation
+	fn handle_entry_dialog_input(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		// Ctrl+S saves entry dialog from any mode
+		if event.modifiers.contains(KeyModifiers::CONTROL)
+			&& matches!(event.code, KeyCode::Char('s') | KeyCode::Char('S'))
+		{
+			self.save_entry_dialog();
+			return InputResult::Consumed;
+		}
+
+		// Check if we're in a special editing mode
+		let (editing_text, dropdown_open) = if let Some(dialog) = self.entry_dialog() {
+			let dropdown_open = dialog
+				.current_item()
+				.map(|item| matches!(&item.control, SettingControl::Dropdown(s) if s.open))
+				.unwrap_or(false);
+			(dialog.editing_text, dropdown_open)
+		} else {
+			return InputResult::Consumed;
+		};
+
+		// Route to appropriate handler based on mode
+		if editing_text {
+			self.handle_entry_dialog_text_editing(event, ctx)
+		} else if dropdown_open {
+			self.handle_entry_dialog_dropdown(event)
+		} else {
+			self.handle_entry_dialog_navigation(event, ctx)
+		}
+	}
+
+	/// Handle text editing input in entry dialog (same pattern as handle_text_editing_input)
+	fn handle_entry_dialog_text_editing(
+		&mut self,
+		event: &KeyEvent,
+		ctx: &mut InputContext,
+	) -> InputResult {
+		// Check if we're editing JSON
+		let is_editing_json = self.entry_dialog().map(|d| d.is_editing_json()).unwrap_or(false);
+
+		let Some(dialog) = self.entry_dialog_mut() else {
+			return InputResult::Consumed;
+		};
+
+		match event.code {
+			KeyCode::Esc => {
+				// Escape cancels the in-progress field edit and restores the
+				// pre-edit value — the platform convention (Enter/Tab commit,
+				// Esc reverts). JSON validity doesn't matter here: we're
+				// throwing the edit away regardless.
+				dialog.revert_editing();
+			}
+			KeyCode::Enter => {
+				if is_editing_json {
+					// Insert newline in JSON editor
+					dialog.insert_newline();
+				} else {
+					// For a TextList, Enter commits the current row and
+					// opens a fresh add-new slot so the user can keep
+					// adding items. For a plain Text/Number field, Enter
+					// commits the value and advances focus to the next
+					// field — matching the form's footer hint and every
+					// other form. Previously Enter was a silent no-op on
+					// text fields, trapping the user in edit mode so the
+					// following Tab/Esc/arrows appeared dead (issue #2143).
+					let is_text_list =
+						matches!(dialog.current_item().map(|i| &i.control), Some(SettingControl::TextList(_)));
+					if is_text_list {
+						if let Some(item) = dialog.current_item_mut() {
+							if let SettingControl::TextList(state) = &mut item.control {
+								state.add_item();
+							}
+						}
+					} else {
+						dialog.stop_editing();
+						dialog.focus_next_field();
+					}
+				}
+			}
+			KeyCode::Char(c) => {
+				if event.modifiers.contains(KeyModifiers::CONTROL) {
+					match c {
+						'a' | 'A' => {
+							// Select all
+							dialog.select_all();
+						}
+						'c' | 'C' => {
+							// Copy selected text to clipboard
+							if let Some(text) = dialog.selected_text() {
+								ctx.defer(DeferredAction::CopyToClipboard(text));
+							}
+						}
+						'v' | 'V' => {
+							// Paste
+							ctx.defer(DeferredAction::PasteToSettings);
+						}
+						_ => {}
+					}
+				} else {
+					dialog.insert_char(c);
+				}
+			}
+			KeyCode::Backspace => {
+				dialog.backspace();
+			}
+			KeyCode::Delete => {
+				if is_editing_json {
+					// Delete character at cursor in JSON editor
+					dialog.delete();
+				} else {
+					// Delete item in TextList
+					dialog.delete_list_item();
+				}
+			}
+			KeyCode::Home => {
+				dialog.cursor_home();
+			}
+			KeyCode::End => {
+				dialog.cursor_end();
+			}
+			KeyCode::Left => {
+				// Shift extends the selection — for the JSON editor and
+				// for plain Text fields alike (both ride `TextEdit`; the
+				// dialog method no-ops for other controls).
+				if event.modifiers.contains(KeyModifiers::SHIFT) {
+					dialog.cursor_left_selecting();
+				} else {
+					dialog.cursor_left();
+				}
+			}
+			KeyCode::Right => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) {
+					dialog.cursor_right_selecting();
+				} else {
+					dialog.cursor_right();
+				}
+			}
+			KeyCode::Up => {
+				if is_editing_json {
+					// Move cursor up in JSON editor
+					if event.modifiers.contains(KeyModifiers::SHIFT) {
+						dialog.cursor_up_selecting();
+					} else {
+						dialog.cursor_up();
+					}
+				} else {
+					// For a TextList: commit any pending new-item text,
+					// then try to move focus within the list. If focus
+					// was already on the trailing [+] Add new sentinel
+					// (and no pending text), escape out of text-edit
+					// mode and let the dialog navigate to the previous
+					// field instead of trapping the user on the slot.
+					let escape = if let Some(item) = dialog.current_item_mut() {
+						if let SettingControl::TextList(state) = &mut item.control {
+							let was_on_addnew = state.focused_item.is_none();
+							let had_pending = !state.new_item_text.is_empty();
+							state.add_item();
+							if was_on_addnew && !had_pending {
+								true
+							} else {
+								state.focus_prev();
+								false
+							}
+						} else {
+							false
+						}
+					} else {
+						false
+					};
+					if escape {
+						dialog.stop_editing();
+						dialog.focus_prev_field();
+					}
+				}
+			}
+			KeyCode::Down => {
+				if is_editing_json {
+					// Move cursor down in JSON editor
+					if event.modifiers.contains(KeyModifiers::SHIFT) {
+						dialog.cursor_down_selecting();
+					} else {
+						dialog.cursor_down();
+					}
+				} else {
+					// See KeyCode::Up above for the escape semantics —
+					// the trailing [+] Add new slot of a TextList must
+					// not trap the user.
+					let escape = if let Some(item) = dialog.current_item_mut() {
+						if let SettingControl::TextList(state) = &mut item.control {
+							let was_on_addnew = state.focused_item.is_none();
+							let had_pending = !state.new_item_text.is_empty();
+							state.add_item();
+							if was_on_addnew && !had_pending {
+								true
+							} else {
+								state.focus_next();
+								false
+							}
+						} else {
+							false
+						}
+					} else {
+						false
+					};
+					if escape {
+						dialog.stop_editing();
+						dialog.focus_next_field();
+					}
+				}
+			}
+			KeyCode::Tab => {
+				if is_editing_json {
+					// Tab exits JSON editor if JSON is valid, otherwise ignored
+					let is_valid = dialog
+						.current_item()
+						.map(|item| {
+							if let SettingControl::Json(state) = &item.control { state.is_valid() } else { true }
+						})
+						.unwrap_or(true);
+
+					if is_valid {
+						// Commit changes and stop editing
+						if let Some(item) = dialog.current_item_mut() {
+							if let SettingControl::Json(state) = &mut item.control {
+								state.commit();
+							}
+						}
+						dialog.stop_editing();
+					}
+					// If not valid, Tab is ignored (user must fix or press Esc)
+				} else {
+					// Tab on a TextList: commit any pending text, then
+					// exit text-edit mode AND advance the dialog to the
+					// next field so Tab doesn't strand the user on the
+					// trailing add-new slot (UX review F19).
+					let escape_forward = if let Some(item) = dialog.current_item_mut() {
+						if let SettingControl::TextList(state) = &mut item.control {
+							state.add_item();
+							true
+						} else {
+							false
+						}
+					} else {
+						false
+					};
+					dialog.stop_editing();
+					if escape_forward {
+						dialog.focus_next_field();
+					}
+				}
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle dropdown navigation in entry dialog (same pattern as handle_dropdown_input)
+	fn handle_entry_dialog_dropdown(&mut self, event: &KeyEvent) -> InputResult {
+		let Some(dialog) = self.entry_dialog_mut() else {
+			return InputResult::Consumed;
+		};
+
+		match event.code {
+			KeyCode::Up => {
+				dialog.dropdown_prev();
+			}
+			KeyCode::Down => {
+				dialog.dropdown_next();
+			}
+			KeyCode::Enter => {
+				dialog.dropdown_confirm();
+			}
+			KeyCode::Esc => {
+				dialog.dropdown_confirm(); // Close dropdown
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle navigation and activation in entry dialog (same pattern as handle_settings_input)
+	fn handle_entry_dialog_navigation(
+		&mut self,
+		event: &KeyEvent,
+		ctx: &mut InputContext,
+	) -> InputResult {
+		match event.code {
+			KeyCode::Esc => {
+				// Esc on a dialog with uncommitted edits prompts for
+				// confirmation; a clean dialog closes immediately.
+				// Without the dirty check, an accidental Esc silently
+				// destroys every field the user just typed in.
+				let dirty = self.entry_dialog().map(|d| d.is_dirty()).unwrap_or(false);
+				if dirty {
+					self.showing_entry_discard_confirm = true;
+					self.entry_discard_confirm_selection = 0;
+				} else {
+					self.close_entry_dialog();
+				}
+			}
+			KeyCode::Up => {
+				if let Some(dialog) = self.entry_dialog_mut() {
+					dialog.focus_prev();
+				}
+			}
+			KeyCode::Down => {
+				if let Some(dialog) = self.entry_dialog_mut() {
+					dialog.focus_next();
+				}
+			}
+			KeyCode::Tab => {
+				// Tab cycles sequentially through all fields, sub-fields, and buttons
+				if let Some(dialog) = self.entry_dialog_mut() {
+					dialog.focus_next();
+				}
+			}
+			KeyCode::BackTab => {
+				// Shift+Tab cycles in reverse
+				if let Some(dialog) = self.entry_dialog_mut() {
+					dialog.focus_prev();
+				}
+			}
+			KeyCode::Delete => {
+				// Del on a focused TextList item removes the row.
+				// Without this, the only way to drop an entry was to
+				// mouse-click `[x]` — which (a) wasn't wired and (b)
+				// isn't obvious from the keyboard.
+				let removed = self
+					.entry_dialog_mut()
+					.map(|dialog| {
+						if dialog.focus_on_buttons {
+							return false;
+						}
+						if let Some(item) = dialog.current_item_mut() {
+							if let SettingControl::TextList(state) = &mut item.control {
+								if let Some(idx) = state.focused_item {
+									state.remove_item(idx);
+									dialog.user_edited = true;
+									return true;
+								}
+							}
+						}
+						false
+					})
+					.unwrap_or(false);
+				if !removed {
+					// Fall through to nothing — no other Del semantic
+					// in the dialog navigation mode for now.
+				}
+			}
+			KeyCode::Left => {
+				if let Some(dialog) = self.entry_dialog_mut() {
+					if dialog.focus_on_buttons && dialog.focused_button > 0 {
+						dialog.focused_button -= 1;
+					}
+				}
+			}
+			KeyCode::Right => {
+				if let Some(dialog) = self.entry_dialog_mut() {
+					if dialog.focus_on_buttons && dialog.focused_button + 1 < dialog.button_count() {
+						dialog.focused_button += 1;
+					}
+				}
+			}
+			KeyCode::Enter => {
+				// A focused per-field action button ([Reset]/[Inherit]) handles activation.
+				if self.entry_dialog_activate_focused_field_button() {
+					return InputResult::Consumed;
+				}
+
+				// Check button state first with immutable borrow
+				// Button layout: [Save, Cancel] or [Save, Cancel, Delete].
+				// Save = 0, Cancel = 1, Delete = 2 (when present).
+				let button_action = self.entry_dialog().and_then(|dialog| {
+					if dialog.focus_on_buttons {
+						let has_delete = !dialog.is_new && !dialog.no_delete;
+						match dialog.focused_button {
+							0 => Some(ButtonAction::Save),
+							1 => Some(ButtonAction::Cancel),
+							2 if has_delete => Some(ButtonAction::Delete),
+							_ => None,
+						}
+					} else {
+						None
+					}
+				});
+
+				if let Some(action) = button_action {
+					match action {
+						ButtonAction::Save => self.save_entry_dialog(),
+						ButtonAction::Delete => self.request_entry_delete_confirm(),
+						ButtonAction::Cancel => self.close_entry_dialog(),
+					}
+				} else if event.modifiers.contains(KeyModifiers::CONTROL) {
+					// Ctrl+Enter always saves
+					self.save_entry_dialog();
+				} else {
+					// Activate current control
+					let control_action = self
+						.entry_dialog()
+						.and_then(|dialog| {
+							dialog.current_item().map(|item| match &item.control {
+								SettingControl::Toggle(_) => Some(ControlAction::ToggleBool),
+								SettingControl::Dropdown(_) => Some(ControlAction::ToggleDropdown),
+								SettingControl::Text(_)
+								| SettingControl::TextList(_)
+								| SettingControl::DualList(_)
+								| SettingControl::Number(_)
+								| SettingControl::Json(_) => Some(ControlAction::StartEditing),
+								SettingControl::Map(_) | SettingControl::ObjectArray(_) => {
+									Some(ControlAction::OpenNestedDialog)
+								}
+								_ => None,
+							})
+						})
+						.flatten();
+
+					if let Some(action) = control_action {
+						match action {
+							ControlAction::ToggleBool => {
+								if let Some(dialog) = self.entry_dialog_mut() {
+									dialog.toggle_bool();
+								}
+							}
+							ControlAction::ToggleDropdown => {
+								if let Some(dialog) = self.entry_dialog_mut() {
+									dialog.toggle_dropdown();
+								}
+							}
+							ControlAction::StartEditing => {
+								if let Some(dialog) = self.entry_dialog_mut() {
+									dialog.start_editing();
+								}
+							}
+							ControlAction::OpenNestedDialog => {
+								self.open_nested_entry_dialog();
+							}
+						}
+					}
+				}
+			}
+			KeyCode::Char(' ') => {
+				// A focused per-field action button ([Reset]/[Inherit]) handles activation.
+				if self.entry_dialog_activate_focused_field_button() {
+					return InputResult::Consumed;
+				}
+
+				// Space toggles booleans, activates dropdowns (but doesn't submit form)
+				let control_action = self.entry_dialog().and_then(|dialog| {
+					if dialog.focus_on_buttons {
+						return None; // Space on buttons does nothing (Enter activates)
+					}
+					dialog.current_item().and_then(|item| match &item.control {
+						SettingControl::Toggle(_) => Some(ControlAction::ToggleBool),
+						SettingControl::Dropdown(_) => Some(ControlAction::ToggleDropdown),
+						_ => None,
+					})
+				});
+
+				if let Some(action) = control_action {
+					match action {
+						ControlAction::ToggleBool => {
+							if let Some(dialog) = self.entry_dialog_mut() {
+								dialog.toggle_bool();
+							}
+						}
+						ControlAction::ToggleDropdown => {
+							if let Some(dialog) = self.entry_dialog_mut() {
+								dialog.toggle_dropdown();
+							}
+						}
+						_ => {}
+					}
+				}
+			}
+			KeyCode::Char(c) => {
+				// Auto-enter edit mode when typing on a text or number field
+				let can_auto_edit = self
+					.entry_dialog()
+					.and_then(|dialog| {
+						if dialog.focus_on_buttons {
+							return None;
+						}
+						dialog.current_item().map(|item| match &item.control {
+							SettingControl::Text(_) | SettingControl::TextList(_) => true,
+							SettingControl::Number(_) => c.is_ascii_digit() || c == '-' || c == '.',
+							_ => false,
+						})
+					})
+					.unwrap_or(false);
+
+				if can_auto_edit {
+					if let Some(dialog) = self.entry_dialog_mut() {
+						dialog.start_editing();
+					}
+					// Now forward the character to the text editing handler
+					return self.handle_entry_dialog_text_editing(
+						&KeyEvent::new(KeyCode::Char(c), event.modifiers),
+						ctx,
+					);
+				}
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle input when confirmation dialog is showing
+	fn handle_confirm_dialog_input(
+		&mut self,
+		event: &KeyEvent,
+		ctx: &mut InputContext,
+	) -> InputResult {
+		match event.code {
+			KeyCode::Left | KeyCode::BackTab => {
+				if self.confirm_dialog_selection > 0 {
+					self.confirm_dialog_selection -= 1;
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Right | KeyCode::Tab => {
+				if self.confirm_dialog_selection < 2 {
+					self.confirm_dialog_selection += 1;
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Enter => {
+				match self.confirm_dialog_selection {
+					0 => ctx.defer(DeferredAction::CloseSettings { save: true }), // Save
+					1 => ctx.defer(DeferredAction::CloseSettings { save: false }), // Discard
+					2 => self.showing_confirm_dialog = false,                     // Cancel - back to settings
+					_ => {}
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Esc => {
+				self.showing_confirm_dialog = false;
+				InputResult::Consumed
+			}
+			KeyCode::Char('s') | KeyCode::Char('S') => {
+				ctx.defer(DeferredAction::CloseSettings { save: true });
+				InputResult::Consumed
+			}
+			KeyCode::Char('d') | KeyCode::Char('D') => {
+				ctx.defer(DeferredAction::CloseSettings { save: false });
+				InputResult::Consumed
+			}
+			_ => InputResult::Consumed, // Modal: consume all
+		}
+	}
+
+	/// Handle input when reset confirmation dialog is showing
+	fn handle_reset_dialog_input(&mut self, event: &KeyEvent) -> InputResult {
+		match event.code {
+			KeyCode::Left | KeyCode::BackTab => {
+				if self.reset_dialog_selection > 0 {
+					self.reset_dialog_selection -= 1;
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Right | KeyCode::Tab => {
+				if self.reset_dialog_selection < 1 {
+					self.reset_dialog_selection += 1;
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Enter => {
+				match self.reset_dialog_selection {
+					0 => {
+						// Reset all changes
+						self.discard_changes();
+						self.showing_reset_dialog = false;
+					}
+					1 => {
+						// Cancel - back to settings
+						self.showing_reset_dialog = false;
+					}
+					_ => {}
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Esc => {
+				self.showing_reset_dialog = false;
+				InputResult::Consumed
+			}
+			KeyCode::Char('r') | KeyCode::Char('R') => {
+				self.discard_changes();
+				self.showing_reset_dialog = false;
+				InputResult::Consumed
+			}
+			_ => InputResult::Consumed, // Modal: consume all
+		}
+	}
+
+	/// Handle input when the entry-dialog discard-confirm prompt is up.
+	/// Buttons: 0 = Keep editing (default), 1 = Discard.
+	fn handle_entry_discard_confirm_input(&mut self, event: &KeyEvent) -> InputResult {
+		match event.code {
+			KeyCode::Left | KeyCode::BackTab if self.entry_discard_confirm_selection > 0 => {
+				self.entry_discard_confirm_selection -= 1;
+			}
+			KeyCode::Right | KeyCode::Tab if self.entry_discard_confirm_selection < 1 => {
+				self.entry_discard_confirm_selection += 1;
+			}
+			KeyCode::Enter => {
+				match self.entry_discard_confirm_selection {
+					0 => {
+						// Keep editing — just dismiss the prompt.
+						self.showing_entry_discard_confirm = false;
+					}
+					1 => {
+						// Discard — close the entry dialog without saving.
+						self.showing_entry_discard_confirm = false;
+						self.close_entry_dialog();
+					}
+					_ => {}
+				}
+			}
+			KeyCode::Esc => {
+				// Esc on the prompt means "keep editing".
+				self.showing_entry_discard_confirm = false;
+			}
+			KeyCode::Char('d') | KeyCode::Char('D') => {
+				self.showing_entry_discard_confirm = false;
+				self.close_entry_dialog();
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle input when the entry-dialog delete-confirm prompt is up.
+	/// Buttons: 0 = Cancel (default), 1 = Delete.
+	fn handle_entry_delete_confirm_input(&mut self, event: &KeyEvent) -> InputResult {
+		match event.code {
+			KeyCode::Left | KeyCode::BackTab if self.entry_delete_confirm_selection > 0 => {
+				self.entry_delete_confirm_selection -= 1;
+			}
+			KeyCode::Right | KeyCode::Tab if self.entry_delete_confirm_selection < 1 => {
+				self.entry_delete_confirm_selection += 1;
+			}
+			KeyCode::Enter => match self.entry_delete_confirm_selection {
+				0 => {
+					self.showing_entry_delete_confirm = false;
+				}
+				1 => {
+					self.showing_entry_delete_confirm = false;
+					self.delete_entry_dialog();
+				}
+				_ => {}
+			},
+			KeyCode::Esc => {
+				self.showing_entry_delete_confirm = false;
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle input when help overlay is showing
+	fn handle_help_input(&mut self, _event: &KeyEvent, _ctx: &mut InputContext) -> InputResult {
+		// Any key dismisses help
+		self.showing_help = false;
+		InputResult::Consumed
+	}
+
+	/// Handle input when search is active
+	fn handle_search_input(&mut self, event: &KeyEvent, _ctx: &mut InputContext) -> InputResult {
+		match event.code {
+			KeyCode::Esc => {
+				self.cancel_search();
+				InputResult::Consumed
+			}
+			KeyCode::Enter => {
+				self.jump_to_search_result();
+				InputResult::Consumed
+			}
+			KeyCode::Up => {
+				self.search_prev();
+				InputResult::Consumed
+			}
+			KeyCode::Down => {
+				self.search_next();
+				InputResult::Consumed
+			}
+			// Cursor movement within the query text. Up/Down are reserved
+			// for navigating the result list (above), so Left/Right/Home/End
+			// edit the query — matching the Command Palette, where the same
+			// split makes the filter feel like a real text input.
+			KeyCode::Left => {
+				self.search_cursor_left();
+				InputResult::Consumed
+			}
+			KeyCode::Right => {
+				self.search_cursor_right();
+				InputResult::Consumed
+			}
+			KeyCode::Home => {
+				self.search_cursor_home();
+				InputResult::Consumed
+			}
+			KeyCode::End => {
+				self.search_cursor_end();
+				InputResult::Consumed
+			}
+			KeyCode::Delete => {
+				self.search_delete();
+				InputResult::Consumed
+			}
+			// Only plain (or Shift-modified) chars type into the filter.
+			// Ctrl/Alt chords — Ctrl+A/C/V/X etc. — must NOT insert their
+			// letter; they fall through to the modal consume below so they
+			// no-op instead of corrupting the query. (Selection and
+			// clipboard aren't wired for this field.)
+			KeyCode::Char(c)
+				if !event.modifiers.contains(KeyModifiers::CONTROL)
+					&& !event.modifiers.contains(KeyModifiers::ALT) =>
+			{
+				self.search_insert_char(c);
+				InputResult::Consumed
+			}
+			KeyCode::Backspace => {
+				self.search_backspace();
+				InputResult::Consumed
+			}
+			_ => InputResult::Consumed, // Modal: consume all
+		}
+	}
+
+	/// Handle input when Categories panel is focused
+	fn handle_categories_input(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		match event.code {
+			KeyCode::Up => {
+				self.select_prev();
+				InputResult::Consumed
+			}
+			KeyCode::Down => {
+				self.select_next();
+				InputResult::Consumed
+			}
+			KeyCode::PageUp => {
+				// Page up in the tree view scrolls by viewport height.
+				let viewport = self.categories_scroll.scroll.viewport.max(1) as i32;
+				self.tree_step(-viewport);
+				InputResult::Consumed
+			}
+			KeyCode::PageDown => {
+				let viewport = self.categories_scroll.scroll.viewport.max(1) as i32;
+				self.tree_step(viewport);
+				InputResult::Consumed
+			}
+			KeyCode::Home => {
+				let rows = self.visible_tree();
+				let cur = self.tree_cursor_index(&rows) as i32;
+				if cur > 0 {
+					self.tree_step(-cur);
+				}
+				InputResult::Consumed
+			}
+			KeyCode::End => {
+				let rows = self.visible_tree();
+				let cur = self.tree_cursor_index(&rows) as i32;
+				let last = rows.len() as i32 - 1;
+				if last > cur {
+					self.tree_step(last - cur);
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Tab => {
+				self.toggle_focus();
+				InputResult::Consumed
+			}
+			KeyCode::BackTab => {
+				self.toggle_focus_backward();
+				InputResult::Consumed
+			}
+			KeyCode::Char('/') => {
+				self.start_search();
+				InputResult::Consumed
+			}
+			KeyCode::Char('?') => {
+				self.toggle_help();
+				InputResult::Consumed
+			}
+			KeyCode::Esc => {
+				self.request_close(ctx);
+				InputResult::Consumed
+			}
+			KeyCode::Right => {
+				// Right ONLY expands an expandable category. Does not move
+				// focus into the body panel — that's Tab's job.
+				let cat_idx = self.selected_category;
+				if self.is_category_expandable(cat_idx) && !self.expanded_categories.contains(&cat_idx) {
+					self.expanded_categories.insert(cat_idx);
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Left => {
+				// Left ONLY collapses an expanded category. No-op otherwise.
+				let cat_idx = self.selected_category;
+				if self.expanded_categories.contains(&cat_idx) {
+					self.expanded_categories.remove(&cat_idx);
+					// Sections aren't visible anymore — pull the cursor
+					// back to the category row so the next Down step
+					// walks to the *next* category, not into the
+					// (now-hidden) sections.
+					self.tree_cursor_section = None;
+				}
+				InputResult::Consumed
+			}
+			_ => InputResult::Ignored, // Let modal catch it
+		}
+	}
+
+	/// Handle input when Settings panel is focused
+	fn handle_settings_input(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		// If editing text, handle text input
+		if self.editing_text {
+			return self.handle_text_editing_input(event, ctx);
+		}
+
+		// If editing number input, handle number input
+		if self.is_number_editing() {
+			return self.handle_number_editing_input(event, ctx);
+		}
+
+		// If dropdown is open, handle dropdown navigation
+		if self.is_dropdown_open() {
+			return self.handle_dropdown_input(event, ctx);
+		}
+
+		match event.code {
+			KeyCode::Up => {
+				self.select_prev();
+				InputResult::Consumed
+			}
+			KeyCode::Down => {
+				self.select_next();
+				InputResult::Consumed
+			}
+			KeyCode::Tab => {
+				self.toggle_focus();
+				InputResult::Consumed
+			}
+			KeyCode::BackTab => {
+				self.toggle_focus_backward();
+				InputResult::Consumed
+			}
+			KeyCode::Left => {
+				// Left always navigates back to categories — numbers no
+				// longer use Left/Right for inc/dec (direct typing only).
+				self.update_control_focus(false);
+				self.focus.set(FocusPanel::Categories);
+				InputResult::Consumed
+			}
+			KeyCode::Enter | KeyCode::Char(' ') => {
+				self.handle_control_activate(ctx);
+				InputResult::Consumed
+			}
+			// Type-to-edit: digit / '-' / '.' on a focused number control
+			// enters edit mode with the typed char replacing the value.
+			KeyCode::Char(c)
+				if self.is_number_control() && (c.is_ascii_digit() || c == '-' || c == '.') =>
+			{
+				self.start_number_editing();
+				self.number_insert(c);
+				self.on_value_changed();
+				InputResult::Consumed
+			}
+			KeyCode::PageDown => {
+				self.select_next_page();
+				InputResult::Consumed
+			}
+			KeyCode::PageUp => {
+				self.select_prev_page();
+				InputResult::Consumed
+			}
+			KeyCode::Char('/') => {
+				self.start_search();
+				InputResult::Consumed
+			}
+			KeyCode::Char('?') => {
+				self.toggle_help();
+				InputResult::Consumed
+			}
+			KeyCode::Delete => {
+				// Delete key: set nullable setting to null (inherit)
+				self.set_current_to_null();
+				InputResult::Consumed
+			}
+			KeyCode::Esc => {
+				self.request_close(ctx);
+				InputResult::Consumed
+			}
+			_ => InputResult::Ignored, // Let modal catch it
+		}
+	}
+
+	/// Handle input when Footer is focused
+	/// Footer buttons: [Layer] [Reset] [Save] [Cancel] + [Edit] on left for advanced users
+	/// Tab cycles between buttons; after last button, moves to Categories panel
+	fn handle_footer_input(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		const FOOTER_BUTTON_COUNT: usize = 5;
+
+		match event.code {
+			KeyCode::Left | KeyCode::BackTab => {
+				// Move to previous button, or wrap to Categories panel
+				if self.footer_button_index > 0 {
+					self.footer_button_index -= 1;
+				} else {
+					self.focus.set(FocusPanel::Settings);
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Right => {
+				// Move to next button
+				if self.footer_button_index < FOOTER_BUTTON_COUNT - 1 {
+					self.footer_button_index += 1;
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Tab => {
+				// Move to next button, or wrap to Categories panel
+				if self.footer_button_index < FOOTER_BUTTON_COUNT - 1 {
+					self.footer_button_index += 1;
+				} else {
+					self.focus.set(FocusPanel::Categories);
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Enter => {
+				match self.footer_button_index {
+					0 => self.cycle_target_layer(), // Layer button
+					1 => {
+						// Reset/Inherit button — for nullable items, set to null (inherit);
+						// otherwise show reset-all dialog
+						let is_nullable_set =
+							self.current_item().map(|item| item.nullable && !item.is_null).unwrap_or(false);
+						if is_nullable_set {
+							self.set_current_to_null();
+						} else {
+							self.request_reset();
+						}
+					}
+					2 => ctx.defer(DeferredAction::CloseSettings { save: true }),
+					3 => self.request_close(ctx),
+					4 => ctx.defer(DeferredAction::OpenConfigFile { layer: self.target_layer }), // Edit config file
+					_ => {}
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Esc => {
+				self.request_close(ctx);
+				InputResult::Consumed
+			}
+			KeyCode::Char('/') => {
+				self.start_search();
+				InputResult::Consumed
+			}
+			KeyCode::Char('?') => {
+				self.toggle_help();
+				InputResult::Consumed
+			}
+			_ => InputResult::Ignored, // Let modal catch it
+		}
+	}
+
+	/// Handle input when editing text in a control
+	fn handle_text_editing_input(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		let is_json = self.is_editing_json();
+
+		if is_json {
+			return self.handle_json_editing_input(event, ctx);
+		}
+
+		// DualList has its own keyboard handling (no text input)
+		if self.is_editing_dual_list() {
+			return self.handle_dual_list_editing_input(event);
+		}
+
+		match event.code {
+			KeyCode::Esc => {
+				// A plain Text field: Esc cancels the in-progress edit and
+				// restores the pre-edit value (platform convention: Enter/Tab
+				// commit, Esc reverts). Previously Esc called stop_editing(),
+				// which *accepted* the edit, so there was no way to back out.
+				if self.is_editing_plain_text() {
+					self.revert_editing();
+					return InputResult::Consumed;
+				}
+				// Other editable controls (TextList/Map) keep their prior
+				// dismiss semantics; the JSON-validity gate only matters here.
+				if !self.can_exit_text_editing() {
+					return InputResult::Consumed;
+				}
+				self.stop_editing();
+				InputResult::Consumed
+			}
+			KeyCode::Enter => {
+				// A plain Text field: Enter accepts the typed value and exits
+				// edit mode (platform convention, matching the footer's "Enter"
+				// hint). Previously Enter ran text_add_item — a no-op for Text —
+				// so the user was trapped in edit mode with the following
+				// Tab/Esc/arrows appearing dead. TextList/Map keep Enter = add
+				// a row and stay in edit mode so the user can keep adding.
+				if self.is_editing_plain_text() {
+					if self.can_exit_text_editing() {
+						self.commit_text_edit();
+						self.stop_editing();
+					}
+					// Invalid text stays in edit mode until fixed or Esc.
+				} else {
+					self.text_add_item();
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Char(c) => {
+				// Selection / clipboard chords on a plain Text field —
+				// the same TextEdit-backed behavior as the JSON editor
+				// and the entry dialog.
+				if event.modifiers.contains(KeyModifiers::CONTROL) {
+					match c {
+						'a' | 'A' => {
+							self.text_select_all();
+							return InputResult::Consumed;
+						}
+						'c' | 'C' => {
+							if let Some(text) = self.text_selected_text() {
+								ctx.defer(DeferredAction::CopyToClipboard(text));
+							}
+							return InputResult::Consumed;
+						}
+						'v' | 'V' => {
+							ctx.defer(DeferredAction::PasteToSettings);
+							return InputResult::Consumed;
+						}
+						_ => {}
+					}
+				}
+				self.text_insert(c);
+				InputResult::Consumed
+			}
+			KeyCode::Backspace => {
+				self.text_backspace();
+				InputResult::Consumed
+			}
+			KeyCode::Delete => {
+				self.text_remove_focused();
+				InputResult::Consumed
+			}
+			KeyCode::Left => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) && self.is_editing_plain_text() {
+					self.text_move_left_selecting();
+				} else {
+					self.text_move_left();
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Right => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) && self.is_editing_plain_text() {
+					self.text_move_right_selecting();
+				} else {
+					self.text_move_right();
+				}
+				InputResult::Consumed
+			}
+			KeyCode::Up => {
+				self.text_focus_prev();
+				InputResult::Consumed
+			}
+			KeyCode::Down => {
+				self.text_focus_next();
+				InputResult::Consumed
+			}
+			KeyCode::Tab => {
+				// Tab commits the typed value (like Enter) before exiting text
+				// editing mode and advancing focus to the next panel. Without
+				// the commit, a value typed and then dismissed with Tab was
+				// dropped on Save even though the row showed as modified
+				// (issue #2515).
+				self.commit_text_edit();
+				self.stop_editing();
+				self.toggle_focus();
+				InputResult::Consumed
+			}
+			_ => InputResult::Consumed, // Consume all during text edit
+		}
+	}
+
+	/// Handle input when editing a DualList control
+	fn handle_dual_list_editing_input(&mut self, event: &KeyEvent) -> InputResult {
+		use crate::view::controls::DualListColumn;
+		let shift = event.modifiers.contains(KeyModifiers::SHIFT);
+		match event.code {
+			KeyCode::Esc => {
+				self.stop_editing();
+			}
+			// Tab/BackTab propagate to the settings panel (exit editing)
+			KeyCode::Tab | KeyCode::BackTab => {
+				self.stop_editing();
+				// Return Ignored so the settings panel handles Tab/BackTab
+				return InputResult::Ignored;
+			}
+			KeyCode::Up if shift => {
+				self.with_current_dual_list_mut(|dl| dl.move_up());
+				self.on_value_changed();
+			}
+			KeyCode::Down if shift => {
+				self.with_current_dual_list_mut(|dl| dl.move_down());
+				self.on_value_changed();
+			}
+			KeyCode::Up => {
+				self.with_current_dual_list_mut(|dl| dl.cursor_up());
+			}
+			KeyCode::Down => {
+				self.with_current_dual_list_mut(|dl| dl.cursor_down());
+			}
+			KeyCode::Right if shift => {
+				// Shift+Right: add selected available item to included, follow it
+				let changed = self
+					.with_current_dual_list_mut(|dl| {
+						if dl.active_column == DualListColumn::Available {
+							dl.add_selected();
+							// Move focus to the Included column, cursor on the newly added item (last)
+							dl.active_column = DualListColumn::Included;
+							dl.included_cursor = dl.included.len().saturating_sub(1);
+							true
+						} else {
+							false
+						}
+					})
+					.unwrap_or(false);
+				if changed {
+					self.on_value_changed();
+					self.refresh_dual_list_sibling();
+				}
+			}
+			KeyCode::Left if shift => {
+				// Shift+Left: remove selected included item back to available, follow it
+				let changed = self
+					.with_current_dual_list_mut(|dl| {
+						if dl.active_column == DualListColumn::Included {
+							let value = dl.included.get(dl.included_cursor).cloned();
+							dl.remove_selected();
+							// Move focus to Available column, find the removed item
+							dl.active_column = DualListColumn::Available;
+							if let Some(val) = value {
+								let avail = dl.available_items();
+								if let Some(pos) = avail.iter().position(|(v, _)| *v == val) {
+									dl.available_cursor = pos;
+								}
+							}
+							true
+						} else {
+							false
+						}
+					})
+					.unwrap_or(false);
+				if changed {
+					self.on_value_changed();
+					self.refresh_dual_list_sibling();
+				}
+			}
+			KeyCode::Right => {
+				// Plain Right: switch to Included column
+				self.with_current_dual_list_mut(|dl| {
+					dl.active_column = DualListColumn::Included;
+				});
+			}
+			KeyCode::Left => {
+				// Plain Left: switch to Available column
+				self.with_current_dual_list_mut(|dl| {
+					dl.active_column = DualListColumn::Available;
+				});
+			}
+			KeyCode::Enter => {
+				// Enter adds/removes based on active column
+				let changed = self
+					.with_current_dual_list_mut(|dl| match dl.active_column {
+						DualListColumn::Available => dl.add_selected(),
+						DualListColumn::Included => dl.remove_selected(),
+					})
+					.is_some();
+				if changed {
+					self.on_value_changed();
+					self.refresh_dual_list_sibling();
+				}
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle input when editing a JSON control (multiline editor)
+	fn handle_json_editing_input(&mut self, event: &KeyEvent, ctx: &mut InputContext) -> InputResult {
+		match event.code {
+			KeyCode::Esc | KeyCode::Tab => {
+				// Accept if valid JSON, revert if invalid, then stop editing
+				self.json_exit_editing();
+			}
+			KeyCode::Enter => {
+				self.json_insert_newline();
+			}
+			KeyCode::Char(c) => {
+				if event.modifiers.contains(KeyModifiers::CONTROL) {
+					match c {
+						'a' | 'A' => self.json_select_all(),
+						'c' | 'C' => {
+							if let Some(text) = self.json_selected_text() {
+								ctx.defer(DeferredAction::CopyToClipboard(text));
+							}
+						}
+						'v' | 'V' => {
+							ctx.defer(DeferredAction::PasteToSettings);
+						}
+						_ => {}
+					}
+				} else {
+					self.text_insert(c);
+				}
+			}
+			KeyCode::Backspace => {
+				self.text_backspace();
+			}
+			KeyCode::Delete => {
+				self.json_delete();
+			}
+			KeyCode::Left => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) {
+					self.json_cursor_left_selecting();
+				} else {
+					self.text_move_left();
+				}
+			}
+			KeyCode::Right => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) {
+					self.json_cursor_right_selecting();
+				} else {
+					self.text_move_right();
+				}
+			}
+			KeyCode::Up => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) {
+					self.json_cursor_up_selecting();
+				} else {
+					self.json_cursor_up();
+				}
+			}
+			KeyCode::Down => {
+				if event.modifiers.contains(KeyModifiers::SHIFT) {
+					self.json_cursor_down_selecting();
+				} else {
+					self.json_cursor_down();
+				}
+			}
+			_ => {}
+		}
+		InputResult::Consumed
+	}
+
+	/// Handle input when editing a number input control
+	fn handle_number_editing_input(
+		&mut self,
+		event: &KeyEvent,
+		_ctx: &mut InputContext,
+	) -> InputResult {
+		let ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+		let shift = event.modifiers.contains(KeyModifiers::SHIFT);
+
+		match event.code {
+			KeyCode::Esc => {
+				self.number_cancel();
+			}
+			KeyCode::Enter => {
+				self.number_confirm();
+			}
+			KeyCode::Tab | KeyCode::BackTab => {
+				// Tab commits the pending edit and exits editing mode. We
+				// don't move panel focus here so the user can continue to
+				// tweak the same setting with Left/Right after Tab — matching
+				// the muscle memory of "Tab to leave the input box."
+				self.number_confirm();
+			}
+			KeyCode::Char('a') if ctrl => {
+				self.number_select_all();
+			}
+			KeyCode::Char(c) => {
+				self.number_insert(c);
+			}
+			KeyCode::Backspace if ctrl => {
+				self.number_delete_word_backward();
+			}
+			KeyCode::Backspace => {
+				self.number_backspace();
+			}
+			KeyCode::Delete if ctrl => {
+				self.number_delete_word_forward();
+			}
+			KeyCode::Delete => {
+				self.number_delete();
+			}
+			KeyCode::Left if ctrl && shift => {
+				self.number_move_word_left_selecting();
+			}
+			KeyCode::Left if ctrl => {
+				self.number_move_word_left();
+			}
+			KeyCode::Left if shift => {
+				self.number_move_left_selecting();
+			}
+			KeyCode::Left => {
+				self.number_move_left();
+			}
+			KeyCode::Right if ctrl && shift => {
+				self.number_move_word_right_selecting();
+			}
+			KeyCode::Right if ctrl => {
+				self.number_move_word_right();
+			}
+			KeyCode::Right if shift => {
+				self.number_move_right_selecting();
+			}
+			KeyCode::Right => {
+				self.number_move_right();
+			}
+			KeyCode::Home if shift => {
+				self.number_move_home_selecting();
+			}
+			KeyCode::Home => {
+				self.number_move_home();
+			}
+			KeyCode::End if shift => {
+				self.number_move_end_selecting();
+			}
+			KeyCode::End => {
+				self.number_move_end();
+			}
+			_ => {}
+		}
+		InputResult::Consumed // Consume all during number edit
+	}
+
+	/// Handle input when dropdown is open
+	fn handle_dropdown_input(&mut self, event: &KeyEvent, _ctx: &mut InputContext) -> InputResult {
+		match event.code {
+			KeyCode::Up => {
+				self.dropdown_prev();
+				InputResult::Consumed
+			}
+			KeyCode::Down => {
+				self.dropdown_next();
+				InputResult::Consumed
+			}
+			KeyCode::Home => {
+				self.dropdown_home();
+				InputResult::Consumed
+			}
+			KeyCode::End => {
+				self.dropdown_end();
+				InputResult::Consumed
+			}
+			KeyCode::Enter => {
+				self.dropdown_confirm();
+				InputResult::Consumed
+			}
+			KeyCode::Esc => {
+				self.dropdown_cancel();
+				InputResult::Consumed
+			}
+			_ => InputResult::Consumed, // Consume all while dropdown is open
+		}
+	}
+
+	/// Request to reset all changes (shows confirm dialog if there are changes)
+	fn request_reset(&mut self) {
+		if self.has_changes() {
+			self.showing_reset_dialog = true;
+			self.reset_dialog_selection = 0;
+		}
+	}
+
+	/// Request to close settings (shows confirm dialog if there are changes)
+	fn request_close(&mut self, ctx: &mut InputContext) {
+		if self.has_changes() {
+			self.showing_confirm_dialog = true;
+			self.confirm_dialog_selection = 0;
+		} else {
+			ctx.defer(DeferredAction::CloseSettings { save: false });
+		}
+	}
+
+	/// Handle control activation (Enter/Space on a setting)
+	fn handle_control_activate(&mut self, _ctx: &mut InputContext) {
+		if let Some(item) = self.current_item_mut() {
+			match &mut item.control {
+				SettingControl::Toggle(ref mut state) => {
+					state.checked = !state.checked;
+					self.on_value_changed();
+				}
+				SettingControl::Dropdown(_) => {
+					self.dropdown_toggle();
+				}
+				SettingControl::Number(_) => {
+					self.start_number_editing();
+				}
+				SettingControl::Text(_) => {
+					self.start_editing();
+				}
+				SettingControl::TextList(_) | SettingControl::DualList(_) => {
+					self.start_editing();
+				}
+				SettingControl::Map(ref mut state) => {
+					if state.focused_entry.is_none() {
+						// On add-new row: open dialog with empty key
+						if state.value_schema.is_some() {
+							self.open_add_entry_dialog();
+						}
+					} else if state.value_schema.is_some() {
+						// Has schema: open entry dialog
+						self.open_entry_dialog();
+					} else {
+						// Toggle expanded
+						if let Some(idx) = state.focused_entry {
+							if state.expanded.contains(&idx) {
+								state.expanded.retain(|&i| i != idx);
+							} else {
+								state.expanded.push(idx);
+							}
+						}
+					}
+					self.on_value_changed();
+				}
+				SettingControl::Json(_) => {
+					self.start_editing();
+				}
+				SettingControl::ObjectArray(ref state) => {
+					if state.focused_index.is_none() {
+						// On add-new row: open dialog with empty item
+						if state.item_schema.is_some() {
+							self.open_add_array_item_dialog();
+						}
+					} else if state.item_schema.is_some() {
+						// Has schema: open edit dialog
+						self.open_edit_array_item_dialog();
+					}
+				}
+				SettingControl::Complex { .. } => {
+					// Not editable via simple controls
+				}
+			}
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+	fn key(code: KeyCode) -> KeyEvent {
+		KeyEvent::new(code, KeyModifiers::NONE)
+	}
+
+	#[test]
+	fn test_settings_is_modal() {
+		// SettingsState should be modal - consume all unhandled input
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let state = SettingsState::new(schema, &config).unwrap();
+		assert!(state.is_modal());
+	}
+
+	#[test]
+	fn test_categories_panel_does_not_leak_to_settings() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+		state.focus.set(FocusPanel::Categories);
+
+		let mut ctx = InputContext::new();
+
+		// Per the tree-view spec: only Tab switches panels. Enter,
+		// Left, and Right are *no longer* shortcuts to move focus
+		// out of the categories panel.
+		// * Enter falls through (Ignored) — let the modal handle it.
+		// * Right expands the focused category (no-op for non-
+		//   expandable ones); does NOT move focus to Settings.
+		// * Left collapses; same — does not switch panels.
+		// * Tab is the only key that switches panels.
+		let result = state.handle_key_event(&key(KeyCode::Enter), &mut ctx);
+		assert_eq!(result, InputResult::Ignored);
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		let result = state.handle_key_event(&key(KeyCode::Right), &mut ctx);
+		assert_eq!(result, InputResult::Consumed);
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		let result = state.handle_key_event(&key(KeyCode::Left), &mut ctx);
+		assert_eq!(result, InputResult::Consumed);
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		// Tab is the panel switcher.
+		let result = state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(result, InputResult::Consumed);
+		assert_eq!(state.focus_panel(), FocusPanel::Settings);
+	}
+
+	#[test]
+	fn test_tab_cycles_focus_panels() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+
+		let mut ctx = InputContext::new();
+
+		// Start at Categories
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		// Tab -> Settings
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.focus_panel(), FocusPanel::Settings);
+
+		// Tab -> Footer (defaults to Layer button, index 0)
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.focus_panel(), FocusPanel::Footer);
+		assert_eq!(state.footer_button_index, 0);
+
+		// Tab through footer buttons: 0 -> 1 -> 2 -> 3 -> 4 -> wrap to Categories
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.footer_button_index, 1);
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.footer_button_index, 2);
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.footer_button_index, 3);
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.footer_button_index, 4); // Edit button
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.focus_panel(), FocusPanel::Categories);
+
+		// SECOND LOOP: Tab again should still land on Layer button when entering Footer
+		// Tab -> Settings
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.focus_panel(), FocusPanel::Settings);
+
+		// Tab -> Footer (should reset to Layer button, not stay on Edit)
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert_eq!(state.focus_panel(), FocusPanel::Footer);
+		assert_eq!(
+			state.footer_button_index, 0,
+			"Footer should reset to Layer button (index 0) on second loop"
+		);
+	}
+
+	#[test]
+	fn test_escape_shows_confirm_dialog_with_changes() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+
+		// Simulate a change
+		state.pending_changes.insert("/test".to_string(), serde_json::json!(true));
+
+		let mut ctx = InputContext::new();
+
+		// Escape should show confirm dialog, not close directly
+		state.handle_key_event(&key(KeyCode::Esc), &mut ctx);
+		assert!(state.showing_confirm_dialog);
+		assert!(ctx.deferred_actions.is_empty()); // No close action yet
+	}
+
+	#[test]
+	fn test_escape_closes_directly_without_changes() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+
+		let mut ctx = InputContext::new();
+
+		// Escape without changes should defer close action
+		state.handle_key_event(&key(KeyCode::Esc), &mut ctx);
+		assert!(!state.showing_confirm_dialog);
+		assert_eq!(ctx.deferred_actions.len(), 1);
+		assert!(matches!(ctx.deferred_actions[0], DeferredAction::CloseSettings { save: false }));
+	}
+
+	#[test]
+	fn test_confirm_dialog_navigation() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+		state.showing_confirm_dialog = true;
+		state.confirm_dialog_selection = 0; // Save
+
+		let mut ctx = InputContext::new();
+
+		// Right -> Discard
+		state.handle_key_event(&key(KeyCode::Right), &mut ctx);
+		assert_eq!(state.confirm_dialog_selection, 1);
+
+		// Right -> Cancel
+		state.handle_key_event(&key(KeyCode::Right), &mut ctx);
+		assert_eq!(state.confirm_dialog_selection, 2);
+
+		// Right again -> stays at Cancel (no wrap)
+		state.handle_key_event(&key(KeyCode::Right), &mut ctx);
+		assert_eq!(state.confirm_dialog_selection, 2);
+
+		// Left -> Discard
+		state.handle_key_event(&key(KeyCode::Left), &mut ctx);
+		assert_eq!(state.confirm_dialog_selection, 1);
+	}
+
+	#[test]
+	fn test_search_mode_captures_typing() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+
+		let mut ctx = InputContext::new();
+
+		// Start search
+		state.handle_key_event(&key(KeyCode::Char('/')), &mut ctx);
+		assert!(state.search_active);
+
+		// Type search query
+		state.handle_key_event(&key(KeyCode::Char('t')), &mut ctx);
+		state.handle_key_event(&key(KeyCode::Char('a')), &mut ctx);
+		state.handle_key_event(&key(KeyCode::Char('b')), &mut ctx);
+		assert_eq!(state.search_query(), "tab");
+
+		// Escape cancels search
+		state.handle_key_event(&key(KeyCode::Esc), &mut ctx);
+		assert!(!state.search_active);
+		assert!(state.search_query().is_empty());
+	}
+
+	/// The settings filter used to only append/backspace at the end: arrow
+	/// keys did nothing within the text (unlike the Command Palette). It now
+	/// tracks a cursor, so Left/Right/Home/End move the caret and edits land
+	/// at the cursor — matching the palette.
+	#[test]
+	fn test_search_arrow_keys_edit_within_query() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+
+		let mut ctx = InputContext::new();
+
+		// Start search and type "theme"
+		state.handle_key_event(&key(KeyCode::Char('/')), &mut ctx);
+		for c in "theme".chars() {
+			state.handle_key_event(&key(KeyCode::Char(c)), &mut ctx);
+		}
+		assert_eq!(state.search_query(), "theme");
+		assert_eq!(state.search_cursor(), 5);
+
+		// Left twice, then insert 'X' -> lands mid-string, not at the end
+		state.handle_key_event(&key(KeyCode::Left), &mut ctx);
+		state.handle_key_event(&key(KeyCode::Left), &mut ctx);
+		assert_eq!(state.search_cursor(), 3);
+		state.handle_key_event(&key(KeyCode::Char('X')), &mut ctx);
+		assert_eq!(state.search_query(), "theXme");
+		assert_eq!(state.search_cursor(), 4);
+
+		// Home jumps to start; Backspace at start is a no-op
+		state.handle_key_event(&key(KeyCode::Home), &mut ctx);
+		assert_eq!(state.search_cursor(), 0);
+		state.handle_key_event(&key(KeyCode::Backspace), &mut ctx);
+		assert_eq!(state.search_query(), "theXme");
+
+		// Delete removes the char at the cursor (the leading 't')
+		state.handle_key_event(&key(KeyCode::Delete), &mut ctx);
+		assert_eq!(state.search_query(), "heXme");
+		assert_eq!(state.search_cursor(), 0);
+
+		// End jumps to the end; Backspace removes the trailing char
+		state.handle_key_event(&key(KeyCode::End), &mut ctx);
+		assert_eq!(state.search_cursor(), state.search_query().len());
+		state.handle_key_event(&key(KeyCode::Backspace), &mut ctx);
+		assert_eq!(state.search_query(), "heXm");
+	}
+
+	/// Ctrl/Alt chords must not type their letter into the filter. The
+	/// `Char` arm used to match regardless of modifiers, so Ctrl+A/C/V
+	/// inserted a literal `a`/`c`/`v` instead of no-op'ing.
+	#[test]
+	fn test_search_ignores_ctrl_and_alt_chords() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+
+		let mut ctx = InputContext::new();
+
+		state.handle_key_event(&key(KeyCode::Char('/')), &mut ctx);
+		for c in "hello".chars() {
+			state.handle_key_event(&key(KeyCode::Char(c)), &mut ctx);
+		}
+		assert_eq!(state.search_query(), "hello");
+
+		// Ctrl+A / Ctrl+C / Ctrl+V / Ctrl+X leave the query untouched
+		for c in ['a', 'c', 'v', 'x'] {
+			state.handle_key_event(&KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL), &mut ctx);
+		}
+		// Alt chord too
+		state.handle_key_event(&KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT), &mut ctx);
+		assert_eq!(state.search_query(), "hello");
+
+		// A plain char still types; Shift+char types uppercase
+		state.handle_key_event(&key(KeyCode::Char('!')), &mut ctx);
+		state.handle_key_event(&KeyEvent::new(KeyCode::Char('Z'), KeyModifiers::SHIFT), &mut ctx);
+		assert_eq!(state.search_query(), "hello!Z");
+	}
+
+	#[test]
+	fn test_footer_button_activation() {
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+		state.focus.set(FocusPanel::Footer);
+		state.footer_button_index = 2; // Save button (0=Layer, 1=Reset, 2=Save, 3=Cancel)
+
+		let mut ctx = InputContext::new();
+
+		// Enter on Save button should defer save action
+		state.handle_key_event(&key(KeyCode::Enter), &mut ctx);
+		assert_eq!(ctx.deferred_actions.len(), 1);
+		assert!(matches!(ctx.deferred_actions[0], DeferredAction::CloseSettings { save: true }));
+	}
+
+	/// Reproducer for issue #1825: Tab while editing a Number control was a
+	/// no-op, leaving the user "stuck" in the input. Tab should commit the
+	/// pending edit and exit number-editing mode (matching the Text-control
+	/// behavior).
+	#[test]
+	fn test_tab_exits_number_editing() {
+		use crate::view::settings::items::SettingControl;
+
+		let schema = include_str!("../../../plugins/config-schema.json");
+		let config = crate::config::Config::default();
+		let mut state = SettingsState::new(schema, &config).unwrap();
+		state.visible = true;
+		state.focus.set(FocusPanel::Settings);
+
+		// Find a number setting (any will do)
+		let number_idx = state
+			.pages
+			.get(state.selected_category)
+			.and_then(|page| {
+				page.items.iter().position(|item| matches!(item.control, SettingControl::Number(_)))
+			})
+			.expect("expected at least one Number control on the default page");
+		state.selected_item = number_idx;
+
+		// Enter number editing mode and type a digit so we have a pending edit
+		state.start_number_editing();
+		assert!(state.is_number_editing(), "precondition: should be in number-editing mode");
+		state.number_insert('7');
+
+		let mut ctx = InputContext::new();
+
+		// Tab should exit editing mode (currently fails: Tab is unhandled)
+		state.handle_key_event(&key(KeyCode::Tab), &mut ctx);
+		assert!(
+			!state.is_number_editing(),
+			"Tab while editing a Number control must exit editing mode"
+		);
+	}
+}

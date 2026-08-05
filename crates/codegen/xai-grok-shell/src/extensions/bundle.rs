@@ -51,7 +51,7 @@ struct BundleSyncRequest {
 }
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct BundleSyncResult {
+pub struct BundleSyncResult {
     pub updated: bool,
     pub version: String,
     pub personas_count: usize,

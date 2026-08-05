@@ -1,0 +1,42 @@
+[package]
+name = "fb-shared"
+description            = "DX TUI file-browser shared library"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-macro = { path = "../macro" }
+
+# External dependencies
+anyhow           = { workspace = true }
+crossterm        = { workspace = true }
+dyn-clone        = { workspace = true }
+foldhash         = { workspace = true }
+futures          = { workspace = true }
+hashbrown        = { workspace = true }
+memchr           = "2.8.0"
+ordered-float    = { workspace = true }
+parking_lot      = { workspace = true }
+percent-encoding = { workspace = true }
+serde            = { workspace = true }
+thiserror        = { workspace = true }
+tokio            = { workspace = true }
+typed-path       = { workspace = true }
+
+[target."cfg(unix)".dependencies]
+libc  = { workspace = true }
+uzers = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [ "Win32_UI_Shell" ] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

@@ -34,9 +34,9 @@ use super::modes::{
     set_permission_mode, set_plan_mode, set_yolo_mode,
 };
 use super::notes::{
-    dispatch_enter_feedback_mode, dispatch_enter_remember_mode,
-    dispatch_save_remember_note_from_modal, dispatch_send_btw, dispatch_send_feedback,
-    dispatch_send_recap, dispatch_send_remember_note,
+    dispatch_delete_note, dispatch_edit_note, dispatch_enter_feedback_mode,
+    dispatch_enter_remember_mode, dispatch_save_remember_note_from_modal, dispatch_send_btw,
+    dispatch_send_feedback, dispatch_send_recap, dispatch_send_remember_note,
 };
 use super::permissions::{
     dispatch_permission_cancel, dispatch_permission_followup, dispatch_permission_select,
@@ -57,7 +57,7 @@ use super::rewind::{
 };
 use super::session::foreign::dispatch_fetch_session_list;
 use super::session::fork::{
-    apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved,
+    apply_persist_worktree_mode, dispatch_fork, dispatch_fork_resolved, dispatch_project_selected,
     dispatch_startup_fork_session,
 };
 use super::session::lifecycle::{
@@ -912,32 +912,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             };
             let Some(session_id) = agent.session.session_id.clone() else {
-                let prev_model = agent.session.models.current.clone();
-                let prev_effort = agent.session.models.reasoning_effort;
-                agent.session.models.set_current(model_id.clone(), effort);
-                let resolved_effort = agent.session.models.reasoning_effort;
-                let unchanged =
-                    prev_model.as_ref() == Some(&model_id) && prev_effort == resolved_effort;
-                let rollback_prev = agent
-                    .session
-                    .deferred_model_switch
-                    .take()
-                    .and_then(|prior| prior.prev_model_id)
-                    .or(prev_model);
-                agent.session.deferred_model_switch =
-                    Some(crate::app::agent::DeferredModelSwitch {
-                        model_id: model_id.clone(),
-                        effort,
-                        prev_model_id: rollback_prev,
-                    });
-                return if unchanged {
-                    vec![]
-                } else {
-                    vec![Effect::PersistPreferredModel {
-                        model_id,
-                        reasoning_effort: resolved_effort,
-                    }]
-                };
+                agent.session.deferred_model_switch = Some((model_id, effort));
+                return vec![];
             };
             agent.session.model_switch_pending = true;
             vec![Effect::SwitchModel {
@@ -1024,6 +1000,8 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::EnterFeedbackMode => dispatch_enter_feedback_mode(app),
         Action::SendFeedback(text) => dispatch_send_feedback(app, text),
         Action::EnterRememberMode => dispatch_enter_remember_mode(app),
+        Action::EditNote => dispatch_edit_note(app),
+        Action::DeleteNote => dispatch_delete_note(app),
         Action::SendRememberNote(text) => dispatch_send_remember_note(app, text),
         Action::SaveRememberNoteFromModal => dispatch_save_remember_note_from_modal(app),
         Action::SendBtw(question) => dispatch_send_btw(app, question),
@@ -1095,6 +1073,40 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::PrivacyBannerOptIn => dispatch_privacy_banner_opt_in(app),
         Action::PrivacyBannerOptOut => dispatch_privacy_banner_opt_out(app),
         Action::OpenCommandPalette => dispatch_open_command_palette(app),
+        Action::SwitchDxView(view) => {
+            if let Some(agent) = get_active_agent_mut(app) {
+                agent.dx_ui.palette_visible = false;
+                match view {
+                    crate::dx::DxView::Editor => agent.dx_ui.editor.schedule_init(),
+                    crate::dx::DxView::FileBrowser => {
+                        agent.dx_ui.file_browser.ensure_initialized();
+                    }
+                    crate::dx::DxView::Diff => agent.dx_ui.diff.open_and_refresh(),
+                    crate::dx::DxView::Animation => agent.dx_ui.animation.restart(),
+                    crate::dx::DxView::Chat => {}
+                }
+                agent.dx_ui.view = view;
+            }
+            Vec::new()
+        }
+        Action::PlayVideo(raw_path) => {
+            let cwd = get_active_agent_mut(app).map(|agent| agent.session.cwd.clone());
+            match cwd {
+                Some(cwd) => match crate::video_player::launch(&raw_path, &cwd) {
+                    Ok(launched) => app.show_toast(&format!(
+                        "Playing video: {}",
+                        launched
+                            .media
+                            .file_name()
+                            .unwrap_or_else(|| launched.media.as_os_str())
+                            .to_string_lossy()
+                    )),
+                    Err(error) => app.show_toast(&error.to_string()),
+                },
+                None => app.show_toast("Open a Grok session before using /video"),
+            }
+            Vec::new()
+        }
         Action::OpenHowtoGuides => dispatch_open_howto_guides(app),
         Action::OpenResetConfirm { key } => dispatch_open_reset_confirm(app, key),
         Action::ConfirmResetSetting { choice } => dispatch_confirm_reset_setting(app, choice),
@@ -1220,6 +1232,11 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             );
             effects
         }
+        Action::ProjectSelected {
+            path,
+            stashed_prompt,
+            disable_picker,
+        } => dispatch_project_selected(app, path, stashed_prompt, disable_picker),
         Action::NewSessionAnswered {
             worktree,
             persist_mode,
@@ -1285,6 +1302,19 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                     prompt_id: uuid::Uuid::new_v4().to_string(),
                     skill_token_ranges: Vec::new(),
                 }];
+            }
+            vec![]
+        }
+        Action::OpenProviderConnect => {
+            use crate::views::modal::ActiveModal;
+            use crate::views::provider_connect::ProviderConnectState;
+
+            if let crate::app::app_view::ActiveView::Agent(id) = app.active_view
+                && let Some(agent) = app.agents.get_mut(&id)
+            {
+                agent.active_modal = Some(ActiveModal::ProviderConnect {
+                    state: Box::new(ProviderConnectState::new()),
+                });
             }
             vec![]
         }

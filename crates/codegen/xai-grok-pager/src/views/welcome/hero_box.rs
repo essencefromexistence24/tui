@@ -28,7 +28,7 @@ const LOGO_H_PAD: u16 = 3;
 /// message never paints over the button.
 const UPGRADE_CTA_ROWS: u16 = 2;
 
-const HERO_SUBTITLE: &str = "Thanks for trying Grok Build, give feedback with /feedback!";
+const HERO_SUBTITLE: &str = "Thanks for trying Dx, give feedback with /feedback!";
 
 use super::{PROMPT_HEIGHT, VERSION_GAP};
 
@@ -178,7 +178,7 @@ pub(super) fn compute_hero_box(
         Constraint::Length(tip_gap),
         Constraint::Length(PROMPT_HEIGHT),
         Constraint::Length(VERSION_GAP),
-        Constraint::Length(1),
+        Constraint::Length(0), // [commented] version bar removed
     ])
     .areas(content_area);
 

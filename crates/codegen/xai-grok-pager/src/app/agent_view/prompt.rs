@@ -548,6 +548,16 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        // Completion and suggestion surfaces above get first refusal. A plain
+        // unclaimed Tab belongs to the composer and toggles Build/Plan.
+        if key.code == KeyCode::Tab && key.modifiers.is_empty() {
+            return InputOutcome::Action(Action::SetPlanMode(
+                crate::app::actions::PlanModeKind::from_bool(
+                    !self.plan_mode_pending.unwrap_or(self.plan_mode_active),
+                ),
+            ));
+        }
+
         // 3. Check ActionRegistry for prompt-scoped actions.
         //    SendPrompt is routed here — the widget's try_send() applies guards.
         if let Some(action_id) = registry.lookup(key, When::PromptFocused) {
@@ -623,11 +633,6 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
                 ActionId::InterjectPrompt => {
-                    crate::actions::log_shortcut_used(
-                        key,
-                        ActionId::InterjectPrompt,
-                        When::PromptFocused.telemetry_name(),
-                    );
                     // Editing-queued intercept lives in `queue_edit.rs`.
                     if let Some(outcome) = self.interject_editing_queued_intercept() {
                         return outcome;
@@ -777,9 +782,11 @@ impl AgentView {
         //    logical composer. Dropdown/completion Tab paths already consumed
         //    their presses above. Esc remains owned by try_handle_esc_policy.
         match key.code {
-            KeyCode::Tab if registry.find(ActionId::FocusScrollback).is_some() => {
-                InputOutcome::Action(Action::FocusScrollback)
-            }
+            KeyCode::Tab => InputOutcome::Action(Action::SetPlanMode(
+                crate::app::actions::PlanModeKind::from_bool(
+                    !self.plan_mode_pending.unwrap_or(self.plan_mode_active),
+                ),
+            )),
             _ => InputOutcome::Unchanged,
         }
     }
@@ -1124,7 +1131,7 @@ mod shift_tab_cycle_mode_tests {
     }
 
     #[test]
-    fn plain_tab_follows_focus_scrollback_registration() {
+    fn plain_tab_toggles_plan_mode_in_every_screen_mode() {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         for mode in [
             crate::app::ScreenMode::Fullscreen,
@@ -1133,16 +1140,19 @@ mod shift_tab_cycle_mode_tests {
             let mut agent = super::test_fixtures::make_agent();
             let registry = ActionRegistry::defaults_for(mode);
             let outcome = agent.handle_prompt_key_with_registry_for_test(&tab, &registry);
-            assert!(
-                matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
-                "{mode:?} plain Tab must focus scrollback, got {outcome:?}",
-            );
+            assert!(matches!(
+                outcome,
+                InputOutcome::Action(Action::SetPlanMode(crate::app::actions::PlanModeKind::On))
+            ));
         }
 
         let mut minimal = super::test_fixtures::make_agent();
         let registry = ActionRegistry::defaults_for(crate::app::ScreenMode::Minimal);
         let outcome = minimal.handle_prompt_key_with_registry_for_test(&tab, &registry);
-        assert!(matches!(outcome, InputOutcome::Unchanged));
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::SetPlanMode(crate::app::actions::PlanModeKind::On))
+        ));
         assert_eq!(minimal.active_pane, AgentPane::Prompt);
     }
 
@@ -1680,15 +1690,18 @@ mod prompt_suggestion_key_tests {
     }
 
     #[test]
-    fn tab_falls_through_to_focus_scrollback_without_suggestion() {
+    fn tab_toggles_plan_mode_without_suggestion() {
         crate::appearance::cache::set_prompt_suggestions(true);
         let mut agent = super::test_fixtures::make_agent();
         agent.refresh_prompt_suggestion_gate();
 
         let outcome = agent.handle_prompt_key_for_test(&key(KeyCode::Tab));
         assert!(
-            matches!(outcome, InputOutcome::Action(Action::FocusScrollback)),
-            "Tab keeps its focus-cycling behavior when no ghost is visible: {outcome:?}"
+            matches!(
+                outcome,
+                InputOutcome::Action(Action::SetPlanMode(crate::app::actions::PlanModeKind::On))
+            ),
+            "Tab toggles Build to Plan when no ghost is visible: {outcome:?}"
         );
     }
 

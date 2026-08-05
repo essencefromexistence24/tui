@@ -15,28 +15,28 @@ use crate::util::config::DEFAULT_AUTO_COMPACT_THRESHOLD_PERCENT;
 
 /// Request to grab all the sessions from the current working directory
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SessionListRequest {
+pub struct SessionListRequest {
     pub workspace_directory: PathBuf,
 }
 
 /// Request to grab all the sessions tagged by their working directory as well
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AllSessionOverviewRequest {}
+pub struct AllSessionOverviewRequest {}
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct SessionListResponse {
+pub struct SessionListResponse {
     pub session_summaries: Vec<Summary>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct AllSessionOverviewResponse {
+pub struct AllSessionOverviewResponse {
     pub all_sessions: BTreeMap<PathBuf, Vec<Summary>>,
 }
 
 // ── Compaction ──────────────────────────────────────────────────────────
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CompactConversationRequest {
+pub struct CompactConversationRequest {
     #[serde(alias = "sessionId")]
     pub session_id: String,
     #[serde(default, alias = "userContext")]
@@ -44,7 +44,7 @@ pub(crate) struct CompactConversationRequest {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct CompactConversationResponse {}
+pub struct CompactConversationResponse {}
 
 // ── Feedback ────────────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ pub struct FeedbackRequest {
 
 /// Request to dismiss a feedback request (sent to the feedback backend).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct FeedbackRequestDismiss {
+pub struct FeedbackRequestDismiss {
     pub session_id: String,
     pub request_id: String,
 }
@@ -218,7 +218,7 @@ impl ClientFeedbackInput {
     }
 
     /// Check if this is a solicited feedback (response to a request)
-    pub(crate) fn is_solicited(&self) -> bool {
+    pub fn is_solicited(&self) -> bool {
         self.request_id.is_some()
     }
 
@@ -233,7 +233,7 @@ impl ClientFeedbackInput {
 /// Request to submit rollout survey responses about worktree improvements
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct RolloutSurveyRequest {
+pub struct RolloutSurveyRequest {
     pub session_id: String,
     pub preferences: Vec<String>,
     pub feedback: String,
@@ -241,7 +241,7 @@ pub(crate) struct RolloutSurveyRequest {
 
 /// Response from submitting rollout survey
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub(crate) struct RolloutSurveyResponse {
+pub struct RolloutSurveyResponse {
     pub success: bool,
 }
 
@@ -262,7 +262,7 @@ pub struct Citation {
 /// Request to record an inline comment on a prompt turn.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommentRequest {
+pub struct CommentRequest {
     pub session_id: String,
     /// 0-indexed prompt turn this comment is associated with
     pub prompt_index: u32,
@@ -273,7 +273,7 @@ pub(crate) struct CommentRequest {
 /// Response from recording a comment
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommentResponse {
+pub struct CommentResponse {
     pub comment_id: String,
     pub recorded: bool,
 }
@@ -281,7 +281,7 @@ pub(crate) struct CommentResponse {
 /// Request to delete a previously recorded comment.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommentDeleteRequest {
+pub struct CommentDeleteRequest {
     pub session_id: String,
     pub comment_id: String,
 }
@@ -289,7 +289,7 @@ pub(crate) struct CommentDeleteRequest {
 /// Response from deleting a comment
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct CommentDeleteResponse {
+pub struct CommentDeleteResponse {
     pub comment_id: String,
     pub deleted: bool,
 }
@@ -325,7 +325,7 @@ pub struct RewindRequest {
     pub mode: RewindMode,
 }
 
-pub(crate) fn default_rewind_mode() -> RewindMode {
+pub fn default_rewind_mode() -> RewindMode {
     RewindMode::All
 }
 
@@ -520,7 +520,7 @@ pub struct SessionInfoData {
 }
 
 /// Whether this model slug supports showing checkpoint identity (resolved model ID, fingerprint).
-pub(crate) fn is_coding_model_slug(model: &str) -> bool {
+pub fn is_coding_model_slug(model: &str) -> bool {
     matches!(model, "grok-build" | "grok-4.5")
 }
 
@@ -588,7 +588,7 @@ pub struct FeedbackContext {
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct StartupHints {
+pub struct StartupHints {
     #[serde(default)]
     pub non_interactive: bool,
     #[serde(default)]

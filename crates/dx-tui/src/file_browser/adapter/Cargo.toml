@@ -1,0 +1,37 @@
+[package]
+name = "fb-adapter"
+description            = "DX TUI file-browser image adapter"
+version.workspace      = true
+edition.workspace      = true
+license.workspace      = true
+authors.workspace      = true
+homepage.workspace     = true
+repository.workspace   = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+fb-config = { path = "../config" }
+fb-emulator = { path = "../emulator" }
+fb-fs = { path = "../fs" }
+fb-macro = { path = "../macro" }
+fb-shared = { path = "../shared" }
+fb-tty = { path = "../tty" }
+
+# External dependencies
+ansi-to-tui = { workspace = true }
+anyhow      = { workspace = true }
+base64      = { workspace = true }
+crossterm   = { workspace = true }
+image       = { version = "0.25.10", default-features = false, features = [ "bmp", "dds", "gif", "ico", "jpeg", "png", "tiff", "webp" ] }  # Trimmed: removed avif(98 crates), exr(21), ff, hdr, pnm, qoi, tga
+moxcms      = "0.8.1"
+palette     = { version = "0.7.6", default-features = false }
+quantette   = { version = "0.5.1", default-features = false }
+ratatui     = { workspace = true }
+tokio       = { workspace = true }
+tracing     = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+crossterm = { workspace = true, features = [ "use-dev-tty", "libc" ] }

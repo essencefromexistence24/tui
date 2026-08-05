@@ -1,9 +1,9 @@
 pub mod acp_types;
 pub mod announcement_state;
 pub mod commands;
-pub(crate) mod compaction_config;
+pub mod compaction_config;
 pub mod handle;
-pub(crate) mod memory_state;
+pub mod memory_state;
 pub mod merge;
 pub mod notifications;
 pub mod pending_interaction;
@@ -269,14 +269,14 @@ mod tests {
 /// Determines whether the session sends an initial file index to the client
 /// or just streams raw file events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
-pub(crate) enum ClientFsMode {
+pub enum ClientFsMode {
     #[default]
     Events,
     Index,
 }
 /// Client-side fs notification config: fs source settings + mode.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct ClientFsConfig {
+pub struct ClientFsConfig {
     pub fs: FsConfig,
     pub mode: ClientFsMode,
 }
@@ -303,10 +303,10 @@ pub(crate) struct RegistryConfig {
     pub alpha_test_key: Option<String>,
 }
 pub mod acp_conversion;
-pub(crate) mod acp_mcp;
+pub mod acp_mcp;
 pub(crate) mod acp_session;
 pub(crate) mod agent_rebuild;
-pub(crate) mod chat_persistence;
+pub mod chat_persistence;
 pub(crate) mod events;
 pub mod export;
 pub mod feedback;
@@ -327,14 +327,14 @@ pub mod goal_tracker;
 pub mod helpers;
 pub(crate) mod image_describe;
 pub(crate) mod image_normalize;
-pub(crate) mod inference_metrics;
+pub mod inference_metrics;
 pub use xai_grok_shared::session::info;
 pub mod managed_mcp;
 pub(crate) mod mcp_descriptors;
-pub(crate) mod mcp_dispatcher;
+pub mod mcp_dispatcher;
 #[cfg(test)]
 mod mcp_dispatcher_e2e_tests;
-pub(crate) mod mcp_restart;
+pub mod mcp_restart;
 pub mod mcp_servers;
 pub mod memory;
 pub(crate) mod normalize_cache;

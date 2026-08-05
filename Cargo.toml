@@ -90,15 +90,52 @@ members = [
 ]
 
 [workspace.package]
+version = "1.0.0"
 edition = "2024"
 license = "Apache-2.0"
+authors = ["xAI", "DX contributors"]
+repository = "https://github.com/xai-org/grok-cli"
+homepage = "https://github.com/xai-org/grok-cli"
+# Nested DX file-browser crates inherit the host workspace MSRV when linked
+# directly into the pager. Edition 2024 requires Rust 1.85 or newer.
+rust-version = "1.85"
 
 [workspace.dependencies]
 agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
 alacritty_terminal = "0.26.0"
-ansi-to-tui = "7.0.0"
+ansi-to-tui = "8.0.1"
 ansi-width = "0.1"
 anstyle = "1.0"
+async-channel = "2.3"
+async-fs = "2.1"
+better-panic = "0.3"
+bitflags = "2.6"
+bstr = "1.10"
+byteorder = "1.5"
+color-eyre = "0.6"
+core-foundation-sys = "0.8"
+dyn-clone = "1.0"
+either = "1.13"
+fd-lock = "4.0"
+fdlimit = "0.3.0"
+flume = "0.12"
+foldhash = "0.2.0"
+hashbrown = { version = "0.16.1", features = ["serde"] }
+lru = "0.16.3"
+memchr = "2.7"
+mlua = { version = "0.11.6", features = ["lua54", "serialize", "macros", "async", "anyhow"] }
+objc2 = "0.6.4"
+ordered-float = { version = "5.1.0", features = ["serde"] }
+paste = "1.0"
+percent-encoding = "2.3"
+scopeguard = "1.2"
+serde_with = "3.11"
+shell-words = "1.1"
+twox-hash = "2.0"
+typed-path = "0.12.3"
+uzers = "0.12"
+vergen-gitcl = { version = "9.1.0", default-features = false, features = ["build", "cargo"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
 anstyle-lossy = "1.1.4"
 anstyle-parse = "0.2"
 anstyle-syntect = "1.0.4"
@@ -126,7 +163,7 @@ core-foundation = "0.10"
 crc32fast = "1.4"
 criterion = "0.6"
 crossbeam = "0.8"
-crossterm = "0.28"
+crossterm = "0.29"
 cryptify = "3.2"
 ctor = "0.4"
 dashmap = "6"
@@ -206,10 +243,9 @@ prost-build = "0.14"
 pulldown-cmark = "0.13"
 quick-xml = "0.38"
 rand = "0.9"
-ratatui = { version = "0.29" }
+ratatui = { version = "0.30", features = ["serde"] }
 ratatui-core = "0.1"
 rayon = "1"
-rcgen = { version = "0.13", features = ["pem"] }
 reflink-copy = "0.1"
 regex = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
@@ -220,7 +256,6 @@ ring = "0.17"
 rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
-rustls = { version = "0.23", features = ["aws-lc-rs"] }
 schemars = "1"
 scraper = "0.23"
 semver = "1"
@@ -240,6 +275,7 @@ strip-ansi-escapes = "0.2.1"
 strum = { version = "0.27", features = ["derive"] }
 supports-color = "3.0"
 syntect = "5.3"
+tachyonfx = "0.25"
 tar = "0.4"
 tempfile = "3"
 terminput = "0.3"
@@ -279,7 +315,6 @@ vte = "0.15.0"
 wait-timeout = "0.2"
 walkdir = "2"
 webbrowser = { version = "1.0.4" }
-webpki-roots = "0.26"
 which = "8"
 whoami = "1.4"
 wildmatch = "2"
@@ -342,6 +377,20 @@ zstd = "0.13"
 [profile.release]
 incremental = true
 panic = "abort"
+
+# The pager now directly embeds the DX browser/editor/animation stack and is
+# substantially larger than an ordinary crate. Split its optimized codegen
+# into smaller partitions so rustc stays within the Windows commit limit.
+# This retains opt-level=3 while reducing peak compiler memory.
+[profile.release.package.xai-grok-pager]
+codegen-units = 256
+
+# `xai-grok-shell` is the other large monolithic crate in the pager build.
+# With `-j 12` on Windows, its default optimized codegen can overlap with the
+# pager and exhaust the system commit limit. Smaller LLVM partitions preserve
+# opt-level=3 while keeping each codegen allocation bounded.
+[profile.release.package.xai-grok-shell]
+codegen-units = 256
 
 # Hardened release profile for shipping to end users (alpha + stable).
 # Use `cargo build --profile release-dist` for distribution builds.

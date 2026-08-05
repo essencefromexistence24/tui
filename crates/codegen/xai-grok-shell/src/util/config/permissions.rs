@@ -26,7 +26,7 @@ pub fn parse_permission_mode_canonical(mode_str: &str) -> PermissionMode {
 ///
 /// Inverse of [`parse_permission_mode_canonical`] for the real variants, so
 /// `parse_permission_mode_canonical(permission_mode_canonical_str(m)) == m`.
-pub(crate) fn permission_mode_canonical_str(mode: PermissionMode) -> &'static str {
+pub fn permission_mode_canonical_str(mode: PermissionMode) -> &'static str {
     match mode {
         PermissionMode::AlwaysApprove => "always-approve",
         PermissionMode::Auto => "auto",
@@ -85,7 +85,9 @@ pub fn resolve_permission_mode(
     if let Some(mode_str) = remote_permission_mode {
         return parse_permission_mode_canonical(mode_str);
     }
-    PermissionMode::Ask
+    // Full control is the Grok Build default. Explicit local/remote settings
+    // and managed policy still win above and may require approvals.
+    PermissionMode::AlwaysApprove
 }
 
 /// Display projection for a selected mode that did NOT win yolo/auto
@@ -213,7 +215,7 @@ pub fn effective_auto_for_launch(
 /// `SetAutoMode`) is unit-testable without a live session. This is the
 /// authoritative agent-side gate: when it returns `false`, the permission
 /// manager is never flipped to auto and the classifier never wires.
-pub(crate) fn auto_mode_session_active(
+pub fn auto_mode_session_active(
     gate_enabled: bool,
     requested_auto: bool,
     session_yolo: bool,
@@ -269,13 +271,39 @@ pub fn load_require_plan_approval() -> bool {
         .unwrap_or(false)
 }
 
+/// Synchronously load the remote agent secret from the config file.
+/// Looks for [remote] section with secret field.
+///
+/// Example config.toml:
+/// ```toml
+/// [remote]
+/// secret = "my-secret-token"
+/// ```
+pub fn load_remote_secret_sync() -> Option<String> {
+    let root: TomlValue = crate::config::load_effective_config().ok()?;
+
+    if let TomlValue::Table(table) = root
+        && let Some(TomlValue::Table(remote)) = table.get("remote")
+    {
+        remote
+            .get("secret")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn resolve_permission_mode_none_is_ask() {
-        assert_eq!(resolve_permission_mode(None, None), PermissionMode::Ask);
+    fn resolve_permission_mode_none_is_full_control() {
+        assert_eq!(
+            resolve_permission_mode(None, None),
+            PermissionMode::AlwaysApprove
+        );
     }
 
     #[test]

@@ -956,7 +956,12 @@ pub(super) async fn run_session(
                             }
                             SessionActor::maybe_start_running_task(session.clone(), completion_tx.clone()).await;
                         }
-                        SessionCommand::Cancel(options) => {
+                        SessionCommand::Cancel {
+                            cancel_subagents,
+                            kill_background_tasks,
+                            rewind_if_pristine,
+                            trigger,
+                        } => {
                             // Flush the actor-owned replay buffer before tearing
                             // down the running turn so any streamed chunks
                             // (notably AgentThoughtChunk reasoning text) still
@@ -972,9 +977,15 @@ pub(super) async fn run_session(
                             // Clear pending interjections — the turn is being
                             // cancelled, so they have no active turn to inject into.
                             session.pending_interjections.clear();
-                            let suppress_task_wakes =
-                                matches!(options.trigger, Some(crate::session::CancelTrigger::CtrlC));
-                            session.cancel_running_task(options).await;
+                            let suppress_task_wakes = trigger.as_deref() == Some("ctrl_c");
+                            session
+                                .cancel_running_task(
+                                    cancel_subagents,
+                                    kill_background_tasks,
+                                    rewind_if_pristine,
+                                    trigger,
+                                )
+                                .await;
 
                             // Auto-pause active goal on Ctrl+C so timers stop
                             // and the pager shows "paused" instead of "active".
@@ -2086,7 +2097,7 @@ pub(super) async fn run_session(
                                 PersistenceMsg::GitHead { commit, branch },
                             );
                         }
-                        SessionCommand::Shutdown(kind) => {
+                        SessionCommand::Shutdown => {
                             shutdown_workflows(&session).await;
                             // Flush the actor-owned replay buffer so any
                             // streamed chunks still pending at shutdown
@@ -2098,19 +2109,6 @@ pub(super) async fn run_session(
                             // Cancel, CopyFile, and FlushComplete arms.
                             if let Some(notification) = replay_buffer.flush() {
                                 session.emit_buffered(notification).await;
-                            }
-                            // This arm returns; an unanswered turn would race
-                            // teardown and report `EndTurn` for unfinished work.
-                            if kind == crate::session::ShutdownKind::CancelRunningTurn {
-                                session
-                                    .cancel_running_task(crate::session::CancelOptions {
-                                        cancel_subagents: true,
-                                        kill_background_tasks: true,
-                                        rewind_if_no_output: false,
-                                        trigger: Some(crate::session::CancelTrigger::Shutdown),
-                                        user_initiated: false,
-                                    })
-                                    .await;
                             }
                             // Drop any queued synthetic auto-wake prompts and pending
                             // notifications before running hooks. Without this, a

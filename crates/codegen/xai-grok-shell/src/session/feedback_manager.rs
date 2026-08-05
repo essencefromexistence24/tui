@@ -198,7 +198,7 @@ pub(crate) struct SessionFeedbackData {
 
 /// Feedback feature flags threaded through session spawn.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct FeedbackFlags {
+pub struct FeedbackFlags {
     pub enabled: bool,
     pub user: Option<crate::agent::config::FeedbackUserConfig>,
 }
@@ -311,10 +311,7 @@ impl FeedbackManager {
     /// Called once after the first upload queue is created. The Arc is stored
     /// and read (via atomic loads) before each signal sync to populate GCS
     /// queue metrics. Safe to call from `&self` (behind Arc) via OnceLock.
-    pub(crate) fn set_upload_queue_stats(
-        &self,
-        stats: Arc<xai_file_utils::queue::UploadQueueStats>,
-    ) {
+    pub fn set_upload_queue_stats(&self, stats: Arc<xai_file_utils::queue::UploadQueueStats>) {
         let _ = self.upload_queue_stats.set(stats);
     }
 
@@ -396,6 +393,11 @@ impl FeedbackManager {
             },
         )
         .await
+    }
+
+    /// Check if config has been loaded from the server.
+    pub fn is_config_loaded(&self) -> bool {
+        self.config_loaded.load(Ordering::Relaxed)
     }
 
     /// Load feedback heuristics config from the backend.
@@ -520,7 +522,7 @@ impl FeedbackManager {
     #[tracing::instrument(name = "feedback.force_feedback_request", skip_all, fields(
         session_id = %self.session_id,
     ))]
-    pub(crate) async fn force_feedback_request(
+    pub async fn force_feedback_request(
         &self,
         tier: FeedbackTier,
         mode: FeedbackMode,
@@ -628,7 +630,7 @@ impl FeedbackManager {
     ///
     /// `request_id` is the prompt/request identifier for the turn.
     #[tracing::instrument(skip_all, fields(session_id = %self.session_id))]
-    pub(crate) async fn send_turn_delta_with_snapshot(
+    pub async fn send_turn_delta_with_snapshot(
         &self,
         snapshot: Option<TurnDeltaSnapshot>,
         request_id: Option<String>,
@@ -704,7 +706,7 @@ impl FeedbackManager {
 
     /// Force-sync current signals to the analytics backend, bypassing the cooldown check.
     /// Used for the final sync on shutdown to ensure no data is lost.
-    pub(crate) async fn force_sync_signals(&self) -> anyhow::Result<()> {
+    pub async fn force_sync_signals(&self) -> anyhow::Result<()> {
         self.sync_signals_inner(true).await
     }
 

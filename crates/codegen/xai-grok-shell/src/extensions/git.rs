@@ -60,7 +60,7 @@ fn default_working() -> String {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitStatusRequest {
+pub struct GitStatusRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -72,7 +72,7 @@ pub(crate) struct GitStatusRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitFilesRequest {
+pub struct GitFilesRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -83,7 +83,7 @@ pub(crate) struct GitFilesRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitDiffsRequest {
+pub struct GitDiffsRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -107,7 +107,7 @@ pub(crate) struct GitDiffsRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitStageRequest {
+pub struct GitStageRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -116,7 +116,7 @@ pub(crate) struct GitStageRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitStageContentRequest {
+pub struct GitStageContentRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -126,7 +126,7 @@ pub(crate) struct GitStageContentRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitUnstageRequest {
+pub struct GitUnstageRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -152,7 +152,7 @@ impl From<GitDiscardScope> for DiscardScope {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitDiscardRequest {
+pub struct GitDiscardRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -165,7 +165,7 @@ pub(crate) struct GitDiscardRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitCommitRequest {
+pub struct GitCommitRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -182,7 +182,7 @@ pub(crate) struct GitCommitRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitStashRequest {
+pub struct GitStashRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -192,7 +192,7 @@ pub(crate) struct GitStashRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitCheckoutRequest {
+pub struct GitCheckoutRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -212,7 +212,7 @@ struct CheckoutSessionHeadRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitInfoRequest {
+pub struct GitInfoRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -220,7 +220,7 @@ pub(crate) struct GitInfoRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitBranchesRequest {
+pub struct GitBranchesRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -228,7 +228,7 @@ pub(crate) struct GitBranchesRequest {
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitCurrentCommitRequest {
+pub struct GitCurrentCommitRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]
@@ -237,7 +237,7 @@ pub(crate) struct GitCurrentCommitRequest {
 /// Request for x.ai/git/checkout_commit extension method.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GitCheckoutCommitRequest {
+pub struct GitCheckoutCommitRequest {
     #[serde(default)]
     pub session_id: Option<acp::SessionId>,
     #[serde(default)]

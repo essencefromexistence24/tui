@@ -1,0 +1,149 @@
+#![allow(unsafe_code)]
+#![allow(clippy::all)]
+#![allow(clippy::pedantic)]
+#![allow(clippy::nursery)]
+#![allow(clippy::cargo)]
+
+fb_macro::mod_pub!(keymap mgr open opener plugin popup preview tasks theme which vfs);
+
+fb_macro::mod_flat!(icon layout pattern platform preset priority style utils yazi);
+
+use std::io::{Read, Write};
+
+use fb_shared::{RoCell, SyncCell};
+use fb_tty::TTY;
+
+pub static YAZI: RoCell<yazi::Yazi> = RoCell::new();
+pub static KEYMAP: RoCell<keymap::Keymap> = RoCell::new();
+pub static THEME: RoCell<theme::Theme> = RoCell::new();
+pub static LAYOUT: SyncCell<Layout> = SyncCell::new(Layout::default());
+
+pub fn init() -> anyhow::Result<()> {
+	if let Err(e) = try_init(true) {
+		wait_for_key(e)?;
+		try_init(false)?;
+	}
+	Ok(())
+}
+
+/// Initialize for an embedded host that already owns the terminal.
+///
+/// Unlike [`init`], this never writes to or reads from the global TTY when a
+/// user configuration is invalid; it silently falls back to DX presets.
+pub fn init_embedded() -> anyhow::Result<()> {
+	try_init(true).or_else(|_| try_init(false))
+}
+
+fn try_init(merge: bool) -> anyhow::Result<()> {
+	let mut yazi = Preset::yazi()?;
+	let mut keymap = Preset::keymap()?;
+
+	if merge {
+		yazi = yazi.deserialize_over(&yazi::Yazi::read()?)?;
+		keymap = keymap.deserialize_over(&keymap::Keymap::read()?)?;
+	}
+
+	YAZI.init(yazi.reshape()?);
+	KEYMAP.init(keymap.reshape()?);
+	Ok(())
+}
+
+pub fn init_flavor(light: bool) -> anyhow::Result<()> {
+	if let Err(e) = try_init_flavor(light, true) {
+		wait_for_key(e)?;
+		try_init_flavor(light, false)?;
+	}
+	Ok(())
+}
+
+pub fn init_flavor_embedded(light: bool) -> anyhow::Result<()> {
+	try_init_flavor(light, true).or_else(|_| try_init_flavor(light, false))
+}
+
+/// Apply a runtime TOML theme override on top of the embedded preset,
+/// rebuilding `THEME` so the file browser follows a host palette.
+///
+/// The embedded host owns the terminal, so unlike `init_flavor_embedded`
+/// this never reads user `theme.toml`; it starts from the preset and merges
+/// exactly the given `overrides` (typically colors pushed by the pager).
+pub fn override_theme(light: bool, overrides: &str) -> anyhow::Result<()> {
+	let built = build_theme_override(light, overrides)?;
+	let _old = THEME.drop();
+	THEME.init(built);
+	Ok(())
+}
+
+/// Parse and fully reshape an embedded-host override without mutating the
+/// process-global theme. Hosts use this to test generated runtime palettes
+/// against the real browser schema rather than merely checking TOML syntax.
+pub fn validate_theme_override(light: bool, overrides: &str) -> anyhow::Result<()> {
+	build_theme_override(light, overrides).map(drop)
+}
+
+fn build_theme_override(light: bool, overrides: &str) -> anyhow::Result<theme::Theme> {
+	let mut built = merge_theme_override(light, overrides)?.reshape(light)?;
+	let file = built.app.overall.fg.unwrap_or(ratatui::style::Color::Reset);
+	let primary = built.mgr.cwd.fg.unwrap_or(file);
+	// Name/extension icon rules beat condition rules. Recolor every retained
+	// preset glyph so no preset orange (or any other independent palette)
+	// leaks through an embedded host's runtime theme.
+	built.icon.recolor(file, primary, primary);
+	Ok(built)
+}
+
+fn merge_theme_override(light: bool, overrides: &str) -> anyhow::Result<theme::Theme> {
+	let mut preset = Preset::theme(light)?;
+	let theme = toml::de::DeTable::parse(overrides)?;
+	preset = error_with_input(preset.deserialize_over_with(theme), overrides)?;
+	Ok(preset)
+}
+
+fn try_init_flavor(light: bool, merge: bool) -> anyhow::Result<()> {
+	let mut preset = Preset::theme(light)?;
+
+	if merge {
+		let theme_str = theme::Theme::read()?;
+		let theme = toml::de::DeTable::parse(&theme_str)?;
+
+		let flavor_str = theme::Flavor::from_theme(&theme, &theme_str)?.read(light)?;
+
+		preset = preset.deserialize_over(&flavor_str)?;
+		preset = error_with_input(preset.deserialize_over_with(theme), &theme_str)?;
+	}
+
+	THEME.init(preset.reshape(light)?);
+	Ok(())
+}
+
+fn wait_for_key(e: anyhow::Error) -> anyhow::Result<()> {
+	let stdout = &mut *TTY.lockout();
+
+	writeln!(stdout, "{e}")?;
+	if let Some(src) = e.source() {
+		writeln!(stdout, "\nCaused by:\n{src}")?;
+	}
+
+	use crossterm::style::{Attribute, Print, SetAttributes};
+	crossterm::execute!(
+		stdout,
+		SetAttributes(Attribute::Reverse.into()),
+		SetAttributes(Attribute::Bold.into()),
+		Print("Press <Enter> to continue with preset settings..."),
+		SetAttributes(Attribute::Reset.into()),
+		Print("\n"),
+	)?;
+
+	TTY.reader().read_exact(&mut [0])?;
+	Ok(())
+}
+
+pub(crate) fn error_with_input<T>(
+	result: Result<T, toml::de::Error>,
+	_input: &str,
+) -> Result<T, toml::de::Error> {
+	result.map_err(|err| {
+		// Note: set_input is not available in toml 0.8
+		// The error already contains the input context
+		err
+	})
+}

@@ -77,6 +77,23 @@ impl<'a> AgentStatusBar<'a> {
         )
     }
 
+    /// Build a compact `Line` with all items joined by separators.
+    /// Used for the bottom chrome right cluster.
+    pub fn into_compact_line(self) -> Line<'static> {
+        if self.items.is_empty() {
+            return Line::from("");
+        }
+        let sep = self.separator();
+        let mut spans: Vec<ratatui::text::Span<'static>> = Vec::new();
+        for (i, entry) in self.items.iter().enumerate() {
+            if i > 0 {
+                spans.push(sep.clone());
+            }
+            spans.extend(entry.line.spans.iter().cloned());
+        }
+        Line::from(spans)
+    }
+
     /// Render all items right-aligned into the given area.
     ///
     /// Layout: `··· item0 │ item1 │ item2` — separators appear only *between*
@@ -87,9 +104,6 @@ impl<'a> AgentStatusBar<'a> {
         if area.height == 0 || area.width == 0 || self.items.is_empty() {
             return HashMap::new();
         }
-
-        // Fill background
-        buf.set_style(area, Style::default().bg(self.theme.bg_base));
 
         let sep = self.separator();
         let sep_w = sep.width() as u16; // 3
@@ -105,6 +119,18 @@ impl<'a> AgentStatusBar<'a> {
         let start_x = area
             .x
             .saturating_add(area.width.saturating_sub(self.right_pad + total_width));
+
+        // Fill background only for the content area (not full width)
+        let fill_w = area.width.saturating_sub(start_x.saturating_sub(area.x));
+        let fill_area = Rect {
+            x: start_x,
+            y: area.y,
+            width: fill_w,
+            height: 1,
+        };
+        if fill_w > 0 {
+            buf.set_style(fill_area, Style::default().bg(self.theme.bg_base));
+        }
 
         let mut x = start_x;
         let mut areas = HashMap::new();

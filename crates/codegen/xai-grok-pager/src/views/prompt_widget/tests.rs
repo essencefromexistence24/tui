@@ -4623,3 +4623,71 @@
             "without the remap the chip keeps its own background"
         );
     }
+
+    #[test]
+    fn bottom_border_renders_at_minimum_and_taller_heights() {
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle {
+            focused: true,
+            show_prefix: true,
+            vpad_top: 1,
+            chrome: true,
+            chrome_pad_left: 2,
+            chrome_pad_right: 1,
+            ..Default::default()
+        };
+        let info = PromptInfo {
+            model_name: "grok-3",
+            mode_name: Some("Build"),
+            flags: &[],
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        for h in [3u16, 4, 5, 6] {
+            let area = Rect::new(0, 0, 40, h);
+            let mut buf = Buffer::empty(area);
+            pw.draw(&mut buf, area, None, &style, Some(&info), None);
+            let last = h - 1;
+            assert_eq!(buf.cell((0, last)).unwrap().symbol(), "\u{2570}");
+            assert_eq!(buf.cell((39, last)).unwrap().symbol(), "\u{256f}");
+            let row = buf_text_at(&buf, 0, 40, last);
+            assert!(
+                row.contains("grok") && row.contains("Build"),
+                "info line must show model + mode: {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn bottom_border_keeps_info_line_when_collapsed_to_minimum() {
+        let mut pw = PromptWidget::new();
+        let style = PromptStyle {
+            focused: false,
+            show_prefix: true,
+            vpad_top: 1,
+            chrome: true,
+            chrome_pad_left: 2,
+            chrome_pad_right: 1,
+            ..Default::default()
+        };
+        let info = PromptInfo {
+            model_name: "grok-3",
+            mode_name: Some("Build"),
+            flags: &[],
+            multiline: false,
+            usage_warning: None,
+            usage_warning_critical: false,
+        };
+        let area = Rect::new(0, 0, 40, 3);
+        let mut buf = Buffer::empty(area);
+        pw.draw(&mut buf, area, None, &style, Some(&info), None);
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "\u{256d}");
+        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "\u{2570}");
+        assert_eq!(buf.cell((39, 2)).unwrap().symbol(), "\u{256f}");
+        let row = buf_text_at(&buf, 0, 40, 2);
+        assert!(
+            row.contains("grok") && row.contains("Build"),
+            "info line must survive collapse: {row}"
+        );
+    }

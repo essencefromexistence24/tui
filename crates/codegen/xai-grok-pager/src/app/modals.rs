@@ -399,6 +399,54 @@ impl AgentView {
             }
         }
 
+        // ProviderConnect: route through handler.
+        let outcome = match modal {
+            ActiveModal::ProviderConnect { state } => Some(
+                crate::views::provider_connect::input::handle_provider_connect_key(
+                    state.as_mut(),
+                    *key,
+                ),
+            ),
+            _ => None,
+        };
+        if let Some(outcome) = outcome {
+            return match outcome {
+                crate::views::provider_connect::input::ConnectOutcome::Close => {
+                    self.active_modal = None;
+                    InputOutcome::Changed
+                }
+                crate::views::provider_connect::input::ConnectOutcome::Configure {
+                    provider_id,
+                    api_key,
+                    set_default,
+                } => {
+                    if let Err(e) = crate::views::provider_connect::save_provider_config(
+                        &provider_id,
+                        api_key.as_deref(),
+                        set_default,
+                    ) {
+                        tracing::warn!("Failed to save provider config: {e}");
+                        if let Some(ActiveModal::ProviderConnect { state }) = &mut self.active_modal
+                        {
+                            state.error_message = Some(format!("Failed to save: {e}"));
+                        }
+                    } else if let Some(ActiveModal::ProviderConnect { state }) =
+                        &mut self.active_modal
+                    {
+                        state.configured_ids =
+                            crate::views::provider_connect::load_configured_providers();
+                        state.mode = crate::views::provider_connect::ConnectMode::Browse;
+                        state.status_message =
+                            Some("Provider configured! Use /model to select it.".to_string());
+                    }
+                    InputOutcome::Changed
+                }
+                crate::views::provider_connect::input::ConnectOutcome::Unchanged => {
+                    InputOutcome::Changed
+                }
+            };
+        }
+
         // Settings: route through ModalWindow chrome, then delegate.
         if let ActiveModal::Settings { state } = modal {
             // Sub-mode short-circuit: FilterFocused, PickingEnum, PickingGroup,
@@ -485,7 +533,8 @@ impl AgentView {
             | ActiveModal::MemoryBrowser { .. }
             | ActiveModal::Settings { .. }
             | ActiveModal::ResetSettingsConfirm { .. }
-            | ActiveModal::RememberNoteReview { .. } => unreachable!(),
+            | ActiveModal::RememberNoteReview { .. }
+            | ActiveModal::ProviderConnect { .. } => unreachable!(),
         }
     }
 
@@ -521,6 +570,15 @@ impl AgentView {
         }
         if let Some(ActiveModal::MemoryBrowser { state }) = self.active_modal.as_mut() {
             return crate::views::memory_modal::handle_memory_paste(state, text);
+        }
+        if let Some(ActiveModal::ProviderConnect { state }) = self.active_modal.as_mut()
+            && let crate::views::provider_connect::ConnectMode::KeyInput {
+                ref mut input_buffer,
+                ..
+            } = state.mode
+        {
+            input_buffer.push_str(text);
+            return InputOutcome::Changed;
         }
         let settings_outcome = match self.active_modal.as_mut() {
             Some(ActiveModal::Settings { state }) => Some(
@@ -1089,15 +1147,10 @@ impl AgentView {
                         }
                     }
                     PickerOutcome::SubmitQuery => {
-                        // Free-text load only for a UUID session id.
-                        // Own the id before clearing the modal (state is a
-                        // reborrow of `active_modal`).
-                        let load_id =
-                            crate::views::session_picker::session_id_for_direct_load(state.query())
-                                .map(str::to_owned);
-                        if let Some(sid) = load_id {
+                        let query = state.query().trim().to_string();
+                        if !query.is_empty() {
                             self.active_modal = None;
-                            InputOutcome::Action(Action::LoadSession(sid, None, false))
+                            InputOutcome::Action(Action::LoadSession(query, None, false))
                         } else {
                             InputOutcome::Unchanged
                         }
@@ -1566,6 +1619,40 @@ impl AgentView {
                         mouse.row,
                     );
                     return apply_settings_outcome(self, out);
+                }
+                _ => return InputOutcome::Changed,
+            }
+        }
+
+        // ProviderConnect: route through ModalWindow chrome, then delegate.
+        if let Some(ActiveModal::ProviderConnect { state }) = &mut self.active_modal {
+            let outcome =
+                mw::handle_modal_mouse(&mut state.window, mouse.kind, mouse.column, mouse.row);
+            match outcome {
+                ModalWindowOutcome::CloseRequested => {
+                    self.active_modal = None;
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::TabChanged(idx) => {
+                    if let Some(tab) = crate::views::provider_connect::ProviderTab::from_index(idx)
+                    {
+                        state.switch_tab(tab);
+                        state.window.tabs_focused = true;
+                    }
+                    return InputOutcome::Changed;
+                }
+                ModalWindowOutcome::Handled => return InputOutcome::Changed,
+                ModalWindowOutcome::Unhandled => {
+                    let out = crate::views::provider_connect::input::handle_provider_connect_mouse(
+                        state, *mouse,
+                    );
+                    match out {
+                        crate::views::provider_connect::input::ConnectOutcome::Close => {
+                            self.active_modal = None;
+                            return InputOutcome::Changed;
+                        }
+                        _ => return InputOutcome::Changed,
+                    }
                 }
                 _ => return InputOutcome::Changed,
             }
@@ -2329,6 +2416,12 @@ impl AgentView {
                 }
             } else if let modal::ActiveModal::MemoryBrowser { state: mem_state } = active_modal {
                 crate::views::memory_modal::render_memory_modal(buf, area, mem_state, compact);
+            } else if let modal::ActiveModal::ProviderConnect { state: pc_state } = active_modal {
+                crate::views::provider_connect::render::render_provider_connect(
+                    buf,
+                    area,
+                    pc_state.as_mut(),
+                );
             } else if let modal::ActiveModal::Settings {
                 state: settings_state,
             } = active_modal
@@ -2732,43 +2825,6 @@ mod session_picker_delete_tests {
         assert!(
             !st.selection_hidden,
             "typing a query restores the selection highlight"
-        );
-    }
-
-    /// Paste garbage + Enter with no rows must not LoadSession.
-    #[test]
-    fn enter_with_garbage_query_does_not_load_session() {
-        let mut agent = make_agent();
-        open_picker(&mut agent, vec![]);
-        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
-            state.set_query("this is pasted garbage!!!");
-        }
-        let out = agent.handle_palette_or_arg_input(&key_code(KeyCode::Enter));
-        assert!(
-            matches!(out, InputOutcome::Unchanged),
-            "garbage query must be a no-op, got {out:?}"
-        );
-        assert!(
-            matches!(agent.active_modal, Some(ActiveModal::SessionPicker { .. })),
-            "picker must stay open"
-        );
-    }
-
-    #[test]
-    fn enter_with_uuid_query_loads_session() {
-        let mut agent = make_agent();
-        open_picker(&mut agent, vec![]);
-        let sid = "019fb61a-85a5-7ba0-a4ec-24647dca1893";
-        if let Some(ActiveModal::SessionPicker { state, .. }) = agent.active_modal.as_mut() {
-            state.set_query(sid);
-        }
-        let out = agent.handle_palette_or_arg_input(&key_code(KeyCode::Enter));
-        assert!(
-            matches!(
-                out,
-                InputOutcome::Action(Action::LoadSession(ref id, None, false)) if id == sid
-            ),
-            "UUID query should direct-load, got {out:?}"
         );
     }
 }

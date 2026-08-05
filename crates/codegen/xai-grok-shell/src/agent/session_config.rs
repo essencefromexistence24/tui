@@ -14,7 +14,7 @@ pub(crate) const SELECTABLE_REASONING_EFFORTS: [ReasoningEffort; 5] = [
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SessionConfigOption {
+pub struct SessionConfigOption {
     pub id: String,
     pub category: String,
     pub label: String,
@@ -25,7 +25,7 @@ pub(crate) struct SessionConfigOption {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct GrokSessionDetail {
+pub struct GrokSessionDetail {
     pub session_id: String,
     pub kind: String,
     pub cwd: String,
@@ -35,7 +35,7 @@ pub(crate) struct GrokSessionDetail {
 }
 
 impl GrokSessionDetail {
-    pub(crate) fn build(
+    pub fn build(
         session_id: String,
         cwd: String,
         current_model_id: String,

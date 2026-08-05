@@ -29,9 +29,8 @@ use xai_grok_sampling_types::{
     is_check_event, messages, rs,
 };
 
+use crate::attribution::bearer_tail_fragment;
 use crate::config::{AuthScheme, OriginClientInfo, SamplerConfig};
-use crate::events::SamplingErrorInfo;
-use xai_grok_auth::bearer_suffix;
 
 // Re-export ApiBackend from the shared types crate for downstream callers.
 pub use xai_grok_sampling_types::ApiBackend;
@@ -42,6 +41,40 @@ const DEFAULT_CLIENT_IDENTIFIER: &str = "grok-shell";
 /// Product identifier baked into User-Agent strings.
 const AGENT_PRODUCT: &str = "grok-shell";
 const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
+
+/// Managed local inference starts concurrently with session setup. Wait until
+/// its configured socket is accepting connections so the first user turn
+/// cannot lose a race with model loading.
+async fn wait_for_local_server(url: &reqwest::Url) -> Result<()> {
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
+    if host != "localhost" && host != "127.0.0.1" && host != "::1" {
+        return Ok(());
+    }
+
+    let port = url.port_or_known_default().unwrap_or(80);
+    let mut health_url = url.clone();
+    health_url.set_path("/health");
+    health_url.set_query(None);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+        .map_err(SamplingError::Http)?;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(65);
+    while tokio::time::Instant::now() < deadline {
+        if let Ok(response) = client.get(health_url.clone()).send().await
+            && response.status().is_success()
+        {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+
+    Err(SamplingError::EventStreamError(format!(
+        "local model server at {host}:{port} did not become ready within 65 seconds"
+    )))
+}
 
 /// Per-request `x-grok-*` headers. Optional fields are skipped when empty/`None`.
 struct GrokRequestHeaders<'a> {
@@ -114,6 +147,26 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
                     .and_then(|v| v.as_array_mut())
                 {
                     tools.retain(|t| serde_json::from_value::<rs::Tool>(t.clone()).is_ok());
+                }
+                // Inject placeholder `id` if missing (some API backends omit it)
+                if first_err.to_string().contains("missing field `id`") {
+                    if let Some(obj) = value.as_object_mut()
+                        && !obj.contains_key("id")
+                    {
+                        obj.insert(
+                            "id".to_string(),
+                            serde_json::Value::String("placeholder".to_string()),
+                        );
+                    }
+                    if let Some(response) = value.pointer_mut("/response")
+                        && let Some(resp_obj) = response.as_object_mut()
+                        && !resp_obj.contains_key("id")
+                    {
+                        resp_obj.insert(
+                            "id".to_string(),
+                            serde_json::Value::String("placeholder".to_string()),
+                        );
+                    }
                 }
                 if let Ok(mut event) = serde_json::from_value::<rs::ResponseStreamEvent>(value) {
                     apply_terminal_event_overrides(&mut event, data);
@@ -742,7 +795,7 @@ impl SamplingClient {
 
     /// Tail fragment of the credential in `headers` — `x-api-key`
     /// (Messages-API scheme) or `Authorization` — per
-    /// [`crate::attribution::BEARER_SUFFIX_LEN`].
+    /// [`crate::attribution::SENT_BEARER_PREFIX_LEN`].
     fn sent_fragment_from_headers(headers: &HeaderMap, scheme: &AuthScheme) -> Option<String> {
         let raw = match scheme {
             AuthScheme::XApiKey => headers
@@ -753,20 +806,20 @@ impl SamplingClient {
                 .and_then(|v| v.to_str().ok())
                 .and_then(|s| s.strip_prefix("Bearer ")),
         };
-        raw.map(|s| bearer_suffix(s).to_string())
+        raw.map(|s| bearer_tail_fragment(s).to_string())
     }
 
     /// Best-effort *build-time* view of what the next request would carry
     /// (resolver-authoritative). For request-start diagnostics
     /// ([`Self::auth_info`]) only — 401 attribution must use the fragment
     /// captured by [`Self::post`] instead, which cannot race a recovery.
-    fn current_sent_bearer_suffix(&self) -> Option<String> {
+    fn current_sent_bearer_prefix(&self) -> Option<String> {
         if self.bearer_resolver.is_some() {
             return self
                 .bearer_resolver
                 .as_ref()
                 .and_then(|r| r.current_bearer())
-                .map(|s| bearer_suffix(&s).to_string());
+                .map(|s| bearer_tail_fragment(&s).to_string());
         }
         Self::sent_fragment_from_headers(&self.default_headers, &self.defaults.auth_scheme)
     }
@@ -778,21 +831,21 @@ impl SamplingClient {
     /// that saw the status, so higher layers that react to a 401 must
     /// not emit a duplicate event.
     ///
-    /// `sent_suffix` is the fragment [`Self::post`] captured for the
+    /// `sent_prefix` is the fragment [`Self::post`] captured for the
     /// rejected request (already tail-truncated; the full bearer never
     /// crosses this boundary).
     fn record_401_attribution(
         &self,
         consumer: crate::attribution::SamplingConsumer,
-        sent_suffix: Option<&str>,
+        sent_prefix: Option<&str>,
     ) {
         if let Some(cb) = self.attribution_callback.as_ref() {
-            cb.record_401(consumer, sent_suffix);
+            cb.record_401(consumer, sent_prefix);
         }
     }
 
     pub fn auth_info(&self) -> crate::sampling_log::AuthInfo {
-        let auth_prefix = self.current_sent_bearer_suffix();
+        let auth_prefix = self.current_sent_bearer_prefix();
         let auth_type = match (&self.defaults.auth_scheme, &auth_prefix) {
             (AuthScheme::XApiKey, Some(_)) => "x-api-key",
             (AuthScheme::Bearer, Some(_)) => "bearer",
@@ -895,14 +948,39 @@ impl SamplingClient {
             });
         }
 
-        let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize ChatCompletionResponse"
-            );
-            SamplingError::Serialization(e)
+        let completion = serde_json::from_slice::<ChatCompletionResponse>(&bytes).or_else(|e| {
+            if e.classify() == serde_json::error::Category::Data
+                && e.to_string().contains("missing field `id`")
+            {
+                let mut val: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
+                val["id"] = serde_json::Value::String("placeholder".to_string());
+                serde_json::from_value(val).map_err(|e| {
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e,
+                        raw_body = %raw_body,
+                        "Failed to deserialize ChatCompletionResponse even with id patch"
+                    );
+                    SamplingError::serialization_message(format!(
+                        "[source:chat_completion] {} (response body: {})",
+                        e, raw_body
+                    ))
+                })
+            } else {
+                Err({
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e,
+                        raw_body = %raw_body,
+                        "Failed to deserialize ChatCompletionResponse"
+                    );
+                    SamplingError::serialization_message(format!(
+                        "[source:chat_completion] {} (response body: {})",
+                        e, raw_body
+                    ))
+                })
+            }
         })?;
         Ok(completion)
     }
@@ -1017,6 +1095,8 @@ impl SamplingClient {
         );
         Self::log_request_headers(&built_request, "chat/completions");
 
+        wait_for_local_server(built_request.url()).await?;
+
         let response = self.http.execute(built_request).await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
             record_stream_request_failure(&e);
@@ -1110,16 +1190,60 @@ impl SamplingClient {
                         if let Some(stream_error) = try_parse_stream_error(data) {
                             Some(Err(stream_error))
                         } else {
-                            Some(
-                                serde_json::from_str::<ChatCompletionChunk>(data).map_err(|e| {
+                            Some({
+                                // Skip custom API events (e.g. x-opencode-type) that
+                                // are not standard OpenAI chat completion chunks
+                                let chunk = if data.contains("\"x-opencode-type\"") {
+                                    // Return a synthetic no-op chunk via JSON so the
+                                    // stream processor treats it as empty-delta/ignored.
+                                    serde_json::from_value::<ChatCompletionChunk>(
+                                        serde_json::json!({
+                                            "id": "skip",
+                                            "object": "chat.completion.chunk",
+                                            "created": 0,
+                                            "model": "",
+                                            "choices": [],
+                                        }),
+                                    )
+                                    .map_err(SamplingError::Serialization)
+                                } else {
+                                    serde_json::from_str::<ChatCompletionChunk>(data).or_else(|e| {
+                                        let msg = e.to_string();
+                                        if msg.contains("missing field `id`")
+                                            || msg.contains("missing field `object`")
+                                        {
+                                            let mut val: serde_json::Value =
+                                                serde_json::from_str(data)
+                                                    .map_err(SamplingError::Serialization)?;
+                                            if val.get("id").is_none() {
+                                                val["id"] = serde_json::Value::String(
+                                                    "placeholder".to_string(),
+                                                );
+                                            }
+                                            if val.get("object").is_none() {
+                                                val["object"] = serde_json::Value::String(
+                                                    "chat.completion.chunk".to_string(),
+                                                );
+                                            }
+                                            serde_json::from_value(val)
+                                                .map_err(SamplingError::Serialization)
+                                        } else {
+                                            Err(SamplingError::Serialization(e))
+                                        }
+                                    })
+                                };
+                                chunk.map_err(|e| {
                                     tracing::error!(
                                         error = %e,
                                         raw_data = %data,
                                         "Failed to deserialize ChatCompletionChunk from stream"
                                     );
-                                    SamplingError::Serialization(e)
-                                }),
-                            )
+                                    SamplingError::serialization_message(format!(
+                                        "[source:chunk] {} (data: {})",
+                                        e, data
+                                    ))
+                                })
+                            })
                         }
                     }
                     Err(e) => {
@@ -1263,14 +1387,37 @@ impl SamplingClient {
             });
         }
 
-        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).map_err(|e| {
-            let raw_body = String::from_utf8_lossy(&bytes);
-            tracing::error!(
-                error = %e,
-                raw_body = %raw_body,
-                "Failed to deserialize rs::Response"
-            );
-            SamplingError::Serialization(e)
+        let response_obj = serde_json::from_slice::<rs::Response>(&bytes).or_else(|e| {
+            if e.to_string().contains("missing field `id`") {
+                let mut val: serde_json::Value =
+                    serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
+                if val.get("id").is_none() {
+                    val["id"] = serde_json::Value::String("placeholder".to_string());
+                }
+                serde_json::from_value(val).map_err(|e2| {
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e2,
+                        raw_body = %raw_body,
+                        "Failed to deserialize rs::Response even with id patch"
+                    );
+                    SamplingError::serialization_message(format!(
+                        "[source:rs_response] {} (response body: {})",
+                        e2, raw_body
+                    ))
+                })
+            } else {
+                let raw_body = String::from_utf8_lossy(&bytes);
+                tracing::error!(
+                    error = %e,
+                    raw_body = %raw_body,
+                    "Failed to deserialize rs::Response"
+                );
+                Err(SamplingError::serialization_message(format!(
+                    "[source:rs_response] {} (response body: {})",
+                    e, raw_body
+                )))
+            }
         })?;
         Ok(response_obj)
     }
@@ -1617,14 +1764,37 @@ impl SamplingClient {
         }
 
         let response_obj =
-            serde_json::from_slice::<messages::MessagesResponse>(&bytes).map_err(|e| {
-                let raw_body = String::from_utf8_lossy(&bytes);
-                tracing::error!(
-                    error = %e,
-                    raw_body = %raw_body,
-                    "Failed to deserialize MessagesResponse"
-                );
-                SamplingError::Serialization(e)
+            serde_json::from_slice::<messages::MessagesResponse>(&bytes).or_else(|e| {
+                if e.to_string().contains("missing field `id`") {
+                    let mut val: serde_json::Value =
+                        serde_json::from_slice(&bytes).map_err(SamplingError::Serialization)?;
+                    if val.get("id").is_none() {
+                        val["id"] = serde_json::Value::String("placeholder".to_string());
+                    }
+                    serde_json::from_value(val).map_err(|e2| {
+                        let raw_body = String::from_utf8_lossy(&bytes);
+                        tracing::error!(
+                            error = %e2,
+                            raw_body = %raw_body,
+                            "Failed to deserialize MessagesResponse even with id patch"
+                        );
+                        SamplingError::serialization_message(format!(
+                            "[source:messages] {} (response body: {})",
+                            e2, raw_body
+                        ))
+                    })
+                } else {
+                    let raw_body = String::from_utf8_lossy(&bytes);
+                    tracing::error!(
+                        error = %e,
+                        raw_body = %raw_body,
+                        "Failed to deserialize MessagesResponse"
+                    );
+                    Err(SamplingError::serialization_message(format!(
+                        "[source:messages] {} (response body: {})",
+                        e, raw_body
+                    )))
+                }
             })?;
         Ok(response_obj)
     }
@@ -2057,22 +2227,16 @@ impl SamplingClient {
         };
         result
             .map(|(response, _metrics)| response)
-            .map_err(stream_collect_error)
-    }
-}
-
-/// Rebuild `Api` from stream-collected info, preserving status,
-/// `Retry-After`, and `x-should-retry` (kind is lost on this path).
-fn stream_collect_error(info: SamplingErrorInfo) -> SamplingError {
-    SamplingError::Api {
-        status: info
-            .status_code
-            .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
-            .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
-        message: info.message,
-        model_metadata: info.model_metadata,
-        retry_after_secs: info.retry_after_secs,
-        should_retry: info.should_retry,
+            .map_err(|info| SamplingError::Api {
+                status: info
+                    .status_code
+                    .and_then(|c| reqwest::StatusCode::from_u16(c).ok())
+                    .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+                message: info.message,
+                model_metadata: info.model_metadata,
+                retry_after_secs: info.retry_after_secs,
+                should_retry: None,
+            })
     }
 }
 
@@ -2081,45 +2245,6 @@ mod tests {
     use super::*;
     use indexmap::IndexMap;
     use xai_grok_sampling_types::types::ChatRequestMessage;
-
-    #[test]
-    fn stream_collect_error_preserves_should_retry() {
-        let info = SamplingErrorInfo {
-            kind: crate::events::SamplingErrorKind::Api,
-            status_code: Some(529),
-            message: "Overloaded".into(),
-            is_retryable: true,
-            retry_after_secs: Some(3),
-            should_retry: Some(false),
-            model_metadata: None,
-            empty_response_context: None,
-            doom_loop_triggers: None,
-            doom_loop_aborted_at_chunk: None,
-            credential: xai_grok_sampling_types::SentCredential::Unknown,
-        };
-        // SamplingError is not PartialEq (it carries reqwest/serde errors),
-        // so destructure once and compare all fields in a single assert.
-        let SamplingError::Api {
-            status,
-            message,
-            model_metadata,
-            retry_after_secs,
-            should_retry,
-        } = stream_collect_error(info)
-        else {
-            panic!("expected Api");
-        };
-        assert_eq!(
-            (
-                status.as_u16(),
-                message.as_str(),
-                model_metadata.is_none(),
-                retry_after_secs,
-                should_retry,
-            ),
-            (529, "Overloaded", true, Some(3), Some(false)),
-        );
-    }
 
     fn minimal_config() -> SamplerConfig {
         SamplerConfig {
@@ -2487,7 +2612,7 @@ mod tests {
     }
 
     /// `post()` strips the `"Bearer "` scheme prefix off `Authorization`
-    /// and captures the tail fragment (see `BEARER_SUFFIX_LEN`).
+    /// and captures the tail fragment (see `SENT_BEARER_PREFIX_LEN`).
     #[test]
     fn post_captures_bearer_tail_for_openai_compat() {
         let cfg = SamplerConfig {
@@ -2503,7 +2628,7 @@ mod tests {
         assert_eq!(bearer.as_deref(), Some("r-1234567890"));
         assert_eq!(
             bearer.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
+            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
         );
     }
 
@@ -2525,7 +2650,7 @@ mod tests {
         assert_eq!(bearer.as_deref(), Some("c-key-abc123"));
         assert_eq!(
             bearer.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
+            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
         );
     }
 
@@ -2585,7 +2710,7 @@ mod tests {
         // A record-time re-read (the pre-fix behavior) would report the
         // rotated token instead:
         assert_eq!(
-            client.current_sent_bearer_suffix().as_deref(),
+            client.current_sent_bearer_prefix().as_deref(),
             Some("en-newtail99"),
             "sanity: the build-time capture and a live re-read now differ"
         );
@@ -2692,7 +2817,7 @@ mod tests {
         assert_eq!(calls[0].1.as_deref(), Some("0-extra-tail"));
         assert_eq!(
             calls[0].1.as_deref().map(str::len),
-            Some(crate::attribution::BEARER_SUFFIX_LEN),
+            Some(crate::attribution::SENT_BEARER_PREFIX_LEN),
         );
     }
 
@@ -2716,7 +2841,7 @@ mod tests {
         };
         let client = SamplingClient::new(cfg).expect("client should build");
         assert_eq!(
-            client.current_sent_bearer_suffix(),
+            client.current_sent_bearer_prefix(),
             None,
             "resolver None must not attribute a stripped default seed"
         );

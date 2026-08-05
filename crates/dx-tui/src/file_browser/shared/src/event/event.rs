@@ -1,0 +1,37 @@
+use crossterm::event::{KeyEvent, MouseEvent};
+use tokio::sync::mpsc;
+
+use super::ActionCow;
+use crate::RoCell;
+
+static TX: RoCell<mpsc::UnboundedSender<Event>> = RoCell::new();
+static RX: RoCell<mpsc::UnboundedReceiver<Event>> = RoCell::new();
+
+#[derive(Debug)]
+pub enum Event {
+	Call(ActionCow),
+	Seq(Vec<ActionCow>),
+	Render(bool),
+	Key(KeyEvent),
+	Mouse(MouseEvent),
+	Resize,
+	Focus,
+	Paste(String),
+	Timer, // Animation timer tick
+}
+
+impl Event {
+	#[inline]
+	pub fn init() {
+		let (tx, rx) = mpsc::unbounded_channel();
+		TX.init(tx);
+		RX.init(rx);
+	}
+
+	#[inline]
+	pub fn take() -> mpsc::UnboundedReceiver<Self> { RX.drop() }
+
+	#[inline]
+	pub fn emit(self) { TX.send(self).ok(); }
+}
+

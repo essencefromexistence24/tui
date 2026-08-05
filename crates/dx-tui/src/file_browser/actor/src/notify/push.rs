@@ -1,0 +1,39 @@
+use std::time::Instant;
+
+use anyhow::Result;
+use fb_core::notify::Message;
+use fb_dds::spark::SparkKind;
+use fb_macro::{act, succ};
+use fb_parser::notify::PushOpt;
+use fb_shared::{Source, data::Data};
+
+use crate::{Actor, Ctx};
+
+pub struct Push;
+
+impl Actor for Push {
+	type Options = PushOpt;
+
+	const NAME: &str = "push";
+
+	fn act(cx: &mut Ctx, opt: Self::Options) -> Result<Data> {
+		let instant = Instant::now();
+
+		let mut msg = Message::from(opt);
+		msg.timeout += instant - cx.notify.messages.first().map_or(instant, |m| m.instant);
+
+		if cx.notify.messages.iter().all(|m| m != &msg) {
+			cx.notify.messages.push(msg);
+			act!(notify:tick, cx)?;
+		}
+		succ!();
+	}
+
+	fn hook(cx: &Ctx, _: &Self::Options) -> Option<SparkKind> {
+		match cx.source() {
+			Source::Relay => Some(SparkKind::RelayNotifyPush),
+			_ => None,
+		}
+	}
+}
+

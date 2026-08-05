@@ -1,0 +1,1076 @@
+//! File open dialog state and logic
+//!
+//! This module provides a plugin-free file browser for the Open File command.
+//! It renders a structured popup above the prompt with sortable columns,
+//! navigation shortcuts, and filtering.
+
+use crate::input::fuzzy::fuzzy_match;
+use crate::model::filesystem::{DirEntry, EntryType, FileSystem};
+use rust_i18n::t;
+use std::cmp::Ordering;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::SystemTime;
+
+/// A file entry in the browser with filter match state
+#[derive(Debug, Clone)]
+pub struct FileOpenEntry {
+	/// The filesystem entry
+	pub fs_entry: DirEntry,
+	/// Whether this entry matches the current filter
+	pub matches_filter: bool,
+	/// Fuzzy match score (higher is better match, used for sorting when filter is active)
+	pub match_score: i32,
+}
+
+/// Sort mode for file list
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortMode {
+	#[default]
+	Name,
+	Size,
+	Modified,
+	Type,
+}
+
+/// Which section of the file browser is active
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FileOpenSection {
+	/// Navigation shortcuts (parent, root, home)
+	Navigation,
+	/// Main file list
+	#[default]
+	Files,
+}
+
+/// Navigation shortcut entry
+#[derive(Debug, Clone)]
+pub struct NavigationShortcut {
+	/// Display label (e.g., "~", "..", "/")
+	pub label: String,
+	/// Full path to navigate to
+	pub path: PathBuf,
+	/// Description (e.g., "Home directory")
+	pub description: String,
+}
+
+/// State for the file open dialog
+#[derive(Clone)]
+pub struct FileOpenState {
+	/// Current directory being browsed
+	pub current_dir: PathBuf,
+
+	/// Raw, unfiltered directory entries as loaded from the filesystem
+	/// (excludes the synthesized ".." entry). Hidden files are kept here
+	/// even when not currently displayed, so the visible `entries` list can
+	/// be rebuilt — to reveal or hide dotfiles — without re-reading the
+	/// directory from disk.
+	raw_entries: Vec<DirEntry>,
+
+	/// Directory entries with metadata (the currently displayed subset of
+	/// `raw_entries`, with the synthesized ".." prepended).
+	pub entries: Vec<FileOpenEntry>,
+
+	/// Whether directory is currently loading
+	pub loading: bool,
+
+	/// Error message if directory load failed
+	pub error: Option<String>,
+
+	/// Current sort mode
+	pub sort_mode: SortMode,
+
+	/// Sort direction (true = ascending)
+	pub sort_ascending: bool,
+
+	/// Selected index in the current section (None = no selection)
+	pub selected_index: Option<usize>,
+
+	/// Scroll offset for file list
+	pub scroll_offset: usize,
+
+	/// Number of file rows visible in the viewport, as reported by the
+	/// renderer on the previous frame. Used by selection actions to clamp
+	/// `scroll_offset` to the actual viewport instead of a fixed default —
+	/// the renderer is the only place that knows the real viewport height.
+	pub last_visible_rows: usize,
+
+	/// Which section is currently active
+	pub active_section: FileOpenSection,
+
+	/// Filter text (from prompt input)
+	pub filter: String,
+
+	/// Navigation shortcuts
+	pub shortcuts: Vec<NavigationShortcut>,
+
+	/// Selected shortcut index (when in Navigation section)
+	pub selected_shortcut: usize,
+
+	/// Whether to show hidden files
+	pub show_hidden: bool,
+
+	/// Whether to auto-detect encoding when opening files (true by default)
+	/// When false, user will be prompted to select encoding after file selection
+	pub detect_encoding: bool,
+
+	/// Filesystem for checking path existence (used for drive letter detection on Windows)
+	filesystem: Arc<dyn FileSystem + Send + Sync>,
+}
+
+impl FileOpenState {
+	/// Create a new file open state for the given directory.
+	/// Only builds basic shortcuts synchronously; async shortcuts (documents, downloads,
+	/// Windows drives) should be loaded separately via the async bridge.
+	pub fn new(
+		dir: PathBuf,
+		show_hidden: bool,
+		filesystem: Arc<dyn FileSystem + Send + Sync>,
+	) -> Self {
+		// Only build sync shortcuts immediately - async shortcuts are loaded in background
+		let shortcuts = Self::build_shortcuts_sync(&dir, &*filesystem);
+		Self {
+			current_dir: dir,
+			raw_entries: Vec::new(),
+			entries: Vec::new(),
+			loading: true,
+			error: None,
+			sort_mode: SortMode::Name,
+			sort_ascending: true,
+			selected_index: None,
+			scroll_offset: 0,
+			last_visible_rows: 0,
+			active_section: FileOpenSection::Files,
+			filter: String::new(),
+			shortcuts,
+			selected_shortcut: 0,
+			show_hidden,
+			detect_encoding: true,
+			filesystem,
+		}
+	}
+
+	/// Build basic navigation shortcuts synchronously (no slow filesystem checks).
+	/// These shortcuts are available immediately when the dialog opens.
+	fn build_shortcuts_sync(
+		current_dir: &Path,
+		filesystem: &dyn FileSystem,
+	) -> Vec<NavigationShortcut> {
+		let mut shortcuts = Vec::new();
+
+		// Parent directory
+		if let Some(parent) = current_dir.parent() {
+			shortcuts.push(NavigationShortcut {
+				label: "..".to_string(),
+				path: parent.to_path_buf(),
+				description: t!("file_browser.parent_dir").to_string(),
+			});
+		}
+
+		// Root directory
+		#[cfg(unix)]
+		{
+			shortcuts.push(NavigationShortcut {
+				label: "/".to_string(),
+				path: PathBuf::from("/"),
+				description: t!("file_browser.root_dir").to_string(),
+			});
+		}
+
+		// Home directory - use filesystem trait for remote filesystem support
+		// home_dir() is typically fast (reads env vars or registry)
+		if let Ok(home) = filesystem.home_dir() {
+			shortcuts.push(NavigationShortcut {
+				label: "~".to_string(),
+				path: home,
+				description: t!("file_browser.home_dir").to_string(),
+			});
+		}
+
+		shortcuts
+	}
+
+	/// Build additional shortcuts that require filesystem existence checks.
+	/// This is called asynchronously to avoid blocking the UI.
+	/// On Windows, this includes drive letter detection which can hang on unreachable network drives.
+	/// See issue #903.
+	pub fn build_shortcuts_async(filesystem: &dyn FileSystem) -> Vec<NavigationShortcut> {
+		let mut shortcuts = Vec::new();
+
+		// Documents directory - check existence via filesystem trait
+		if let Some(docs) = dirs::document_dir() {
+			if filesystem.exists(&docs) {
+				shortcuts.push(NavigationShortcut {
+					label: t!("file_browser.documents").to_string(),
+					path: docs,
+					description: t!("file_browser.documents_folder").to_string(),
+				});
+			}
+		}
+
+		// Downloads directory - check existence via filesystem trait
+		if let Some(downloads) = dirs::download_dir() {
+			if filesystem.exists(&downloads) {
+				shortcuts.push(NavigationShortcut {
+					label: t!("file_browser.downloads").to_string(),
+					path: downloads,
+					description: t!("file_browser.downloads_folder").to_string(),
+				});
+			}
+		}
+
+		// Windows: Add drive letters
+		// Note: This uses the FileSystem trait's exists() method to allow mocking in tests.
+		// On Windows with unreachable network drives, exists() can block for network timeout.
+		// This is now called asynchronously to prevent UI freezing (issue #903).
+		#[cfg(windows)]
+		{
+			for letter in b'A'..=b'Z' {
+				let path = PathBuf::from(format!("{}:\\", letter as char));
+				if filesystem.exists(&path) {
+					shortcuts.push(NavigationShortcut {
+						label: format!("{}:", letter as char),
+						path,
+						description: t!("file_browser.drive").to_string(),
+					});
+				}
+			}
+		}
+
+		shortcuts
+	}
+
+	/// Merge asynchronously-loaded shortcuts into the shortcuts list.
+	/// Called when async shortcut loading completes.
+	pub fn merge_async_shortcuts(&mut self, async_shortcuts: Vec<NavigationShortcut>) {
+		// Append async shortcuts to the existing list
+		self.shortcuts.extend(async_shortcuts);
+	}
+
+	/// Update shortcuts when directory changes (sync part only).
+	/// Async shortcuts should be loaded separately via load_file_open_shortcuts_async.
+	pub fn update_shortcuts(&mut self) {
+		self.shortcuts = Self::build_shortcuts_sync(&self.current_dir, &*self.filesystem);
+		self.selected_shortcut = 0;
+	}
+
+	/// Set entries from filesystem and apply initial sort.
+	///
+	/// Stores the full listing in `raw_entries` and builds the displayed
+	/// `entries` from it via [`Self::rebuild_entries`], honoring the current
+	/// hidden-file visibility and filter.
+	pub fn set_entries(&mut self, entries: Vec<DirEntry>) {
+		self.raw_entries = entries;
+		self.loading = false;
+		self.error = None;
+		self.rebuild_entries();
+		self.sort_entries();
+		// No selection by default - user must type or navigate to select
+		self.selected_index = None;
+		self.scroll_offset = 0;
+	}
+
+	/// Rebuild the displayed `entries` from `raw_entries`, prepending the
+	/// synthesized ".." entry and filtering out hidden files unless they are
+	/// currently revealed (see [`Self::is_revealed`]). Re-evaluates the active
+	/// filter against the resulting set.
+	fn rebuild_entries(&mut self) {
+		let mut result: Vec<FileOpenEntry> = Vec::new();
+
+		// Add ".." entry for parent directory navigation (unless at root)
+		if let Some(parent) = self.current_dir.parent() {
+			let parent_entry =
+				DirEntry::new(parent.to_path_buf(), "..".to_string(), EntryType::Directory);
+			result.push(FileOpenEntry { fs_entry: parent_entry, matches_filter: true, match_score: 0 });
+		}
+
+		let show_hidden = self.show_hidden;
+		let filter = self.filter.as_str();
+		result.extend(
+			self
+				.raw_entries
+				.iter()
+				.filter(|e| Self::is_revealed(&e.name, show_hidden, filter))
+				.cloned()
+				.map(|fs_entry| FileOpenEntry { fs_entry, matches_filter: true, match_score: 0 }),
+		);
+
+		self.entries = result;
+		self.apply_filter_internal();
+	}
+
+	/// Whether an entry named `name` should be displayed in the list.
+	///
+	/// Visible (non-dot) files are always shown. Hidden files are shown when
+	/// the user has explicitly enabled "Show Hidden", or when the active
+	/// filter is a prefix of the file's name (issue #2407). Using a prefix
+	/// rather than a special-cased "." means hidden files stay out of the way
+	/// until the query explicitly reaches for them: typing "." surfaces every
+	/// dotfile (it prefixes them all), while ".ba" narrows to just `.bashrc`,
+	/// and a non-dot query like "bash" never drags dotfiles in. The filter is
+	/// only the filename component (directory parts are stripped upstream in
+	/// `update_file_open_filter`), so the comparison is unambiguous.
+	fn is_revealed(name: &str, show_hidden: bool, filter: &str) -> bool {
+		if show_hidden || !Self::is_hidden(name) {
+			return true;
+		}
+		!filter.is_empty() && name.to_lowercase().starts_with(&filter.to_lowercase())
+	}
+
+	/// Set error state
+	pub fn set_error(&mut self, error: String) {
+		self.loading = false;
+		self.error = Some(error);
+		self.entries.clear();
+	}
+
+	/// Check if a filename is hidden (starts with .)
+	fn is_hidden(name: &str) -> bool {
+		name.starts_with('.')
+	}
+
+	/// Apply filter text to entries
+	/// When filter is active, entries are sorted by fuzzy match score (best matches first).
+	/// Non-matching entries are de-emphasized visually but stay at the bottom.
+	pub fn apply_filter(&mut self, filter: &str) {
+		self.filter = filter.to_string();
+		// Rebuild the displayed set so a filter that prefixes a hidden file's
+		// name reveals it (and clearing the filter hides it again). This also
+		// re-evaluates the fuzzy match state via `apply_filter_internal`.
+		self.rebuild_entries();
+
+		// When filter is non-empty, sort by match score (best matches first)
+		if !filter.is_empty() {
+			self.entries.sort_by(|a, b| {
+				// ".." always stays at top
+				let a_is_parent = a.fs_entry.name == "..";
+				let b_is_parent = b.fs_entry.name == "..";
+
+				if a_is_parent && !b_is_parent {
+					return Ordering::Less;
+				}
+				if !a_is_parent && b_is_parent {
+					return Ordering::Greater;
+				}
+
+				// Matching entries before non-matching
+				match (a.matches_filter, b.matches_filter) {
+					(true, false) => Ordering::Less,
+					(false, true) => Ordering::Greater,
+					(true, true) => {
+						// Both match: sort by score descending (higher score = better match)
+						b.match_score.cmp(&a.match_score)
+					}
+					(false, false) => {
+						// Neither match: keep alphabetical order
+						a.fs_entry.name.to_lowercase().cmp(&b.fs_entry.name.to_lowercase())
+					}
+				}
+			});
+
+			// Select first matching entry (skip "..")
+			let first_match =
+				self.entries.iter().position(|e| e.matches_filter && e.fs_entry.name != "..");
+			if let Some(idx) = first_match {
+				self.selected_index = Some(idx);
+				self.ensure_selected_visible();
+			} else {
+				self.selected_index = None;
+			}
+		} else {
+			// No filter: restore normal sort order and clear selection
+			self.sort_entries();
+			self.selected_index = None;
+		}
+	}
+
+	fn apply_filter_internal(&mut self) {
+		for entry in &mut self.entries {
+			if self.filter.is_empty() {
+				entry.matches_filter = true;
+				entry.match_score = 0;
+			} else {
+				let result = fuzzy_match(&self.filter, &entry.fs_entry.name);
+				entry.matches_filter = result.matched;
+				entry.match_score = result.score;
+			}
+		}
+	}
+
+	/// Sort entries according to current sort mode
+	pub fn sort_entries(&mut self) {
+		let sort_mode = self.sort_mode;
+		let ascending = self.sort_ascending;
+
+		self.entries.sort_by(|a, b| {
+			// ".." always stays at top
+			let a_is_parent = a.fs_entry.name == "..";
+			let b_is_parent = b.fs_entry.name == "..";
+			match (a_is_parent, b_is_parent) {
+				(true, false) => return Ordering::Less,
+				(false, true) => return Ordering::Greater,
+				(true, true) => return Ordering::Equal,
+				_ => {}
+			}
+
+			// Don't reorder based on filter match - just de-emphasize non-matching
+			// entries visually. Keep original sort order.
+
+			// Directories before files
+			match (a.fs_entry.is_dir(), b.fs_entry.is_dir()) {
+				(true, false) => return Ordering::Less,
+				(false, true) => return Ordering::Greater,
+				_ => {}
+			}
+
+			// Apply sort mode
+			let ord = match sort_mode {
+				SortMode::Name => a.fs_entry.name.to_lowercase().cmp(&b.fs_entry.name.to_lowercase()),
+				SortMode::Size => {
+					let a_size = a.fs_entry.metadata.as_ref().map(|m| m.size).unwrap_or(0);
+					let b_size = b.fs_entry.metadata.as_ref().map(|m| m.size).unwrap_or(0);
+					a_size.cmp(&b_size)
+				}
+				SortMode::Modified => {
+					let a_mod = a.fs_entry.metadata.as_ref().and_then(|m| m.modified);
+					let b_mod = b.fs_entry.metadata.as_ref().and_then(|m| m.modified);
+					match (a_mod, b_mod) {
+						(Some(a), Some(b)) => a.cmp(&b),
+						(Some(_), None) => Ordering::Less,
+						(None, Some(_)) => Ordering::Greater,
+						(None, None) => Ordering::Equal,
+					}
+				}
+				SortMode::Type => {
+					let a_ext = std::path::Path::new(&a.fs_entry.name)
+						.extension()
+						.and_then(|e| e.to_str())
+						.unwrap_or("");
+					let b_ext = std::path::Path::new(&b.fs_entry.name)
+						.extension()
+						.and_then(|e| e.to_str())
+						.unwrap_or("");
+					a_ext.to_lowercase().cmp(&b_ext.to_lowercase())
+				}
+			};
+
+			if ascending { ord } else { ord.reverse() }
+		});
+	}
+
+	/// Set sort mode and re-sort
+	pub fn set_sort_mode(&mut self, mode: SortMode) {
+		if self.sort_mode == mode {
+			// Toggle direction if same mode
+			self.sort_ascending = !self.sort_ascending;
+		} else {
+			self.sort_mode = mode;
+			self.sort_ascending = true;
+		}
+		self.sort_entries();
+	}
+
+	/// Toggle hidden files visibility
+	pub fn toggle_hidden(&mut self) {
+		self.show_hidden = !self.show_hidden;
+		// Need to reload directory to apply this change
+	}
+
+	/// Toggle encoding detection mode
+	pub fn toggle_detect_encoding(&mut self) {
+		self.detect_encoding = !self.detect_encoding;
+	}
+
+	/// Move selection up
+	pub fn select_prev(&mut self) {
+		match self.active_section {
+			FileOpenSection::Navigation => {
+				if self.selected_shortcut > 0 {
+					self.selected_shortcut -= 1;
+				}
+			}
+			FileOpenSection::Files => {
+				if let Some(idx) = self.selected_index {
+					if idx > 0 {
+						self.selected_index = Some(idx - 1);
+						self.ensure_selected_visible();
+					}
+				} else if !self.entries.is_empty() {
+					// No selection, select last entry
+					self.selected_index = Some(self.entries.len() - 1);
+					self.ensure_selected_visible();
+				}
+			}
+		}
+	}
+
+	/// Move selection down
+	pub fn select_next(&mut self) {
+		match self.active_section {
+			FileOpenSection::Navigation => {
+				if self.selected_shortcut + 1 < self.shortcuts.len() {
+					self.selected_shortcut += 1;
+				}
+			}
+			FileOpenSection::Files => {
+				if let Some(idx) = self.selected_index {
+					if idx + 1 < self.entries.len() {
+						self.selected_index = Some(idx + 1);
+						self.ensure_selected_visible();
+					}
+				} else if !self.entries.is_empty() {
+					// No selection, select first entry
+					self.selected_index = Some(0);
+					self.ensure_selected_visible();
+				}
+			}
+		}
+	}
+
+	/// Page up
+	pub fn page_up(&mut self, page_size: usize) {
+		if self.active_section == FileOpenSection::Files {
+			if let Some(idx) = self.selected_index {
+				self.selected_index = Some(idx.saturating_sub(page_size));
+				self.ensure_selected_visible();
+			} else if !self.entries.is_empty() {
+				self.selected_index = Some(0);
+			}
+		}
+	}
+
+	/// Page down
+	pub fn page_down(&mut self, page_size: usize) {
+		if self.active_section == FileOpenSection::Files {
+			if let Some(idx) = self.selected_index {
+				self.selected_index = Some((idx + page_size).min(self.entries.len().saturating_sub(1)));
+				self.ensure_selected_visible();
+			} else if !self.entries.is_empty() {
+				self.selected_index = Some(self.entries.len().saturating_sub(1));
+			}
+		}
+	}
+
+	/// Jump to first entry
+	pub fn select_first(&mut self) {
+		match self.active_section {
+			FileOpenSection::Navigation => self.selected_shortcut = 0,
+			FileOpenSection::Files => {
+				if !self.entries.is_empty() {
+					self.selected_index = Some(0);
+					self.scroll_offset = 0;
+				}
+			}
+		}
+	}
+
+	/// Jump to last entry
+	pub fn select_last(&mut self) {
+		match self.active_section {
+			FileOpenSection::Navigation => {
+				self.selected_shortcut = self.shortcuts.len().saturating_sub(1);
+			}
+			FileOpenSection::Files => {
+				if !self.entries.is_empty() {
+					self.selected_index = Some(self.entries.len() - 1);
+					self.ensure_selected_visible();
+				}
+			}
+		}
+	}
+
+	/// Ensure selected item is visible in viewport, using the most recent
+	/// viewport height reported by the renderer. Called from input handlers,
+	/// where the actual viewport height isn't known directly.
+	fn ensure_selected_visible(&mut self) {
+		self.clamp_scroll_to_selection();
+	}
+
+	/// Reconcile `scroll_offset` with the actual viewport height. The
+	/// renderer calls this once per frame; selection actions call
+	/// `ensure_selected_visible` which uses the cached value.
+	pub fn update_scroll_for_visible_rows(&mut self, visible_rows: usize) {
+		self.last_visible_rows = visible_rows;
+		self.clamp_scroll_to_selection();
+	}
+
+	/// Clamp `scroll_offset` so the selection stays within the viewport
+	/// `[scroll_offset, scroll_offset + last_visible_rows)`, and so that we
+	/// never scroll past the last entry.
+	fn clamp_scroll_to_selection(&mut self) {
+		let visible_rows = self.last_visible_rows;
+		if visible_rows == 0 {
+			return;
+		}
+		if let Some(idx) = self.selected_index {
+			if idx < self.scroll_offset {
+				self.scroll_offset = idx;
+			} else if idx >= self.scroll_offset + visible_rows {
+				self.scroll_offset = idx + 1 - visible_rows;
+			}
+		}
+		let max_offset = self.entries.len().saturating_sub(visible_rows);
+		if self.scroll_offset > max_offset {
+			self.scroll_offset = max_offset;
+		}
+	}
+
+	/// Switch between navigation and files sections
+	pub fn switch_section(&mut self) {
+		self.active_section = match self.active_section {
+			FileOpenSection::Navigation => FileOpenSection::Files,
+			FileOpenSection::Files => FileOpenSection::Navigation,
+		};
+	}
+
+	/// Get the currently selected entry (file or directory)
+	pub fn selected_entry(&self) -> Option<&FileOpenEntry> {
+		if self.active_section == FileOpenSection::Files {
+			self.selected_index.and_then(|idx| self.entries.get(idx))
+		} else {
+			None
+		}
+	}
+
+	/// Get the currently selected shortcut
+	pub fn selected_shortcut_entry(&self) -> Option<&NavigationShortcut> {
+		if self.active_section == FileOpenSection::Navigation {
+			self.shortcuts.get(self.selected_shortcut)
+		} else {
+			None
+		}
+	}
+
+	/// Get the path to open/navigate to based on current selection
+	pub fn get_selected_path(&self) -> Option<PathBuf> {
+		match self.active_section {
+			FileOpenSection::Navigation => {
+				self.shortcuts.get(self.selected_shortcut).map(|s| s.path.clone())
+			}
+			FileOpenSection::Files => {
+				self.selected_index.and_then(|idx| self.entries.get(idx)).map(|e| e.fs_entry.path.clone())
+			}
+		}
+	}
+
+	/// Check if selected item is a directory
+	pub fn selected_is_dir(&self) -> bool {
+		match self.active_section {
+			FileOpenSection::Navigation => true, // Shortcuts are always directories
+			FileOpenSection::Files => self
+				.selected_index
+				.and_then(|idx| self.entries.get(idx))
+				.map(|e| e.fs_entry.is_dir())
+				.unwrap_or(false),
+		}
+	}
+
+	/// Count matching entries
+	pub fn matching_count(&self) -> usize {
+		self.entries.iter().filter(|e| e.matches_filter).count()
+	}
+
+	/// Get visible entries (for rendering)
+	pub fn visible_entries(&self, max_rows: usize) -> &[FileOpenEntry] {
+		let start = self.scroll_offset;
+		let end = (start + max_rows).min(self.entries.len());
+		&self.entries[start..end]
+	}
+}
+
+/// Format file size in human-readable form
+pub fn format_size(size: u64) -> String {
+	const KB: u64 = 1024;
+	const MB: u64 = KB * 1024;
+	const GB: u64 = MB * 1024;
+
+	if size >= GB {
+		format!("{:.1} GB", size as f64 / GB as f64)
+	} else if size >= MB {
+		format!("{:.1} MB", size as f64 / MB as f64)
+	} else if size >= KB {
+		format!("{:.1} KB", size as f64 / KB as f64)
+	} else {
+		format!("{} B", size)
+	}
+}
+
+/// Format timestamp in relative or absolute form
+pub fn format_modified(time: SystemTime) -> String {
+	let now = SystemTime::now();
+	match now.duration_since(time) {
+		Ok(duration) => {
+			let secs = duration.as_secs();
+			if secs < 60 {
+				"just now".to_string()
+			} else if secs < 3600 {
+				format!("{} min ago", secs / 60)
+			} else if secs < 86400 {
+				format!("{} hr ago", secs / 3600)
+			} else if secs < 86400 * 7 {
+				format!("{} days ago", secs / 86400)
+			} else {
+				// Format as date
+				let datetime: chrono::DateTime<chrono::Local> = time.into();
+				datetime.format("%Y-%m-%d").to_string()
+			}
+		}
+		Err(_) => {
+			// Time is in the future
+			let datetime: chrono::DateTime<chrono::Local> = time.into();
+			datetime.format("%Y-%m-%d").to_string()
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::model::filesystem::StdFileSystem;
+
+	fn test_filesystem() -> Arc<dyn FileSystem + Send + Sync> {
+		Arc::new(StdFileSystem)
+	}
+
+	fn make_entry(name: &str, is_dir: bool) -> DirEntry {
+		DirEntry::new(
+			PathBuf::from(format!("/test/{}", name)),
+			name.to_string(),
+			if is_dir { EntryType::Directory } else { EntryType::File },
+		)
+	}
+
+	fn make_entry_with_size(name: &str, size: u64) -> DirEntry {
+		make_entry(name, false).with_metadata(crate::model::filesystem::FileMetadata::new(size))
+	}
+
+	#[test]
+	fn test_sort_by_name() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries(vec![
+			make_entry("zebra.txt", false),
+			make_entry("alpha.txt", false),
+			make_entry("beta", true),
+		]);
+
+		assert_eq!(state.entries[0].fs_entry.name, "beta"); // Dir first
+		assert_eq!(state.entries[1].fs_entry.name, "alpha.txt");
+		assert_eq!(state.entries[2].fs_entry.name, "zebra.txt");
+	}
+
+	#[test]
+	fn test_sort_by_size() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.sort_mode = SortMode::Size;
+		state.set_entries(vec![
+			make_entry_with_size("big.txt", 1000),
+			make_entry_with_size("small.txt", 100),
+			make_entry_with_size("medium.txt", 500),
+		]);
+
+		assert_eq!(state.entries[0].fs_entry.name, "small.txt");
+		assert_eq!(state.entries[1].fs_entry.name, "medium.txt");
+		assert_eq!(state.entries[2].fs_entry.name, "big.txt");
+	}
+
+	#[test]
+	fn test_filter() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries(vec![
+			make_entry("foo.txt", false),
+			make_entry("bar.txt", false),
+			make_entry("foobar.txt", false),
+		]);
+
+		state.apply_filter("foo");
+
+		// With fuzzy matching, matching entries are sorted by score and appear first
+		// foo.txt has a better score (starts with "foo") than foobar.txt
+		// Non-matching bar.txt appears last
+		assert_eq!(state.entries[0].fs_entry.name, "foo.txt");
+		assert!(state.entries[0].matches_filter);
+
+		assert_eq!(state.entries[1].fs_entry.name, "foobar.txt");
+		assert!(state.entries[1].matches_filter);
+
+		assert_eq!(state.entries[2].fs_entry.name, "bar.txt");
+		assert!(!state.entries[2].matches_filter);
+
+		assert_eq!(state.matching_count(), 2);
+	}
+
+	#[test]
+	fn test_filter_case_insensitive() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries(vec![
+			make_entry("README.md", false),
+			make_entry("readme.txt", false),
+			make_entry("other.txt", false),
+		]);
+
+		state.apply_filter("readme");
+
+		// Matching entries first (sorted by score), non-matching last
+		// Both README.md and readme.txt match with similar scores
+		assert!(state.entries[0].matches_filter);
+		assert!(state.entries[1].matches_filter);
+
+		assert_eq!(state.entries[2].fs_entry.name, "other.txt");
+		assert!(!state.entries[2].matches_filter);
+	}
+
+	#[test]
+	fn test_hidden_files() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.show_hidden = false;
+		state.set_entries(vec![make_entry(".hidden", false), make_entry("visible.txt", false)]);
+
+		// Hidden file should be filtered out
+		assert_eq!(state.entries.len(), 1);
+		assert_eq!(state.entries[0].fs_entry.name, "visible.txt");
+	}
+
+	/// Issue #2407: a filter that prefixes a hidden file's name reveals it,
+	/// even though "Show Hidden" is off, and clearing the filter hides it
+	/// again. Typing "." prefixes every dotfile, so it surfaces them all.
+	#[test]
+	fn test_prefix_filter_reveals_hidden() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.show_hidden = false;
+		state.set_entries(vec![
+			make_entry(".bashrc", false),
+			make_entry(".config", true),
+			make_entry("visible.txt", false),
+		]);
+
+		// Hidden by default.
+		assert!(
+			!state.entries.iter().any(|e| e.fs_entry.name == ".bashrc"),
+			"hidden file should not be listed before typing a dot"
+		);
+
+		// Typing "." prefixes every dotfile, surfacing the hidden entries.
+		state.apply_filter(".");
+		assert!(
+			state.entries.iter().any(|e| e.fs_entry.name == ".bashrc"),
+			"'.' should reveal hidden files"
+		);
+		assert!(
+			state.entries.iter().any(|e| e.fs_entry.name == ".config"),
+			"'.' should reveal hidden directories"
+		);
+
+		// Clearing the filter hides them again.
+		state.apply_filter("");
+		assert!(
+			!state.entries.iter().any(|e| e.fs_entry.name == ".bashrc"),
+			"clearing the filter should hide dotfiles again"
+		);
+	}
+
+	/// A more specific prefix (e.g. ".bash") reveals only the hidden files it
+	/// prefixes — `.bashrc` shows, `.gitignore` stays hidden.
+	#[test]
+	fn test_prefix_filter_reveals_only_matching_hidden_files() {
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.show_hidden = false;
+		state.set_entries(vec![
+			make_entry(".bashrc", false),
+			make_entry(".gitignore", false),
+			make_entry("visible.txt", false),
+		]);
+
+		state.apply_filter(".bash");
+
+		let bashrc = state
+			.entries
+			.iter()
+			.find(|e| e.fs_entry.name == ".bashrc")
+			.expect(".bashrc should be revealed by the '.bash' prefix");
+		assert!(bashrc.matches_filter, ".bashrc should match '.bash'");
+
+		// A hidden file the prefix does not reach stays out of the list.
+		assert!(
+			!state.entries.iter().any(|e| e.fs_entry.name == ".gitignore"),
+			".gitignore is not prefixed by '.bash' and should stay hidden"
+		);
+	}
+
+	/// A query that does not start with a dot never drags hidden files in,
+	/// even if it would fuzzy-match them as a subsequence (e.g. "bash" is a
+	/// subsequence of ".bashrc"). The reveal is prefix-based, so the leading
+	/// dot must be typed explicitly.
+	#[test]
+	fn test_non_dot_filter_keeps_hidden_files_hidden() {
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.show_hidden = false;
+		state.set_entries(vec![make_entry(".bashrc", false), make_entry("visible.txt", false)]);
+
+		state.apply_filter("bash");
+		assert!(
+			!state.entries.iter().any(|e| e.fs_entry.name == ".bashrc"),
+			"a non-dot query must not reveal dotfiles"
+		);
+	}
+
+	#[test]
+	fn test_format_size() {
+		assert_eq!(format_size(500), "500 B");
+		assert_eq!(format_size(1024), "1.0 KB");
+		assert_eq!(format_size(1536), "1.5 KB");
+		assert_eq!(format_size(1048576), "1.0 MB");
+		assert_eq!(format_size(1073741824), "1.0 GB");
+	}
+
+	#[test]
+	fn test_navigation() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries(vec![
+			make_entry("a.txt", false),
+			make_entry("b.txt", false),
+			make_entry("c.txt", false),
+		]);
+
+		// Initially no selection
+		assert_eq!(state.selected_index, None);
+
+		// First down selects first entry
+		state.select_next();
+		assert_eq!(state.selected_index, Some(0));
+
+		state.select_next();
+		assert_eq!(state.selected_index, Some(1));
+
+		state.select_next();
+		assert_eq!(state.selected_index, Some(2));
+
+		state.select_next(); // Should stay at last
+		assert_eq!(state.selected_index, Some(2));
+
+		state.select_prev();
+		assert_eq!(state.selected_index, Some(1));
+
+		state.select_first();
+		assert_eq!(state.selected_index, Some(0));
+
+		state.select_last();
+		assert_eq!(state.selected_index, Some(2));
+	}
+
+	/// Regression test for #245: when the terminal is small enough that the
+	/// file list shows fewer than the previous hardcoded 15 rows, moving the
+	/// selection past the bottom of the viewport must scroll the list so the
+	/// selected entry stays visible.
+	#[test]
+	fn test_scroll_follows_selection_in_small_viewport() {
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries((0..10).map(|i| make_entry(&format!("f{i}"), false)).collect());
+
+		// Renderer reports a 3-row viewport (very small terminal).
+		state.update_scroll_for_visible_rows(3);
+		assert_eq!(state.scroll_offset, 0);
+
+		// Walk down to index 4. Selection must remain inside [scroll_offset, scroll_offset + 3).
+		for _ in 0..5 {
+			state.select_next();
+		}
+		assert_eq!(state.selected_index, Some(4));
+		let idx = state.selected_index.unwrap();
+		assert!(
+			idx >= state.scroll_offset && idx < state.scroll_offset + 3,
+			"selected idx {idx} not in viewport [{}, {})",
+			state.scroll_offset,
+			state.scroll_offset + 3
+		);
+
+		// Jumping to the last entry must also keep it on screen.
+		state.select_last();
+		let idx = state.selected_index.unwrap();
+		assert_eq!(idx, 9);
+		assert!(
+			idx >= state.scroll_offset && idx < state.scroll_offset + 3,
+			"select_last left idx {idx} outside viewport [{}, {})",
+			state.scroll_offset,
+			state.scroll_offset + 3
+		);
+
+		// Moving back up shrinks the offset so we don't leave a blank tail.
+		state.select_first();
+		assert_eq!(state.selected_index, Some(0));
+		assert_eq!(state.scroll_offset, 0);
+	}
+
+	/// When the viewport shrinks (terminal resize), the next renderer pass
+	/// must re-clamp `scroll_offset` so the selection stays visible.
+	#[test]
+	fn test_scroll_reclamped_on_viewport_shrink() {
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries((0..20).map(|i| make_entry(&format!("f{i}"), false)).collect());
+
+		state.update_scroll_for_visible_rows(15);
+		for _ in 0..15 {
+			state.select_next();
+		}
+		// Selection at idx 14 fits in a 15-row viewport with offset 0.
+		assert_eq!(state.selected_index, Some(14));
+		assert_eq!(state.scroll_offset, 0);
+
+		// Terminal shrinks to 4 rows; the next render reports the new height.
+		state.update_scroll_for_visible_rows(4);
+		let idx = state.selected_index.unwrap();
+		assert!(
+			idx >= state.scroll_offset && idx < state.scroll_offset + 4,
+			"selected idx {idx} not in shrunk viewport [{}, {})",
+			state.scroll_offset,
+			state.scroll_offset + 4
+		);
+	}
+
+	#[test]
+	fn test_fuzzy_filter() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries(vec![
+			make_entry("command_registry.rs", false),
+			make_entry("commands.rs", false),
+			make_entry("keybindings.rs", false),
+			make_entry("mod.rs", false),
+		]);
+
+		// Fuzzy match "cmdreg" should match "command_registry.rs"
+		state.apply_filter("cmdreg");
+
+		// command_registry.rs should match and be first
+		assert!(state.entries[0].matches_filter);
+		assert_eq!(state.entries[0].fs_entry.name, "command_registry.rs");
+
+		// commands.rs might also match "cmd" part
+		// Other files shouldn't match
+		assert_eq!(state.matching_count(), 1);
+	}
+
+	#[test]
+	fn test_fuzzy_filter_sparse_match() {
+		// Use root path so no ".." entry is added
+		let mut state = FileOpenState::new(PathBuf::from("/"), false, test_filesystem());
+		state.set_entries(vec![
+			make_entry("Save File", false),
+			make_entry("Select All", false),
+			make_entry("something_else.txt", false),
+		]);
+
+		// "sf" should match "Save File" (S and F)
+		state.apply_filter("sf");
+
+		assert_eq!(state.matching_count(), 1);
+		assert!(state.entries[0].matches_filter);
+		assert_eq!(state.entries[0].fs_entry.name, "Save File");
+	}
+}

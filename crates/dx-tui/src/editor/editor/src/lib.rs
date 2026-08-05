@@ -1,0 +1,73 @@
+#![deny(clippy::let_underscore_must_use)]
+
+// Editor library - exposes all core modules for testing
+
+pub mod i18n;
+
+// Initialize i18n with empty directory (no compile-time code generation)
+// All translations are provided by the runtime backend
+rust_i18n::i18n!(
+	"locales-empty",
+	fallback = "en",
+	backend = i18n::runtime_backend::RuntimeBackend::new()
+);
+
+// Core types and config are always available (needed for schema generation)
+pub mod config;
+pub mod partial_config;
+pub mod plugin_schemas;
+pub mod types;
+
+// Runtime-only modules (require the "runtime" feature)
+#[cfg(feature = "runtime")]
+pub mod config_io;
+#[cfg(feature = "runtime")]
+pub mod init_script;
+#[cfg(feature = "runtime")]
+pub mod state;
+#[cfg(feature = "runtime")]
+pub mod workspace;
+
+// Core modules - always available (pure Rust, no platform dependencies)
+// Submodules within primitives that need ratatui/syntect are internally gated
+pub mod model;
+pub mod primitives;
+
+// Runtime-only modules (heavy dependencies, platform-specific)
+#[cfg(feature = "runtime")]
+pub mod app;
+#[cfg(feature = "runtime")]
+pub mod input;
+#[cfg(feature = "runtime")]
+pub mod services;
+
+// Session persistence (client-server architecture)
+#[cfg(feature = "runtime")]
+pub mod client;
+#[cfg(feature = "runtime")]
+pub mod server;
+
+// Local HTTP bridge hosting the real Editor for the web UI frontend (no mocks).
+#[cfg(feature = "runtime")]
+pub mod webui;
+
+// View module - available for runtime, WASM, and dev-bins (schema generation)
+// Most submodules are runtime-only, but theme types are always available
+#[cfg(any(feature = "runtime", feature = "wasm", feature = "dev-bins"))]
+pub mod view;
+
+// Plugin widget runtime — declarative widget tree mounted by plugins
+// via MountWidgetPanel/UpdateWidgetPanel/UnmountWidgetPanel. Pure Rust,
+// no UI dependencies, so always available.
+pub mod widgets;
+
+// WASM-specific modules
+#[cfg(feature = "wasm")]
+pub mod wasm;
+
+// Test-only observation API. Compiled with the `runtime` feature so the
+// terminal binary's library form exposes it for integration tests, but
+// never reachable from production call sites — see test_api.rs and
+// docs/internal/e2e-test-migration-design.md.
+#[cfg(feature = "runtime")]
+pub mod test_api;

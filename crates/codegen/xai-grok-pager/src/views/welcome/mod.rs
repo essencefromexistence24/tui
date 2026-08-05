@@ -32,7 +32,6 @@ use logo::{logo_line_count, render_logo};
 use menu::render_menu;
 pub(crate) use toast::paint_welcome_toast;
 pub(crate) use top_bar::location_line_at;
-use top_bar::render_top_bar;
 #[cfg(feature = "local-workspace")]
 pub use workspace_mode::{
     WelcomeWorkspaceMode, WorkspaceModeHitRects, hit_test_workspace_mode,
@@ -140,7 +139,7 @@ use hero_box::HERO_BOX_MIN_WIDTH;
 /// Prompt input height (shared across hero and stacked layout paths).
 const PROMPT_HEIGHT: u16 = 3;
 /// Gap between prompt and version line.
-const VERSION_GAP: u16 = 1;
+const VERSION_GAP: u16 = 0;
 
 /// Computed areas for the welcome screen vertical layout.
 pub(super) struct WelcomeLayout {
@@ -371,7 +370,7 @@ impl WelcomeLayout {
             Constraint::Length(tip_gap),
             Constraint::Length(PROMPT_HEIGHT),
             Constraint::Length(VERSION_GAP),
-            Constraint::Length(1), // version
+            Constraint::Length(0), // [commented] version bar removed
         ])
         .areas(content_area);
         Self {
@@ -454,7 +453,7 @@ pub(super) fn render_version_badge(
     match &mode {
         VersionBadgeMode::Full { .. } => {
             spans.push(Span::styled(
-                "Grok Build  ",
+                "Dx  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -483,7 +482,7 @@ pub(super) fn render_version_badge(
         }
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
-                "Grok Build Beta  ",
+                "Dx Beta  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -571,7 +570,7 @@ fn render_prompt_and_version(
             &line,
             layout.version.width,
         );
-    } else if !skip_version {
+    } else if !skip_version && layout.version.height > 0 {
         render_version_badge(
             layout.version,
             buf,
@@ -583,7 +582,7 @@ fn render_prompt_and_version(
                 subscription_tier: None,
             },
         );
-    } else {
+    } else if layout.version.height > 0 {
         render_version_badge(
             layout.version,
             buf,
@@ -696,22 +695,12 @@ pub fn render_welcome(
 
     buf.set_style(area, Style::default().bg(theme.bg_base));
 
-    // Announcements only render inside the hero box. Top bar is always 1 row.
-    let [_, top_bar_area, content_area, _] = Layout::vertical([
-        Constraint::Length(v_margin),
+    let [_, content_area, _] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(10),
         Constraint::Length(v_margin),
     ])
     .areas(area);
-
-    let top_bar_inner = Rect {
-        x: top_bar_area.x + h_margin,
-        y: top_bar_area.y,
-        width: top_bar_area.width.saturating_sub(h_margin * 2),
-        height: 1,
-    };
-    render_top_bar(top_bar_inner, buf, &theme, None);
 
     let mut result = match params.auth_state {
         AuthState::Pending { error } => {
@@ -721,6 +710,7 @@ pub fn render_welcome(
             let msg = error.as_deref().map(|e| (e, theme.accent_error));
             let info = PromptInfo {
                 model_name: params.model_name,
+                mode_name: None,
                 flags: params.flags,
                 multiline: false,
                 usage_warning: None,
@@ -769,7 +759,7 @@ pub fn render_welcome(
                 content_area,
                 buf,
                 Some((
-                    "Grok Build is not yet available for this account.",
+                    "Dx is not yet available for this account.",
                     theme.gray_bright,
                 )),
                 &menu,
@@ -944,7 +934,7 @@ fn render_welcome_trust(
         // Two lines so the warning never clips at narrow / compact widths
         // (a single ~78-char line would truncate "...posing security risks").
         Line::from(Span::styled(
-            "Grok Build may run or modify contents in this directory,",
+            "Dx may run or modify contents in this directory,",
             Style::default().fg(theme.gray),
         ))
         .alignment(Alignment::Center),
@@ -2186,15 +2176,15 @@ fn render_welcome_done(
                 .render(tip_inset, buf);
         }
 
-        let warning = p.credit_balance.and_then(|bal| {
-            crate::views::credit_bar::usage_warning(bal, p.auto_topup, p.usage_visible)
-        });
+        // Suppressed on welcome screen — no active model to associate with
+        let warning: Option<(String, bool)> = None;
         let (usage_warning_text, usage_warning_critical) = match warning {
             Some((text, critical)) => (Some(text), critical),
             None => (None, false),
         };
         let usage_info = PromptInfo {
             model_name: p.model_name,
+            mode_name: None,
             flags: p.flags,
             multiline: false,
             usage_warning: usage_warning_text.as_deref(),

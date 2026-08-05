@@ -1,6 +1,6 @@
 [package]
 name = "xai-grok-pager"
-version = "0.2.120"
+version = "0.2.117"
 edition.workspace = true
 license = "Apache-2.0"
 authors = ["xAI"]
@@ -19,6 +19,10 @@ xai-grok-pager-render = { path = "../xai-grok-pager-render" }
 
 # Rendering
 ratatui = { workspace = true, features = ["crossterm", "unstable-widget-ref"] }
+rodio = { version = "0.22.2", default-features = false, features = ["playback", "mp3", "wav"] }
+figlet-rs = "1.0.0"
+once_cell = { workspace = true }
+zstd = { workspace = true }
 xai-grok-announcements = { workspace = true }
 crossterm = { workspace = true, features = ["event-stream", "bracketed-paste"] }
 textwrap = { workspace = true }
@@ -35,6 +39,29 @@ xai-grok-markdown = { workspace = true }
 # gated only at runtime by the `appearance.render_mermaid` setting.
 xai-grok-mermaid = { workspace = true }
 syntect = { workspace = true }
+tachyonfx = { workspace = true }
+dx-editor = { path = "../../dx-tui/src/editor/editor", default-features = false, features = ["runtime"] }
+# DX file browser engine. These are linked in-process; the pager remains the
+# sole terminal/event-loop owner and hosts their Core/widgets in its frame.
+fb-actor = { path = "../../dx-tui/src/file_browser/actor" }
+fb-adapter = { path = "../../dx-tui/src/file_browser/adapter" }
+fb-binding = { path = "../../dx-tui/src/file_browser/binding" }
+fb-boot = { path = "../../dx-tui/src/file_browser/boot" }
+fb-config = { path = "../../dx-tui/src/file_browser/config" }
+fb-core = { path = "../../dx-tui/src/file_browser/core" }
+fb-dds = { path = "../../dx-tui/src/file_browser/dds" }
+fb-emulator = { path = "../../dx-tui/src/file_browser/emulator" }
+fb-fs = { path = "../../dx-tui/src/file_browser/fs" }
+fb-macro = { path = "../../dx-tui/src/file_browser/macro" }
+fb-plugin = { path = "../../dx-tui/src/file_browser/plugin" }
+fb-shared = { path = "../../dx-tui/src/file_browser/shared" }
+fb-term = { path = "../../dx-tui/src/file_browser/term" }
+fb-tty = { path = "../../dx-tui/src/file_browser/tty" }
+fb-vfs = { path = "../../dx-tui/src/file_browser/vfs" }
+fb-watcher = { path = "../../dx-tui/src/file_browser/watcher" }
+fb-widgets = { path = "../../dx-tui/src/file_browser/widgets" }
+mlua = { version = "0.11.6", features = ["lua54", "serialize", "macros", "async", "anyhow", "vendored"] }
+paste = { workspace = true }
 
 # Data
 similar = { workspace = true }
@@ -158,7 +185,11 @@ core-foundation = { workspace = true }
 # events so only the relaunched child handles them. Version matches the other
 # in-repo consumers (xai-crash-handler, xai-system-power).
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 xai-grok-pager-render = { path = "../xai-grok-pager-render", features = ["test-support"] }
@@ -283,6 +314,9 @@ path = "src/bin/todo_pane_playground.rs"
 # the workspace-default clippy allows used in CI.
 [lints]
 workspace = true
+
+[build-dependencies]
+zstd = { workspace = true }
 
 [features]
 default = ["jemalloc", "sandbox-enforce"]

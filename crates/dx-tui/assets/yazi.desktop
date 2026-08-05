@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=dx File Manager
+Icon=dx
+Comment=Blazing fast terminal file manager written in Rust, based on async I/O
+Terminal=true
+TryExec=dx
+Exec=dx %u
+Type=Application
+MimeType=inode/directory
+Categories=System;FileManager;FileTools;ConsoleOnly
+Keywords=File;Manager;Explorer;Browser;Launcher
