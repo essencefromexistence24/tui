@@ -963,6 +963,18 @@ impl AgentView {
             self.hit_announcement_cta.clear();
             self.hit_upgrade_cta.clear();
             self.privacy_banner.clear_hits();
+            // Keep the right sidebar visible alongside the subagent view so
+            // session context (tasks, notes, subagents) stays on screen.
+            if let Some(sidebar_area) = dx_sidebar_area {
+                let sidebar_model = self.dx_sidebar_view_model();
+                crate::dx::sidebar::render(
+                    &mut self.dx_ui.sidebar,
+                    &sidebar_model,
+                    sidebar_area,
+                    buf,
+                    &theme,
+                );
+            }
             return self.draw_subagent_fullscreen(
                 &child_sid.clone(),
                 area,
@@ -4618,47 +4630,59 @@ impl AgentView {
                 .map(|prompt| prompt.text.replace('\n', " "))
                 .collect()
         };
-        let subagents = if self.subagent_views.is_empty() {
-            vec!["No Subagents Yet".to_string()]
-        } else {
-            self.subagent_views
-                .keys()
-                .take(12)
-                .map(|id| format!("● {id}"))
-                .collect()
-        };
-        let plugins = self
-            .session
-            .available_tools
-            .as_ref()
-            .map(|tools| {
-                tools
+        // Subagents: only running ones are listed; finished subagents are
+        // dropped (the right panel reflects what is currently executing).
+        // Each row shows the subagent name (persona/role/type-derived label)
+        // plus its live activity when running, so the panel reads like the
+        // chat's own subagent cards instead of raw session ids.
+        let subagents = {
+            let mut running: Vec<_> = self
+                .subagent_sessions
+                .iter()
+                .filter(|(_, info)| info.is_running())
+                .collect();
+            running.sort_by(|a, b| a.1.started_at.cmp(&b.1.started_at));
+            if running.is_empty() {
+                vec!["No Subagents Yet".to_string()]
+            } else {
+                running
                     .iter()
                     .take(12)
-                    .map(|tool| format!("● {tool}"))
-                    .collect::<Vec<_>>()
-            })
-            .filter(|lines| !lines.is_empty())
-            .unwrap_or_else(|| vec!["No Plugins Yet".to_string()]);
-        let mcp = self
-            .mcp_init_progress
-            .as_ref()
-            .map(|progress| {
-                vec![format!(
-                    "● {}/{} connected",
-                    progress.connected, progress.total
-                )]
-            })
-            .unwrap_or_else(|| vec!["No MCP Servers Yet".to_string()]);
+                    .map(|(sid, info)| {
+                        let (label, desc) =
+                            crate::app::subagent::format_subagent_label(info);
+                        let name = if desc.is_empty() {
+                            label
+                        } else {
+                            format!("{label} · {desc}")
+                        };
+                        let activity = info
+                            .activity_label
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        let label = match activity {
+                            Some(activity) => format!("◐ {name} — {activity}"),
+                            None => format!("◐ {name}"),
+                        };
+                        let _ = sid;
+                        label
+                    })
+                    .collect()
+            }
+        };
+        // Prompts / LSP / Plugins / MCP sections are disabled for now — the
+        // right panel focuses on Tasks, Workflows, Notes, and Subagents.
+        let _ = &prompts;
         let bodies = [
             tasks,
             workflows,
-            prompts,
+            Vec::<String>::new(),
             sidebar_notes_lines(),
             subagents,
-            vec!["No LSP Servers Yet".to_string()],
-            plugins,
-            mcp,
+            Vec::<String>::new(),
+            Vec::<String>::new(),
+            Vec::<String>::new(),
         ];
         let sections = std::array::from_fn(|i| SidebarSection {
             name: SECTION_NAMES[i],

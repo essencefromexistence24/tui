@@ -65,8 +65,16 @@ impl AgentView {
                         }
                         crate::dx::sidebar::PROMPTS_SECTION => self.toggle_queue_pane(),
                         crate::dx::sidebar::SUBAGENTS_SECTION => {
-                            if let Some(session_id) = self.subagent_views.keys().nth(row).cloned() {
-                                self.open_subagent_fullscreen(session_id);
+                            // Same ordering as `dx_sidebar_view_model`: only
+                            // running subagents, sorted by start time.
+                            let mut running: Vec<_> = self
+                                .subagent_sessions
+                                .iter()
+                                .filter(|(_, info)| info.is_running())
+                                .collect();
+                            running.sort_by(|a, b| a.1.started_at.cmp(&b.1.started_at));
+                            if let Some((session_id, _)) = running.get(row) {
+                                self.open_subagent_fullscreen(session_id.to_string());
                             }
                         }
                         crate::dx::sidebar::PLUGINS_SECTION => {

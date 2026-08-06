@@ -34,6 +34,16 @@ pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
 pub const MIN_WIDTH: u16 = 100;
 pub const PANEL_WIDTH: u16 = 40;
 
+/// Sections commented out of the right panel for now (Prompts, LSP, Plugins,
+/// MCP). Their headers and bodies are skipped entirely so the panel only shows
+/// Tasks, Workflows, Notes, and Subagents.
+pub fn is_hidden_section(index: usize) -> bool {
+    matches!(
+        index,
+        PROMPTS_SECTION | PLUGINS_SECTION | MCP_SECTION | 5 // LSP
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct SidebarSection {
     pub name: &'static str,
@@ -169,7 +179,9 @@ pub fn render(
         .iter()
         .enumerate()
         .map(|(i, section)| {
-            if state.accordion_open[i] {
+            if is_hidden_section(i) {
+                0
+            } else if state.accordion_open[i] {
                 1 + if i == NOTES_SECTION {
                     section.lines.len().max(8) as u16
                 } else {
@@ -190,6 +202,9 @@ pub fn render(
     for (section_index, (section, section_height)) in
         model.sections.iter().zip(heights.iter()).enumerate()
     {
+        if is_hidden_section(section_index) {
+            continue;
+        }
         let open = state.accordion_open[section_index];
         let section_top = content_y;
         content_y = content_y.saturating_add(*section_height);

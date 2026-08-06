@@ -182,6 +182,10 @@ fn is_hidden(
 /// terminal-native and would otherwise hand a raw remote URL (`file://`,
 /// custom schemes) past `open_url_if_safe` entirely; a non-https CTA renders
 /// as a plain message row instead of a dead or unsafe button.
+/// Upgrade CTA disabled: `promo_cta` always returns `None` so all callers
+/// are dead, but the validator logic is kept for documentation.
+#[allow(dead_code)]
+#[cfg_attr(test, allow(unused))]
 fn usable_cta(a: &xai_grok_announcements::RemoteAnnouncement) -> Option<(&str, &str)> {
     let cta = a.cta.as_ref()?;
     let label = cta
@@ -312,9 +316,13 @@ pub(crate) fn promo_cta<'a>(
     &'a str,
     &'a str,
 )> {
-    let owner = first_session_announcement(announcements, hidden_ids).filter(|a| is_promo(a))?;
-    let (label, url) = usable_cta(owner)?;
-    Some((owner, label, url))
+    let _ = (announcements, hidden_ids);
+    // Upgrade CTA disabled: the `[label]` upgrade button, its "or use Ctrl+O"
+    // caption, and the Ctrl+O override are suppressed on every surface
+    // (welcome hero, in-session header, dashboard, banner). Promo
+    // announcements still render as plain info rows; only the CTA button is
+    // dropped.
+    None
 }
 
 /// The `[label]` button's target: the promo owner + its validated url. The
@@ -631,7 +639,7 @@ fn render_promo_row(
     let mut hits = BannerHits::default();
 
     // Non-dismissible: neither hide affordance paints and `right_reserved`
-    // stays 0, so the button reclaims the right-hand columns.
+    // stays 0.
     let mut right_reserved = 0usize;
     if is_dismissible(ann) {
         hits.hide = paint_hide_button(buf, area, row, hide_hovered, &theme);
@@ -652,34 +660,13 @@ fn render_promo_row(
             right_reserved = button_w + GAP + hide_cta_w;
         }
     }
+    let _ = right_reserved;
 
-    // Left side: the [Label] CTA button (+ pinned-only `cta.caption`), clear of
-    // the reserved right-hand hide block. The shared painter owns the style,
-    // truncation, and drop-whole caption.
-    let remaining = if right_reserved > 0 {
-        max_w.saturating_sub(right_reserved + GAP)
-    } else {
-        max_w
-    };
-    if remaining > 0
-        && let Some((label, _url)) = usable_cta(ann)
-    {
-        // Caption only for a pinned promo whose `Ctrl+O` actually opens the CTA
-        // (suppressed while a permission prompt owns the chord).
-        let caption = (caption_allowed && !is_dismissible(ann))
-            .then(|| usable_cta_caption(ann))
-            .flatten();
-        hits.cta = render_cta_button(
-            buf,
-            &theme,
-            area.x,
-            row,
-            remaining as u16,
-            label,
-            caption,
-            cta_hovered,
-        );
-    }
+    // Left side: the [Label] upgrade CTA button (+ pinned-only `cta.caption`)
+    // used to paint here. Upgrade CTA disabled: the button and its caption are
+    // suppressed (the promo row keeps its hide affordances but paints no
+    // upgrade button).
+    let _ = (cta_hovered, caption_allowed, usable_cta_caption, render_cta_button);
 
     hits
 }
@@ -1217,70 +1204,48 @@ mod tests {
         assert_eq!(buf_row(&buf, area, 1), "  0123456789ABCDEFGHIJ");
     }
 
-    /// Non-dismissible promo: no right-hand hide block, no message — the
-    /// clickable `[Go]` button, plus its dim `cta.caption` when one is
-    /// configured and `caption_allowed` (suppressed while a permission prompt
-    /// owns the chord); no configured caption = bare button. The hit-rect
-    /// stays the button only (the caption is not clickable).
+    /// Non-dismissible promo: no right-hand hide block, no upgrade CTA
+    /// button — the CTA painting is disabled; the promo row shows only
+    /// its hide affordances (empty when non-dismissible).
     #[test]
-    fn render_promo_row_non_dismissible_shows_configured_caption() {
+    fn render_promo_row_non_dismissible_cta_disabled() {
         let mut ann = promo("p", &"M".repeat(60), Some(("Go", "https://x.ai")));
         ann.dismissible = Some(false);
         ann.cta.as_mut().unwrap().caption = Some("or use Ctrl+O".into());
         let anns = [ann];
         let area = Rect::new(0, 0, 50, 1);
 
-        // caption_allowed: the dim caption follows the button; rect is button-only.
+        // caption_allowed: the CTA button is suppressed, so no [Go] or caption.
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), false, false, true);
         assert_eq!(hits.hide, None, "no [hide] target on a pinned promo");
-        assert_eq!(
-            hits.cta,
-            Some(Rect::new(0, 0, 4, 1)),
-            "rect is the button only"
-        );
+        assert_eq!(hits.cta, None, "upgrade CTA disabled: no button rect");
         assert_eq!(
             buf_row(&buf, area, 0),
-            "[Go] or use Ctrl+O",
-            "button + configured caption; no message painted"
+            "",
+            "upgrade CTA disabled: promo row paints nothing (no message, no button)"
         );
 
-        // Not allowed (a permission prompt owns Ctrl+O): button only, no caption.
+        // Not allowed: same behavior (nothing to suppress).
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), false, false, false);
-        assert_eq!(
-            hits.cta,
-            Some(Rect::new(0, 0, 4, 1)),
-            "button still clickable"
-        );
-        assert_eq!(
-            buf_row(&buf, area, 0),
-            "[Go]",
-            "caption suppressed when not allowed"
-        );
+        assert_eq!(hits.cta, None, "upgrade CTA disabled: no button");
 
-        // No caption configured: the pinned row stays a bare button even with
-        // `caption_allowed` (nothing hardcoded fills in).
-        let mut bare = promo("p", &"M".repeat(60), Some(("Go", "https://x.ai")));
-        bare.dismissible = Some(false);
+        // No caption configured: still no button.
+        let bare = promo("p", &"M".repeat(60), Some(("Go", "https://x.ai")));
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &[bare], &no_hidden(), false, false, true);
-        assert_eq!(hits.cta, Some(Rect::new(0, 0, 4, 1)));
-        assert_eq!(
-            buf_row(&buf, area, 0),
-            "[Go]",
-            "absent caption renders nothing after the button"
-        );
+        assert_eq!(hits.cta, None, "upgrade CTA disabled");
     }
 
-    /// `promo_cta_target` requires BOTH trimmed-non-empty label and url — a
-    /// partial CTA never produces an openable target (or a painted button).
+    /// `promo_cta` and `promo_cta_target` are disabled; always return `None`.
     #[test]
-    fn promo_cta_target_requires_usable_pair() {
+    fn promo_cta_target_disabled_always_none() {
         let full = vec![promo("p", "msg", Some(("Go", " https://x.ai/promo ")))];
-        let (a, url) = promo_cta_target(&full, &no_hidden()).expect("usable target");
-        assert_eq!(a.id.as_deref(), Some("p"));
-        assert_eq!(url, "https://x.ai/promo");
+        assert!(
+            promo_cta_target(&full, &no_hidden()).is_none(),
+            "upgrade CTA disabled: promo_cta_target returns None"
+        );
 
         let mut label_only = promo("p", "msg", None);
         label_only.cta = Some(xai_grok_announcements::AnnouncementCta {
@@ -1345,28 +1310,22 @@ mod tests {
         );
     }
 
-    /// `promo_cta` projects the owner + validated `(label, url)` all surfaces
-    /// paint from; `is_dismissible(owner)` distinguishes the pinned (Ctrl+O)
-    /// promo from a dismissible one.
+    /// `promo_cta` is disabled; it always returns `None` so no upgrade CTA
+    /// button is painted on any surface.
     #[test]
-    fn promo_cta_returns_label_and_pinned_flag() {
+    fn promo_cta_disabled_always_returns_none() {
         let mut pinned = promo("p", "msg", Some(("Upgrade Account", "https://x.ai/promo")));
         pinned.dismissible = Some(false);
         let pinned = [pinned];
-        let (owner, label, url) = promo_cta(&pinned, &no_hidden()).expect("usable cta");
-        assert_eq!(label, "Upgrade Account");
-        assert_eq!(url, "https://x.ai/promo");
         assert!(
-            !is_dismissible(owner),
-            "pinned promo drives the Ctrl+O override"
+            promo_cta(&pinned, &no_hidden()).is_none(),
+            "upgrade CTA disabled: promo_cta returns None even for pinned promos"
         );
 
         let dismissible = [promo("d", "msg", Some(("Go", "https://x.ai")))];
-        let (owner, label, _) = promo_cta(&dismissible, &no_hidden()).expect("usable cta");
-        assert_eq!(label, "Go");
         assert!(
-            is_dismissible(owner),
-            "absent flag = dismissible = no override"
+            promo_cta(&dismissible, &no_hidden()).is_none(),
+            "upgrade CTA disabled: promo_cta returns None even for dismissible promos"
         );
 
         assert!(promo_cta(&[promo("n", "msg", None)], &no_hidden()).is_none());
@@ -1434,11 +1393,10 @@ mod tests {
     }
 
     /// Slot consistency: `promo_cta_target` resolves through the banner-slot
-    /// gate, so a live critical owning the slot yields no target (a click
-    /// through a stale prior-frame rect must not open the promo URL) — and
-    /// the promo resolves again once the critical is hidden or expired.
+    /// gate — with the upgrade CTA disabled, it always returns None
+    /// regardless of slot state.
     #[test]
-    fn promo_cta_target_yields_to_critical_slot_owner() {
+    fn promo_cta_target_disabled_regardless_of_slot() {
         let promo_ann = promo("p", "upsell", Some(("Go", "https://x.ai/promo")));
         let crit = RemoteAnnouncement {
             id: Some("c".into()),
@@ -1448,26 +1406,11 @@ mod tests {
         };
 
         let both = vec![promo_ann.clone(), crit.clone()];
-        assert!(
-            promo_cta_target(&both, &no_hidden()).is_none(),
-            "a critical slot owner must yield no CTA target"
-        );
+        assert!(promo_cta_target(&both, &no_hidden()).is_none());
 
-        // Hiding the (dismissible) critical hands the slot back to the promo.
+        // Hiding the critical still yields no CTA — promo_cta is disabled.
         let hide_crit: BTreeSet<String> = ["c".to_string()].into_iter().collect();
-        assert_eq!(
-            promo_cta_target(&both, &hide_crit).map(|(a, url)| (a.id.as_deref(), url)),
-            Some((Some("p"), "https://x.ai/promo"))
-        );
-
-        // So does the critical expiring (same draw/dispatch-time expiry gate).
-        let mut expired_crit = crit;
-        expired_crit.expires_at = Some("2000-01-01T00:00:00Z".into());
-        let with_expired = vec![promo_ann, expired_crit];
-        assert_eq!(
-            promo_cta_target(&with_expired, &no_hidden()).and_then(|(a, _)| a.id.as_deref()),
-            Some("p")
-        );
+        assert!(promo_cta_target(&both, &hide_crit).is_none());
     }
 
     /// The one CTA gate fails closed on schemes outside the Standard open
@@ -1503,12 +1446,10 @@ mod tests {
         assert!(row0.ends_with(HIDE_BUTTON), "row0={row0:?}");
     }
 
-    /// Dismissible promo row: `[Label]` leads (warning yellow), NO message and
-    /// NO caption even when one is configured (dismissible keeps `Ctrl+O` on
-    /// YOLO, so the caption is pinned-only regardless of `caption_allowed`),
-    /// hide affordances right-aligned; rects for both buttons.
+    /// Dismissible promo row: the upgrade `[Label]` button is suppressed
+    /// (CTA disabled); only hide affordances render right-aligned.
     #[test]
-    fn render_promo_row_button_and_hide_affordances() {
+    fn render_promo_row_hide_affordances_only() {
         let mut ann = promo(
             "p",
             "New promo",
@@ -1521,32 +1462,25 @@ mod tests {
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), false, false, true);
 
         let row0 = buf_row(&buf, area, 0);
-        assert!(row0.starts_with("[Get SuperGrok]"), "row0={row0:?}");
+        assert!(
+            !row0.contains("[Get SuperGrok]"),
+            "upgrade CTA disabled: no [Label] button; row0={row0:?}"
+        );
         assert!(
             !row0.contains("New promo"),
             "message must not paint on the banner; row0={row0:?}"
         );
         assert!(
             !row0.contains("Ctrl+O"),
-            "a dismissible promo suppresses its configured caption; row0={row0:?}"
+            "caption is never shown without the button; row0={row0:?}"
         );
-        assert!(row0.ends_with(HIDE_BUTTON), "row0={row0:?}");
-        assert!(row0.contains(HIDE_CTA), "row0={row0:?}");
+        assert!(
+            row0.ends_with(HIDE_BUTTON) || row0.is_empty(),
+            "row0={row0:?}"
+        );
 
-        // [Label] = 15 cols at x 0; [hide] right-aligned at 80−6=74; the hide
-        // CTA ends gap-adjacent to it (74−2−25=47).
-        assert_eq!(hits.cta, Some(Rect::new(0, 0, 15, 1)), "[Label] hit rect");
-        assert_eq!(hits.hide, Some(Rect::new(74, 0, 6, 1)), "[hide] hit rect");
-
-        let theme = Theme::current();
-        let button = buf.cell((0, 0)).unwrap();
-        assert_eq!(button.fg, theme.warning, "[Label] uses semantic warning");
-        let hide = buf.cell((74, 0)).unwrap();
-        assert_eq!(hide.fg, theme.gray);
-        assert!(hide.modifier.contains(Modifier::DIM), "[hide] dim at rest");
-        let hide_cta = buf.cell((47, 0)).unwrap();
-        assert_eq!(hide_cta.fg, theme.gray);
-        assert!(hide_cta.modifier.contains(Modifier::DIM), "hide CTA dim");
+        // CTA disabled: no button hit rect.
+        assert_eq!(hits.cta, None, "[Label] button suppressed");
     }
 
     #[test]
@@ -1557,24 +1491,22 @@ mod tests {
 
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), true, false, true);
+        // CTA disabled: no button to hover.
         let hide = hits.hide.expect("hide painted");
         let cell = buf.cell((hide.x, hide.y)).unwrap();
         assert_eq!(cell.fg, theme.accent_error, "[hide] hover uses error red");
         assert!(!cell.modifier.contains(Modifier::DIM));
 
+        // CTA hover: CTA disabled, so no button renders or highlights.
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), false, true, true);
-        let cta = hits.cta.expect("cta painted");
-        let cell = buf.cell((cta.x, cta.y)).unwrap();
-        assert_eq!(cell.fg, theme.warning, "[Label] keeps warning fg on hover");
-        assert_eq!(cell.bg, theme.bg_hover, "[Label] hover highlights bg");
+        assert_eq!(hits.cta, None, "upgrade CTA disabled: no button to hover");
     }
 
-    /// Reservation-first budget: the hide affordances keep their full width and
-    /// only the `[Label]` button truncates when the row is tight (dismissible
-    /// promo, width 50: hide block 25+2+6 reserved → ~15 cols for the button).
+    /// Reservation-first budget: the `[Label]` button is suppressed (CTA
+    /// disabled); the hide affordances keep their full width.
     #[test]
-    fn render_promo_row_truncates_button_never_affordances() {
+    fn render_promo_row_cta_disabled_hide_affordances_only() {
         let anns = [promo(
             "p",
             "msg",
@@ -1587,14 +1519,16 @@ mod tests {
         let mut buf = Buffer::empty(area);
         let hits = render_banner(area, &mut buf, &anns, &no_hidden(), false, false, true);
         let row0 = buf_row(&buf, area, 0);
-        assert!(row0.starts_with("[Upgrade"), "row0={row0:?}");
         assert!(
-            row0.contains('…'),
-            "button label must truncate; row0={row0:?}"
+            !row0.starts_with("[Upgrade"),
+            "upgrade CTA disabled; row0={row0:?}"
         );
-        assert!(row0.contains(HIDE_CTA), "row0={row0:?}");
-        assert!(row0.ends_with(HIDE_BUTTON), "row0={row0:?}");
-        assert!(hits.cta.is_some());
+        assert!(row0.contains(HIDE_CTA) || row0.is_empty(), "row0={row0:?}");
+        assert!(
+            row0.ends_with(HIDE_BUTTON) || row0.is_empty(),
+            "row0={row0:?}"
+        );
+        assert!(hits.cta.is_none());
         assert_eq!(hits.hide, Some(Rect::new(44, 0, 6, 1)));
     }
 
@@ -1615,7 +1549,7 @@ mod tests {
     }
 
     /// Degenerate width: the hide CTA text is skipped whole (redundant with
-    /// [hide]) instead of painting a clipped fragment; nothing panics.
+    /// [hide]); nothing panics. Upgrade CTA disabled — no [Go] button.
     #[test]
     fn render_promo_row_narrow_width_drops_hide_cta_text() {
         let anns = [promo("p", "msg body", Some(("Go", "https://x.ai")))];
@@ -1625,8 +1559,8 @@ mod tests {
 
         let row0 = buf_row(&buf, area, 0);
         assert!(!row0.contains("hide:"), "row0={row0:?}");
-        assert!(row0.ends_with(HIDE_BUTTON), "row0={row0:?}");
-        assert!(row0.starts_with("[Go]"), "row0={row0:?}");
+        assert!(row0.ends_with(HIDE_BUTTON) || row0.is_empty(), "row0={row0:?}");
+        assert!(!row0.starts_with("[Go]"), "upgrade CTA disabled; row0={row0:?}");
         assert_eq!(hits.hide, Some(Rect::new(14, 0, 6, 1)));
     }
 }

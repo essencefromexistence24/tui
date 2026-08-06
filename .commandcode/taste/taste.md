@@ -1,0 +1,11 @@
+- Prefers streaming/progressive rendering of AI responses over batch display; dislikes all-at-once output. Confidence: 0.95
+- Expects non-blocking async I/O — the UI must remain responsive and accept input during streaming or loading operations. Confidence: 0.95
+- Prefers shimmer/skeleton-screen loading indicators over text-based placeholders (e.g., "…" or caret). Confidence: 0.85
+- Prefers multi-line text rendering for labels/titles over aggressive single-line truncation; values showing full context even at the cost of vertical space. Confidence: 0.90
+- Uses `just` as the primary build/task runner (e.g., `just run`). Confidence: 0.85
+- Prefers draggable scrollbar thumbs (not just mouse-wheel scroll) with visible, functional scrollbars in all scrollable panels. Confidence: 0.75
+- Dislikes upgrade/paywall/nag CTAs in UI; wants all promotional upsell buttons, modals, toasts, and keyboard shortcuts (e.g., Ctrl+O upgrade) suppressed. Confidence: 0.80
+- Prefers human-readable labels over raw identifiers in user-facing displays (e.g., subagent names derived from type/persona/role rather than raw session IDs). Confidence: 0.80
+- Prefers commenting out code over deleting it when temporarily disabling features — keep the code gated cleanly for easy re-enablement. Confidence: 0.70
+- Values persistent sidebar/panel visibility across all application states; side panels should be first-class always-visible elements, not hidden in certain modes (e.g., subagent view, plan view). Confidence: 0.75
+- Prefers live activity/status indicators in side panels that update in real time and reflect current state, removed when the activity ends. Confidence: 0.65

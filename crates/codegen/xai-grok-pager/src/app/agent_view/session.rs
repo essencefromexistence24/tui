@@ -349,6 +349,9 @@ impl AgentView {
     /// Establish read-only child identity before a view is stored or opened.
     pub(crate) fn mark_as_subagent_view(&mut self) {
         self.is_subagent_view = true;
+        // The parent's right sidebar already wraps the subagent frame, so the
+        // child must not reserve a second sidebar column inside its own draw.
+        self.dx_ui.sidebar_visible = false;
     }
     /// Register a child view and establish its read-only subagent identity.
     pub(crate) fn insert_subagent_view(
