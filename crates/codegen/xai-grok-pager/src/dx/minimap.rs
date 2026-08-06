@@ -42,7 +42,12 @@ pub fn render_hover_card(
         return;
     }
     let width = screen.width.saturating_sub(6).clamp(32, 58);
-    let height = 8.min(screen.height);
+    // Compact: base height is the description's line count (capped at
+    // screen height), plus 2 for the border chrome; never taller than the
+    // pre-disable 8-line box. The card size follows the content so short
+    // preview text stays tight instead of wasting vertical space.
+    let desc_lines = description.lines().count().max(1) as u16;
+    let height = (desc_lines + 2).clamp(3, 8.min(screen.height));
     if width == 0 || height == 0 {
         return;
     }

@@ -9,3 +9,7 @@
 - Prefers commenting out code over deleting it when temporarily disabling features — keep the code gated cleanly for easy re-enablement. Confidence: 0.70
 - Values persistent sidebar/panel visibility across all application states; side panels should be first-class always-visible elements, not hidden in certain modes (e.g., subagent view, plan view). Confidence: 0.75
 - Prefers live activity/status indicators in side panels that update in real time and reflect current state, removed when the activity ends. Confidence: 0.65
+- Prefers supplementary/reference content (e.g., notes) at the bottom of side panels, with active/live content (tasks, subagents) positioned higher. Confidence: 0.75
+- Expects session-scoped data (notes, memory) to be per-chat, not global across all chats; dislikes data leaking between unrelated sessions. Confidence: 0.85
+- Treats user notes as plain text, not rendered markdown — `#` is literal text, not a heading. Confidence: 0.75
+- Prefers content-driven compact sizing for overlay cards (e.g., minimap hover); fixed large dimensions that waste vertical space on short content are undesirable. Confidence: 0.85

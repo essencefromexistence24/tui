@@ -17,30 +17,31 @@ pub const SECTION_COUNT: usize = 8;
 pub const TASKS_SECTION: usize = 0;
 pub const WORKFLOWS_SECTION: usize = 1;
 pub const PROMPTS_SECTION: usize = 2;
-pub const NOTES_SECTION: usize = 3;
-pub const SUBAGENTS_SECTION: usize = 4;
-pub const PLUGINS_SECTION: usize = 6;
-pub const MCP_SECTION: usize = 7;
+pub const SUBAGENTS_SECTION: usize = 3;
+pub const PLUGINS_SECTION: usize = 5;
+pub const MCP_SECTION: usize = 6;
+/// Notes sits at the bottom of the right panel, below the live subagent list.
+pub const NOTES_SECTION: usize = 7;
 pub const SECTION_NAMES: [&str; SECTION_COUNT] = [
     "Tasks",
     "Workflows",
     "Prompts",
-    "Notes",
     "Subagents",
     "LSP",
     "Plugins",
     "MCP",
+    "Notes",
 ];
 pub const MIN_WIDTH: u16 = 100;
 pub const PANEL_WIDTH: u16 = 40;
 
 /// Sections commented out of the right panel for now (Prompts, LSP, Plugins,
 /// MCP). Their headers and bodies are skipped entirely so the panel only shows
-/// Tasks, Workflows, Notes, and Subagents.
+/// Tasks, Workflows, Subagents, and Notes.
 pub fn is_hidden_section(index: usize) -> bool {
     matches!(
         index,
-        PROMPTS_SECTION | PLUGINS_SECTION | MCP_SECTION | 5 // LSP
+        PROMPTS_SECTION | PLUGINS_SECTION | MCP_SECTION | 4 // LSP
     )
 }
 
@@ -71,7 +72,7 @@ pub struct SidebarUiState {
 impl Default for SidebarUiState {
     fn default() -> Self {
         Self {
-            accordion_open: [false, false, false, true, false, false, false, false],
+            accordion_open: [false, false, false, false, false, false, false, true],
             scroll: 0,
             panel_area: Rect::default(),
             section_areas: [Rect::default(); SECTION_COUNT],

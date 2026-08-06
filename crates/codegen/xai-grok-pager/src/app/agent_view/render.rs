@@ -4672,17 +4672,17 @@ impl AgentView {
             }
         };
         // Prompts / LSP / Plugins / MCP sections are disabled for now — the
-        // right panel focuses on Tasks, Workflows, Notes, and Subagents.
+        // right panel shows Tasks, Workflows, Subagents (top) and Notes (bottom).
         let _ = &prompts;
-        let bodies = [
-            tasks,
-            workflows,
-            Vec::<String>::new(),
-            sidebar_notes_lines(),
-            subagents,
-            Vec::<String>::new(),
-            Vec::<String>::new(),
-            Vec::<String>::new(),
+        let bodies: [Vec<String>; 8] = [
+            tasks,                       // 0: Tasks
+            workflows,                   // 1: Workflows
+            Vec::new(),                  // 2: Prompts (hidden)
+            subagents,                    // 3: Subagents
+            Vec::new(),                  // 4: LSP (hidden)
+            Vec::new(),                  // 5: Plugins (hidden)
+            Vec::new(),                  // 6: MCP (hidden)
+            sidebar_notes_lines(&self.session), // 7: Notes (bottom)
         ];
         let sections = std::array::from_fn(|i| SidebarSection {
             name: SECTION_NAMES[i],
@@ -4721,18 +4721,34 @@ impl AgentView {
             .find(|entry| entry.block.is_agent_message())
             .and_then(|entry| entry.block.searchable_text())
             .filter(|text| !text.trim().is_empty())
+            .map(|text| {
+                // Only the first few lines for the hover card — the full
+                // response can be hundreds of lines and wastes the card height.
+                text.lines().take(4).collect::<Vec<_>>().join("\n")
+            })
             .unwrap_or_else(|| "Waiting for an assistant response…".to_string());
         Some((title, response))
     }
 }
-/// Memory notes for the right panel's Notes section: reads
-/// `<grok_home>/memory/MEMORY.md` and shows its first lines (up to a cap).
+/// Per-session notes for the right panel's Notes section (bottom of panel).
+/// Uses `<grok_home>/sessions/<cwd>/<session_id>/notes.md` so each chat has
+/// its own notes, not a single global MEMORY.md shared across all chats.
 /// Falls back to an empty-state message when the file is missing or blank.
-fn sidebar_notes_lines() -> Vec<String> {
+fn sidebar_notes_lines(session: &crate::app::agent_view::AgentSession) -> Vec<String> {
     const MAX_LINES: usize = 8;
+    let sid = session
+        .session_id
+        .as_ref()
+        .map(|s| s.0.as_ref())
+        .unwrap_or("");
+    if sid.is_empty() {
+        return vec!["No Notes Yet".to_string()];
+    }
     let path = xai_grok_tools::util::grok_home::grok_home()
-        .join("memory")
-        .join("MEMORY.md");
+        .join("sessions")
+        .join(urlencoding::encode(&session.cwd.to_string_lossy()).as_ref())
+        .join(sid)
+        .join("notes.md");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return vec!["No Notes Yet".to_string()];
     };

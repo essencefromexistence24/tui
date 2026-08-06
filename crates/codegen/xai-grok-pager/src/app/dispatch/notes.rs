@@ -42,9 +42,9 @@ pub(super) fn dispatch_enter_remember_mode(app: &mut AppView) -> Vec<Effect> {
 /// mode so the user can amend it and press Enter to save (same submit path as
 /// a fresh note, which routes through LLM rewrite + save).
 pub(super) fn dispatch_edit_note(app: &mut AppView) -> Vec<Effect> {
+    let path = memory_notes_path(app);
     with_active_agent(app, |agent| {
         agent.prompt_input_mode = PromptInputMode::Remember;
-        let path = memory_notes_path();
         let text = std::fs::read_to_string(&path).unwrap_or_default();
         let text = text.trim().to_string();
         agent.prompt.set_text(&text);
@@ -57,10 +57,11 @@ pub(super) fn dispatch_edit_note(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Delete the memory note: clear `MEMORY.md` and surface a confirmation.
+/// Delete the memory note: clear the per-session notes file and surface a
+/// confirmation.
 pub(super) fn dispatch_delete_note(app: &mut AppView) -> Vec<Effect> {
+    let path = memory_notes_path(app);
     with_active_agent(app, |agent| {
-        let path = memory_notes_path();
         let existed = path.exists();
         match std::fs::write(&path, "") {
             Ok(()) => {
@@ -80,11 +81,37 @@ pub(super) fn dispatch_delete_note(app: &mut AppView) -> Vec<Effect> {
     vec![]
 }
 
-/// Path to the global memory note file (`<grok_home>/memory/MEMORY.md`).
-fn memory_notes_path() -> std::path::PathBuf {
+/// Path to the per-session memory note file
+/// (`<grok_home>/sessions/<cwd>/<sid>/notes.md`), matching the right panel's
+/// Notes section so edits/saves reflect in the sidebar.
+fn memory_notes_path(app: &AppView) -> std::path::PathBuf {
+    let (cwd, sid) = match app.active_view {
+        ActiveView::Agent(id) => {
+            if let Some(agent) = app.agents.get(&id) {
+                let sid = agent
+                    .session
+                    .session_id
+                    .as_ref()
+                    .map(|s| s.0.as_ref())
+                    .unwrap_or("");
+                (agent.session.cwd.clone(), sid.to_string())
+            } else {
+                return xai_grok_tools::util::grok_home::grok_home()
+                    .join("memory")
+                    .join("MEMORY.md");
+            }
+        }
+        _ => {
+            return xai_grok_tools::util::grok_home::grok_home()
+                .join("memory")
+                .join("MEMORY.md");
+        }
+    };
     xai_grok_tools::util::grok_home::grok_home()
-        .join("memory")
-        .join("MEMORY.md")
+        .join("sessions")
+        .join(urlencoding::encode(&cwd.to_string_lossy()).as_ref())
+        .join(&sid)
+        .join("notes.md")
 }
 
 /// Send feedback text to the server. Shows a thank-you message immediately
