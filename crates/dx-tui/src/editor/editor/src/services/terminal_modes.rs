@@ -18,8 +18,8 @@ use crossterm::{
 	ExecutableCommand,
 	cursor::SetCursorStyle,
 	event::{
-		DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, KeyboardEnhancementFlags,
-		PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+		DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+		KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 	},
 	terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
