@@ -645,6 +645,7 @@ impl AgentView {
         }
     }
     /// Status-row chrome for a wake turn, or `None` when a local turn owns it.
+    #[cfg(test)]
     pub(crate) fn wake_display_state(&self) -> Option<&'static crate::app::agent::AgentState> {
         if !self.session.state.is_idle() {
             return None;

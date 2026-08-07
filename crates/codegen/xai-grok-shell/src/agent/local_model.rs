@@ -54,7 +54,7 @@ struct ServerState {
 }
 
 impl LocalServerHandle {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             state: Arc::new(Mutex::new(ServerState {
                 port: 0,
@@ -66,7 +66,7 @@ impl LocalServerHandle {
 
     /// Ensure the managed server is running. Returns the port it's listening on.
     /// If already running, health-checks and returns immediately.
-    pub async fn ensure_running(&self, config: &LocalServerConfig) -> Result<u16, String> {
+    pub(crate) async fn ensure_running(&self, config: &LocalServerConfig) -> Result<u16, String> {
         let mut state = self.state.lock().await;
 
         if state.started {
