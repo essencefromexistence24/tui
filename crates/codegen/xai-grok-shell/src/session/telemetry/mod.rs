@@ -1,29 +1,10 @@
+//! Session-level telemetry helpers: permission analytics, hook/skill labels, harness snapshot.
+
+mod permission;
+
+pub(crate) use permission::*;
+
 use xai_grok_telemetry::events::SessionHarness;
-use xai_grok_workspace::permission::Decision;
-
-/// Permission-mode label for the `session.permission_mode_changed` span.
-pub(crate) fn permission_mode_label(is_yolo: bool) -> &'static str {
-    if is_yolo {
-        "bypassPermissions"
-    } else {
-        "default"
-    }
-}
-
-/// Telemetry `source` label for a permission [`Decision`] on the `tool.decision`
-/// span. `is_yolo` collapses auto-approvals to `config`. `Decision::Allow`/`Ask`
-/// carry no provenance, so a config/policy allow is indistinguishable from a
-/// user click — report neutral `allowed` rather than guessing `user_temporary`.
-pub(crate) fn permission_decision_source(decision: &Decision, is_yolo: bool) -> &'static str {
-    match decision {
-        Decision::PolicyDeny(_) => "config",
-        Decision::Reject(_) => "user_reject",
-        Decision::Cancelled => "user_abort",
-        Decision::FollowupMessage(_) => "user_followup",
-        Decision::Allow | Decision::Ask if is_yolo => "config",
-        Decision::Allow | Decision::Ask => "allowed",
-    }
-}
 
 /// Emit an `mcp.server_connection` span. `duration_ms` / `tool_count` /
 /// `error_type` are status-specific; pass `None` when not applicable.
@@ -77,6 +58,23 @@ pub(crate) fn skill_source_label(skill_path: &str, cwd: &str) -> &'static str {
         (Some(_), None) => "projectSettings",
         (None, Some(_)) => "userSettings",
         (None, None) => "bundled",
+    }
+}
+
+/// Canonicalizes both paths; one that cannot be canonicalized (synthetic paths like `chat-product://`) matches only when identical.
+pub(crate) fn is_same_skill_file(
+    skill_path: &std::path::Path,
+    read_path: &std::path::Path,
+) -> bool {
+    if skill_path == read_path {
+        return true;
+    }
+    match (
+        dunce::canonicalize(skill_path),
+        dunce::canonicalize(read_path),
+    ) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
@@ -145,7 +143,7 @@ pub(crate) struct SessionHarnessMetrics {
 }
 
 impl SessionHarnessMetrics {
-    pub async fn into_event(self, hooks: Vec<HookRegInfo>) -> SessionHarness {
+    pub(crate) async fn into_event(self, hooks: Vec<HookRegInfo>) -> SessionHarness {
         // One `plugin.loaded` span per enabled plugin at session start.
         if let Some(registry) = self.plugin_registry.as_deref() {
             for plugin in registry.enabled_plugins() {
@@ -208,5 +206,53 @@ impl SessionHarnessMetrics {
             is_git_repo: xai_grok_telemetry::context::collect_git_context(&self.cwd).is_git_repo,
             auto_update: self.auto_update,
         }
+    }
+}
+
+#[cfg(test)]
+mod is_same_skill_file_tests {
+    use super::is_same_skill_file;
+    use std::path::Path;
+
+    #[test]
+    fn matches_identical_paths() {
+        assert!(is_same_skill_file(
+            Path::new("/home/u/.grok/skills/review/SKILL.md"),
+            Path::new("/home/u/.grok/skills/review/SKILL.md")
+        ));
+    }
+
+    #[test]
+    fn rejects_a_different_skill() {
+        assert!(!is_same_skill_file(
+            Path::new("/home/u/.grok/skills/review/SKILL.md"),
+            Path::new("/home/u/.grok/skills/design/SKILL.md")
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn matches_through_a_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let skill = real.join("SKILL.md");
+        std::fs::write(&skill, "---\nname: x\n---\n").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        assert!(is_same_skill_file(&skill, &link.join("SKILL.md")));
+    }
+
+    #[test]
+    fn synthetic_product_path_does_not_match_a_real_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = dir.path().join("SKILL.md");
+        std::fs::write(&skill, "body").unwrap();
+
+        assert!(!is_same_skill_file(
+            Path::new("chat-product://commit"),
+            &skill
+        ));
     }
 }

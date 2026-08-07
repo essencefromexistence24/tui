@@ -1454,6 +1454,13 @@ impl AgentView {
                     state.plugins_collapsed_groups.remove(group_key)
                 }
             }
+            crate::views::extensions_modal::ExtensionsTab::Skills => {
+                if collapsed {
+                    state.skills_collapsed_groups.insert(group_key.to_string())
+                } else {
+                    state.skills_collapsed_groups.remove(group_key)
+                }
+            }
             crate::views::extensions_modal::ExtensionsTab::Marketplace => {
                 let source_has_error = group_key
                     .parse::<usize>()
@@ -1503,7 +1510,7 @@ impl AgentView {
                     false
                 }
             }
-            _ => {
+            crate::views::extensions_modal::ExtensionsTab::Providers => {
                 if collapsed {
                     state.picker_state.expanded.remove(&sel)
                 } else {
@@ -1973,7 +1980,23 @@ impl AgentView {
                                 }
                             }
                         }
-                        ExtensionsTab::Skills => {}
+                        ExtensionsTab::Skills => {
+                            let sel = state.picker_state.selected;
+                            if let Some(gk) = state
+                                .entry_group_keys
+                                .get(sel)
+                                .and_then(|k| k.as_ref())
+                                .cloned()
+                            {
+                                if !state.skills_collapsed_groups.remove(&gk) {
+                                    state.skills_collapsed_groups.insert(gk);
+                                }
+                            } else if state.picker_state.expanded.contains(&sel) {
+                                state.picker_state.expanded.remove(&sel);
+                            } else {
+                                state.picker_state.expanded.insert(sel);
+                            }
+                        }
                         ExtensionsTab::Providers => {}
                     }
                 }
