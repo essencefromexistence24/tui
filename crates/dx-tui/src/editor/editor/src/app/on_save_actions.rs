@@ -603,6 +603,7 @@ fn detect_shell() -> String {
 		if std::path::Path::new("/bin/sh").exists() {
 			return "/bin/sh".to_string();
 		}
+		"sh".to_string()
 	}
 
 	#[cfg(windows)]
