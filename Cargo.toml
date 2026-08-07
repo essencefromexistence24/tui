@@ -434,6 +434,18 @@ inherits = "release-dist"
 # All settings now match the parent — this is an intentional alias.
 
 
+# Size-optimized release profile for inspecting the minimal possible binary.
+# opt-level="z" + thin LTO + symbol strip. Not used for shipping.
+[profile.size-opt]
+inherits = "release"
+opt-level = "z"
+lto = "thin"
+codegen-units = 16
+panic = "abort"
+strip = true
+incremental = false
+debug = 0
+
 [profile.dev]
 panic = "abort"
 split-debuginfo = "unpacked"
