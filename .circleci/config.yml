@@ -49,17 +49,6 @@ commands:
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends \
               cmake pkg-config build-essential unzip libasound2-dev
-      - run:
-          name: Add swapfile (large = 8 GB RAM)
-          command: |
-            set -euo pipefail
-            if [ ! -f /swapfile ]; then
-              sudo fallocate -l 4G /swapfile
-              sudo chmod 600 /swapfile
-              sudo mkswap /swapfile
-              sudo swapon /swapfile
-            fi
-            free -h
 
   install-protoc:
     steps:
@@ -113,6 +102,14 @@ jobs:
             source "$BASH_ENV"
             rustc --version && cargo --version
             cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> -j 2
+      - save_cache:
+          # Keep compiled deps even on OOM so the next run resumes instead of restarting.
+          key: cargo-{{ .Environment.CIRCLE_JOB }}-{{ checksum "Cargo.lock" }}-{{ .Branch }}
+          when: on_fail
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - ./target
       - run:
           name: Report binary size
           command: |
