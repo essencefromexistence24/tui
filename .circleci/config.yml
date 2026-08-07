@@ -48,7 +48,7 @@ commands:
             set -euo pipefail
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends \
-              cmake pkg-config build-essential unzip
+              cmake pkg-config build-essential unzip libasound2-dev
 
   install-protoc:
     steps:
