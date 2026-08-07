@@ -26,7 +26,7 @@ executors:
       # rustup auto-installs the version pinned in rust-toolchain.toml (1.96.0)
       # if this image's default differs.
       - image: cimg/rust:1.94.1
-    resource_class: xlarge # 8 vCPU / 16 GB - this dep tree needs the RAM
+    resource_class: large # 4 vCPU / 8 GB (xlarge is paid-only; not on the Free plan)
     working_directory: ~/repo
     environment:
       BASH_ENV: /tmp/BASH_ENV
@@ -101,7 +101,7 @@ jobs:
             set -euo pipefail
             source "$BASH_ENV"
             rustc --version && cargo --version
-            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> -j 6
+            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> -j 3
       - run:
           name: Report binary size
           command: |
