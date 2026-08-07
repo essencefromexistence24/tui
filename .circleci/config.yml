@@ -25,7 +25,7 @@ executors:
     docker:
       # rustup auto-installs the version pinned in rust-toolchain.toml (1.96.0)
       # if this image's default differs.
-      - image: cimg/rust:1.96.0
+      - image: cimg/rust:1.94.1
     resource_class: xlarge # 8 vCPU / 16 GB - this dep tree needs the RAM
     working_directory: ~/repo
     environment:
