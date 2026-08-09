@@ -1,0 +1,13 @@
+[package]
+name = "dx-route-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQLite storage layer for compression settings, combos, and stats"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+rusqlite.workspace = true
+uuid.workspace = true

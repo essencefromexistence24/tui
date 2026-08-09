@@ -1,0 +1,42 @@
+================================================================================
+RLM - QUICK START
+================================================================================
+
+1. Set credentials
+   - Preferred: RLM_API_KEY
+   - Compatible: GROQ_API_KEY
+
+2. Pick a model
+   - Smart/default model: your stronger reasoning model
+   - Optional fast model: a cheaper or faster search-oriented model
+
+3. Use the library
+   - Create an RLM instance with `RLM::from_env_groq(...)`
+   - Or use `RLM::from_provider(...)` with `LLMProviderConfig`
+
+4. Choose a high-level entrypoint
+   - complete_document(...)
+   - summarize_document(...)
+   - build_agent_context(...)
+
+================================================================================
+RECOMMENDED EMBED FLOW
+================================================================================
+
+Editor or agent host:
+  1. Load the oversized file or merged context bundle
+  2. Wrap it in RLMDocument
+  3. Run RLM
+  4. Pass the reduced answer/context to the downstream local or remote model
+
+================================================================================
+NOTES
+================================================================================
+
+- No API keys are stored in this repository anymore.
+- This crate is library-first and intended for integration into DX, Zed forks,
+  Codex forks, and ZeroClaw forks.
+- For deeper integration guidance, read:
+  - README.md
+  - docs/INTEGRATIONS.md
+  - docs/PRODUCTION_READY.md

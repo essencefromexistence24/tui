@@ -1,0 +1,11 @@
+[package]
+name = "dx-route-ultra"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Ultra compression — token-scoring heuristic with optional ONNX SLM tier"
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+regex-lite.workspace = true

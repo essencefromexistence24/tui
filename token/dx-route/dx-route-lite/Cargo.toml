@@ -1,0 +1,11 @@
+[package]
+name = "dx-route-lite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lite compression — whitespace, comments, JSON null stripping, ANSI removal"
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+regex-lite.workspace = true

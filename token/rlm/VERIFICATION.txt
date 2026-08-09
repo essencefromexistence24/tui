@@ -1,0 +1,24 @@
+================================================================================
+RLM - SOURCE REVIEW STATUS
+================================================================================
+
+Status Date: 2026-04-27
+Mode: Source completion pass only
+
+This file reflects the state of the crate after the production refactor in this
+repository. It does not claim runtime verification for environments where cargo
+execution was intentionally skipped.
+
+Verified in source:
+  - library-first public API
+  - typed document/request/response surface
+  - OpenAI-compatible provider abstraction
+  - streaming and standard execution paths
+  - no embedded API credentials in repository docs/examples/scripts
+  - updated crate documentation
+
+Still requires environment validation:
+  - cargo check
+  - cargo test
+  - live provider/model smoke tests
+  - host-specific integration tests
