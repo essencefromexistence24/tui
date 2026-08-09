@@ -962,6 +962,21 @@ impl SessionActor {
                     .await;
                 ok_end_turn(0, None)
             }
+            BuiltinAction::RefineRun { instructions } => {
+                let msg = self.execute_refine_run(&instructions);
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::RefineStatus => {
+                let msg = self.execute_refine_status();
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
+            BuiltinAction::RefineRollback { id } => {
+                let msg = self.execute_refine_rollback(&id);
+                self.send_host_turn_slash_command_output(&msg).await;
+                ok_end_turn(0, None)
+            }
         }
     }
 

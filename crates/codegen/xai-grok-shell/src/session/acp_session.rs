@@ -169,6 +169,9 @@ use memory_dream::*;
 #[path = "acp_session_impl/goal_support.rs"]
 mod goal_support;
 pub(crate) use goal_support::*;
+#[path = "acp_session_impl/refine.rs"]
+mod refine;
+use refine::*;
 #[path = "acp_session_impl/hook_dispatch.rs"]
 mod hook_dispatch;
 use hook_dispatch::*;
@@ -808,6 +811,10 @@ pub(crate) struct SessionActor {
     /// Goal mode orchestration tracker. Session-scoped state for the
     /// Design-Execute-Verify loop. Modeled after `plan_mode` above.
     pub(crate) goal_tracker: Arc<parking_lot::Mutex<crate::session::goal_tracker::GoalTracker>>,
+    /// Continual Harness state + refinement log for this session (`/refine`).
+    /// Evidence-backed CRUD over the additive harness layer (prompt notes,
+    /// memory, skills, subagent specs) with snapshot rollback by refinement id.
+    pub(crate) refine: Arc<parking_lot::Mutex<xai_grok_refine::RefineSession>>,
     /// `task_id`s of background tasks (and monitors) that originated during
     /// the goal turn — either spawned by the goal model itself or reparented
     /// from a harness verifier/planner subagent on its exit. Their late

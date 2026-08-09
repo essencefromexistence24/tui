@@ -1,5 +1,4 @@
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use rhai::{Dynamic, EvalAltResult, Position};
 use tokio::sync::{mpsc, oneshot};
@@ -110,7 +109,7 @@ pub fn run_workflow(params: WorkflowRunParams) -> WorkflowOutcome {
         max_ops,
     } = params;
 
-    let ctx = Rc::new(RefCell::new(Ctx {
+    let ctx = Arc::new(Mutex::new(Ctx {
         host_tx,
         journal,
         seq: 0,
@@ -243,16 +242,16 @@ fn map_to_value(map: rhai::Map) -> ScriptResult<serde_json::Value> {
 }
 
 fn host_call<T>(
-    ctx: &Rc<RefCell<Ctx>>,
+    ctx: &Arc<Mutex<Ctx>>,
     kind: &'static str,
     payload: serde_json::Value,
     build: impl FnOnce(oneshot::Sender<Result<T, HostError>>) -> WorkflowHostRequest,
     to_result: impl FnOnce(T) -> serde_json::Value,
 ) -> ScriptResult<serde_json::Value> {
     let hash = request_hash(kind, &payload);
-    let seq = ctx.borrow_mut().next_seq()?;
+    let seq = ctx.lock().unwrap().next_seq()?;
 
-    match ctx.borrow().journal.replay(seq, kind, &hash) {
+    match ctx.lock().unwrap().journal.replay(seq, kind, &hash) {
         Ok(Some(recorded)) => {
             if let Some(err) = replay_host_error(&recorded) {
                 return Err(err);
@@ -264,7 +263,7 @@ fn host_call<T>(
     }
 
     let (reply_tx, reply_rx) = oneshot::channel();
-    ctx.borrow()
+    ctx.lock().unwrap()
         .host_tx
         .send(build(reply_tx))
         .map_err(|_| terminated(ControlToken::Fatal("workflow host channel closed".into())))?;
@@ -288,17 +287,17 @@ fn host_call<T>(
         Err(HostError::Cancelled) => return Err(terminated(ControlToken::Cancelled)),
         Err(HostError::Unsupported(msg)) => {
             let sentinel = host_error_sentinel(&msg);
-            ctx.borrow_mut().record(seq, kind, hash, sentinel)?;
+            ctx.lock().unwrap().record(seq, kind, hash, sentinel)?;
             return Err(runtime_error(msg));
         }
         Err(HostError::Failed(msg)) => {
             let sentinel = host_error_sentinel(&msg);
-            ctx.borrow_mut().record(seq, kind, hash, sentinel)?;
+            ctx.lock().unwrap().record(seq, kind, hash, sentinel)?;
             return Err(runtime_error(msg));
         }
     };
 
-    ctx.borrow_mut().record(seq, kind, hash, value.clone())?;
+    ctx.lock().unwrap().record(seq, kind, hash, value.clone())?;
     Ok(value)
 }
 
@@ -339,22 +338,22 @@ fn is_host_terminal_sentinel(recorded: &serde_json::Value) -> bool {
     recorded.get(HOST_TERMINAL_KEY).is_some()
 }
 
-fn host_emit(ctx: &Rc<RefCell<Ctx>>, build: impl FnOnce(bool) -> WorkflowHostRequest) {
+fn host_emit(ctx: &Arc<Mutex<Ctx>>, build: impl FnOnce(bool) -> WorkflowHostRequest) {
     let (replaying, tx) = {
-        let ctx = ctx.borrow();
+        let ctx = ctx.lock().unwrap();
         (ctx.replaying(), ctx.host_tx.clone())
     };
     let _ = tx.send(build(replaying));
 }
 
-fn reserve_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) -> ScriptResult<()> {
+fn reserve_agent_calls(ctx: &Arc<Mutex<Ctx>>, count: usize) -> ScriptResult<()> {
     if count == 0 {
         return Ok(());
     }
     let count =
         u64::try_from(count).map_err(|_| runtime_error("workflow agent-call count overflowed"))?;
     let (reply_tx, reply_rx) = oneshot::channel();
-    ctx.borrow()
+    ctx.lock().unwrap()
         .host_tx
         .send(WorkflowHostRequest::ReserveAgentCalls {
             count,
@@ -381,7 +380,7 @@ fn reserve_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) -> ScriptResult<()>
     }
 }
 
-fn release_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) {
+fn release_agent_calls(ctx: &Arc<Mutex<Ctx>>, count: usize) {
     if count == 0 {
         return;
     }
@@ -390,7 +389,7 @@ fn release_agent_calls(ctx: &Rc<RefCell<Ctx>>, count: usize) {
     };
     let (reply_tx, reply_rx) = oneshot::channel();
     if ctx
-        .borrow()
+        .lock().unwrap()
         .host_tx
         .send(WorkflowHostRequest::ReleaseAgentCalls {
             count,
@@ -410,12 +409,12 @@ fn is_resumable_unjournaled_terminal(err: &EvalAltResult) -> bool {
     )
 }
 
-fn spawn_agent_call(ctx: &Rc<RefCell<Ctx>>, opts: AgentOpts) -> ScriptResult<Dynamic> {
+fn spawn_agent_call(ctx: &Arc<Mutex<Ctx>>, opts: AgentOpts) -> ScriptResult<Dynamic> {
     let payload = serde_json::to_value(&opts)
         .map_err(|e| runtime_error(format!("invalid agent options: {e}")))?;
     let hash = request_hash("spawn_agent", &payload);
     let is_live = {
-        let ctx = ctx.borrow();
+        let ctx = ctx.lock().unwrap();
         match ctx.journal.replay(ctx.seq, "spawn_agent", &hash) {
             Ok(Some(_)) => false,
             Ok(None) => true,
@@ -456,7 +455,7 @@ fn agent_opts_from_map(prompt: Option<&str>, map: rhai::Map) -> ScriptResult<Age
     Ok(opts)
 }
 
-fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
+fn register_host_fns(engine: &mut rhai::Engine, ctx: &Arc<Mutex<Ctx>>) {
     let c = ctx.clone();
     engine.register_fn("agent", move |prompt: &str| -> ScriptResult<Dynamic> {
         spawn_agent_call(
@@ -503,7 +502,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                 })
                 .collect::<ScriptResult<Vec<_>>>()?;
             let live_count = {
-                let ctx = c.borrow();
+                let ctx = c.lock().unwrap();
                 let mut seq = ctx.seq;
                 let mut live = 0usize;
                 for (_, hash) in &requests {
@@ -523,14 +522,14 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
             reserve_agent_calls(&c, live_count)?;
             let mut pending = Vec::with_capacity(requests.len());
             for (opts, hash) in requests {
-                let seq = c.borrow_mut().next_seq().inspect_err(|_| {
+                let seq = c.lock().unwrap().next_seq().inspect_err(|_| {
                     drain_parallel_replies(std::mem::take(&mut pending));
                 })?;
-                match c.borrow().journal.replay(seq, "spawn_agent", &hash) {
+                match c.lock().unwrap().journal.replay(seq, "spawn_agent", &hash) {
                     Ok(Some(value)) => pending.push(PendingAgent::Replayed(value)),
                     Ok(None) => {
                         let (reply_tx, reply_rx) = oneshot::channel();
-                        if c.borrow()
+                        if c.lock().unwrap()
                             .host_tx
                             .send(WorkflowHostRequest::SpawnAgent {
                                 opts,
@@ -627,7 +626,7 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
                         continue;
                     };
                     if let Err(error) =
-                        c.borrow_mut()
+                        c.lock().unwrap()
                             .record(*seq, "spawn_agent", hash.clone(), value.clone())
                     {
                         terminal_error.get_or_insert(error);
@@ -726,12 +725,12 @@ fn register_host_fns(engine: &mut rhai::Engine, ctx: &Rc<RefCell<Ctx>>) {
             let parsed: PauseKind = kind.parse().map_err(|e: String| runtime_error(e))?;
             let payload = serde_json::json!({ "kind": kind, "message": message });
             let hash = request_hash("await_user", &payload);
-            let seq = c.borrow_mut().next_seq()?;
-            let replayed = c.borrow().journal.replay(seq, "await_user", &hash);
+            let seq = c.lock().unwrap().next_seq()?;
+            let replayed = c.lock().unwrap().journal.replay(seq, "await_user", &hash);
             match replayed {
                 Ok(Some(_)) => Ok(()),
                 Ok(None) => {
-                    c.borrow_mut()
+                    c.lock().unwrap()
                         .record(seq, "await_user", hash, serde_json::Value::Null)?;
                     Err(terminated(ControlToken::Pause(parsed, message.to_string())))
                 }

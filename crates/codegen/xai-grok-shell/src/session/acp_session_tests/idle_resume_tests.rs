@@ -74,7 +74,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let (gateway_tx, _) = mpsc::unbounded_channel::<xai_acp_lib::AcpClientMessage>();
             let (persistence_tx, _) = mpsc::unbounded_channel::<PersistenceMsg>();
-            let cwd = xai_grok_paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+            let cwd = xai_grok_paths::AbsPathBuf::new(std::env::temp_dir()).unwrap();
             let fs = Arc::new(xai_grok_workspace::file_system::MockFs::new(
                 cwd.to_path_buf(),
             ));
@@ -129,6 +129,7 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
+                refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
                 session_info: SessionInfo {
                     id: acp::SessionId::new("test-idle-resume"),
                     cwd: cwd.as_str().to_string(),

@@ -636,6 +636,11 @@ pub(crate) async fn spawn_session_actor(
         };
         Arc::new(parking_lot::Mutex::new(tracker))
     };
+    let refine_session = Arc::new(parking_lot::Mutex::new(
+        xai_grok_refine::RefineSession::load_or_default(Some(
+            &crate::session::persistence::session_dir(&session_info),
+        )),
+    ));
     let restored_prompt_mode = plan_mode.lock().session_prompt_mode();
     let current_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
     let turn_prompt_mode = Arc::new(parking_lot::Mutex::new(restored_prompt_mode));
@@ -1697,6 +1702,7 @@ pub(crate) async fn spawn_session_actor(
         }),
         goal_harness_availability_reconciled: std::sync::atomic::AtomicBool::new(false),
         goal_tracker,
+        refine: refine_session,
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashSet::new()),
         goal_continuation_streak: std::sync::atomic::AtomicU32::new(0),
         goal_blocked_streak: std::sync::atomic::AtomicU32::new(0),

@@ -300,6 +300,28 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
             }
         },
     },
+    BuiltinCommand {
+        name: "refine",
+        description: "Review and refine the agent's harness layer (memory, skills, prompt notes, subagent specs)",
+        argument_hint: Some("status | rollback <id> | create <kind> <title>: <content> | update <id>: <content> | delete <id>"),
+        aliases: &[],
+        gate: BuiltinGate::AlwaysOn,
+        resolve: |args| {
+            let trimmed = args.trim();
+            let lower = trimmed.to_lowercase();
+            if lower.is_empty() || lower == "status" {
+                BuiltinAction::RefineStatus
+            } else if let Some(id) = trimmed.strip_prefix("rollback ") {
+                BuiltinAction::RefineRollback {
+                    id: id.trim().to_string(),
+                }
+            } else {
+                BuiltinAction::RefineRun {
+                    instructions: trimmed.to_string(),
+                }
+            }
+        },
+    },
 ];
 /// Split a trailing `--budget <tokens>` flag off a `/goal` objective.
 ///
@@ -1239,6 +1261,13 @@ pub(super) enum BuiltinAction {
         name: String,
         input: String,
     },
+    RefineRun {
+        instructions: String,
+    },
+    RefineStatus,
+    RefineRollback {
+        id: String,
+    },
 }
 impl BuiltinAction {
     pub(crate) fn command_name(&self) -> &'static str {
@@ -1273,6 +1302,9 @@ impl BuiltinAction {
             BuiltinAction::DeepResearch { .. } => "deep-research",
             BuiltinAction::WorkflowManage { .. } => "workflow",
             BuiltinAction::WorkflowLaunch { .. } => "workflow",
+            BuiltinAction::RefineRun { .. }
+            | BuiltinAction::RefineStatus
+            | BuiltinAction::RefineRollback { .. } => "refine",
         }
     }
     pub(crate) fn args_provided(&self) -> bool {
@@ -1307,6 +1339,9 @@ impl BuiltinAction {
             BuiltinAction::DeepResearch { .. } => true,
             BuiltinAction::WorkflowManage { .. } => true,
             BuiltinAction::WorkflowLaunch { input, .. } => !input.is_empty(),
+            BuiltinAction::RefineRun { instructions } => !instructions.is_empty(),
+            BuiltinAction::RefineStatus => false,
+            BuiltinAction::RefineRollback { id } => !id.is_empty(),
         }
     }
 }

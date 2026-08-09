@@ -346,8 +346,8 @@ mod tests {
             proj,
             "echo done && cd /tmp && true",
         );
-        let long = format!("cd {} && true", "/".to_string() + &"a".repeat(200));
-        let long_cwd = "/".to_string() + &"a".repeat(200);
+        let long_cwd = format!("/{}", "a".repeat(200));
+        let long = format!("cd {long_cwd} && true");
         expect_peel(&long, &long_cwd, "true");
         expect_peel("cd /proj && cd /proj && true", proj, "cd /proj && true");
     }

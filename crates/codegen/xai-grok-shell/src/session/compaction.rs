@@ -2261,7 +2261,7 @@ mod inline_auto_compact_flow_tests {
         gateway_tx: mpsc::UnboundedSender<xai_acp_lib::AcpClientMessage>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
     ) -> SessionActor {
-        let cwd = AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap();
+        let cwd = AbsPathBuf::new(std::env::temp_dir()).unwrap();
         let fs = Arc::new(MockFs::new(cwd.to_path_buf()));
         let terminal = Arc::new(DummyTerminal {});
         let (hunk_tx, _hunk_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2310,6 +2310,7 @@ mod inline_auto_compact_flow_tests {
         );
         chat_state_handle.record_token_usage(total_tokens);
         SessionActor {
+            refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
             unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
             session_info: SessionInfo {
                 id: acp::SessionId::new("test-auto-compact"),

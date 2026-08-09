@@ -119,7 +119,9 @@ So in reality:
   in native Rust.
 
 Prime Agent happens to have **both** ideas fused in one product; we have them
-**both** in Rust, but in two crates that are not yet wired together.
+**both** in Rust, and the long-context half is now exposed to the agent loop as
+the bounded `GrokBuild:rlm` read-only tool. The existing `task`/workflow
+surfaces remain the agent-recursion layer.
 
 ---
 
@@ -128,26 +130,80 @@ Prime Agent happens to have **both** ideas fused in one product; we have them
 1. **Python scratchpad** — `token/rlm` uses a tiny sandboxed Rhai with search
    helpers. Prime Agent gives the model full Python. We can keep Rhai or add a
    pluggable runtime (Rhai / Lua / RustPython / PyO3) behind a feature flag —
-   pure-Rust default, Python optional.
-2. **Wiring the two halves** — `token/rlm` is not called from the agent loop.
-   Integration target: a model-authored-code tool (scratchpad) that runs the
-   `token/rlm` loop (or an embedded interpreter) inside a turn.
+   pure-Rust default, Python optional. (Note: the whole-project xai stack is
+   already Rhai-native — see §5 — so Rhai is the zero-mismatch choice.)
+2. **Deeper wiring of the two halves** — `GrokBuild:rlm` now runs the
+   `token/rlm` loop inside a turn and can return `agent_context` for a later
+   child task. It does not yet create child agents directly from inside one RLM
+   invocation; composition is still explicit through `task` or `xai-workflow`.
 3. **`/refine` harness** — evidence-backed self-editing of supplemental state
    with snapshot rollback (memory today is append-only capture).
 4. **Depth cap** — `MAX_SUBAGENT_DEPTH: u32 = 1` (`crates\codegen\xai-grok-tools\src\implementations\grok_build\task\mod.rs:37`) limits deep recursion; true "deep RLM" needs the cap raised and propagated.
 
 ---
 
-## 5. The corrected DX plan
+## 5. Adding RLM to DX — verified integration facts
+
+> "dx-tui" = the whole repo (`G:\Dx\tui`), a single Cargo workspace containing
+> `xai-grok-tools`, `xai-grok-shell`, `xai-workflow`, `xai-grok-memory`, plus
+> the standalone `token/rlm` crate (currently **not** a workspace member).
+
+### Why it will NOT break
+
+- **The script engine already matches.** `xai-workflow` already depends on
+  `rhai` and uses `rhai::Engine` + `rhai::Scope` (`engine.rs:119,171`) — the
+  exact same engine `token/rlm`'s REPL uses (`repl.rs:21`). The whole-project
+  agent stack is already Rhai-native; adding `token/rlm` introduces **no new
+  interpreter** and **no Lua/Rhai conflict**. (Lua only lives in `dx-tui`'s own
+  plugin layer, a separate crate.)
+- **Dependencies already in the graph.** `token/rlm`'s deps (rhai, reqwest,
+  tokio, serde, regex, memchr) are all already used by the workspace crates.
+- **No workspace conflict.** `token/rlm` is standalone today (not in the root
+  `Cargo.toml` members list); adding it as a member is additive, not a move.
+
+### Why it will produce Prime-Agent-equivalent RLM (if wired correctly)
+
+The orchestration chain is already live and verified in source:
+
+| Chain link | Crate | Evidence |
+|---|---|---|
+| `xai-grok-shell` links tools + workflow + memory | `xai-grok-shell/Cargo.toml` | `xai-grok-tools`, `xai-workflow`, `xai-grok-memory` path deps |
+| Recursive child spawning | `xai-grok-tools` | `task` tool → `SubagentCoordinator`, `spawn_with_foreground_wait` (`backend.rs:272`) |
+| Programmatic recursion in Rhai | `xai-workflow` | `agent()`, `parallel()`, `budget()` host fns (`engine.rs:459+`) |
+| Long-context scratchpad (model-writes-code) | `token/rlm` | persistent `Scope` across iterations (`rlm.rs:908`) |
+
+The high-impact connections are now in place, but full Prime Agent parity is
+still not claimed:
+1. ✅ DONE: `token/rlm` → `crates/codegen/xai-rlm` (workspace member) and
+   `GrokBuild:rlm` (registry + agent-loop tool). The tool enforces source bounds,
+   workspace-local file access, cancellation, timeout, and bounded recursion.
+2. ✅ DONE: `/refine` snapshot/diff/rollback layer built as `xai-grok-refine`
+   (workspace member, 19/19 unit tests) and wired into the session actor as a
+   `/refine` slash command (status / rollback / create / update / delete).
+
+### Does "just add rlm" alone give Prime RLM? No.
+
+`token/rlm` by itself (even added to the workspace) provides only the
+*scratchpad/long-context half*. Prime Agent RLM = that half **+ recursive agent
+orchestration**. The orchestration half already exists in `xai-grok-tools` +
+`xai-workflow` — so the whole-project answer is **yes with wiring**, but the
+bare dependency line alone is not enough.
+
+---
+
+## 6. The corrected DX plan
 
 | Item | Status | Action |
 |---|---|---|
-| Recursive agent orchestration (RLM-core) | ✅ In grok-build | Keep; optionally raise depth cap |
-| Long-context scratchpad (RLM-context) | ✅ In `token/rlm` (Rust + Rhai) | Wire into the agent loop as a tool |
-| Model-authored code execution | ⚠️ Rhai-only, not exposed | Pluggable interpreter tool (feature-gated) |
-| `/refine` harness with rollback | ❌ | Build on existing memory |
+| Recursive agent orchestration (RLM-core) | ✅ In `xai-grok-tools` + `xai-workflow` | Keep; optionally raise depth cap |
+| Long-context scratchpad (RLM-context) | ✅ `crates/codegen/xai-rlm` + `GrokBuild:rlm` | Use bounded tool; direct child spawning inside RLM remains follow-up |
+| Rhai engine consistency | ✅ `xai-workflow` already Rhai | No interpreter mismatch to resolve |
+| Model-authored code execution | ✅ Bounded Rhai RLM tool | Add a persistent Python-class runtime only if product requirements justify it |
+| `/refine` harness with rollback | ✅ `xai-grok-refine` + `/refine` slash command (verified, wired) | Engine host-fn registration + LLM planner (follow-up) |
 | Peer agent→agent messaging | ⚠️ Workflow orchestration exists | Add runtime message bus |
 | Explicit `/autonomous` surface | ✅ `/goal` covers it | Thin wrapper + quality gates |
 
 We do not need to "port" Prime Agent. The RLM ideas are already split across
 our two Rust layers; the work is joining them and filling the three real gaps.
+Adding `token/rlm` to the workspace will **not** break the build — the
+integration is wiring work, not a rewrite.

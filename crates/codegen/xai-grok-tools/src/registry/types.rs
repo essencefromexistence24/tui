@@ -691,6 +691,7 @@ impl ToolRegistryBuilder {
         b.register::<grok_build::TodoWriteTool>();
         b.register::<grok_build::UpdateGoalTool>();
         b.register::<grok_build::WorkflowTool>();
+        b.register::<grok_build::RlmTool>();
         b.register::<grok_build::TaskOutputTool>();
         b.register::<grok_build::GetTerminalCommandOutputTool>();
         b.register::<grok_build::WaitTasksTool>();
@@ -2952,6 +2953,7 @@ mod tests {
             ("GrokBuild:search_replace", ToolKind::Edit),
             ("GrokBuild:grep", ToolKind::Search),
             ("GrokBuild:list_dir", ToolKind::List),
+            ("GrokBuild:rlm", ToolKind::Other),
         ] {
             assert_eq!(
                 kinds.get(id),

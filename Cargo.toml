@@ -40,6 +40,7 @@ members = [
     "crates/codegen/xai-grok-pager-render",
     "crates/codegen/xai-grok-paths",
     "crates/codegen/xai-grok-plugin-marketplace",
+    "crates/codegen/xai-grok-refine",
     "crates/codegen/xai-grok-sampler",
     "crates/codegen/xai-grok-sampling-types",
     "crates/codegen/xai-grok-sandbox",
@@ -65,6 +66,7 @@ members = [
     "crates/codegen/xai-prompt-queue",
     "crates/codegen/xai-ratatui-inline",
     "crates/codegen/xai-ratatui-textarea",
+    "crates/codegen/xai-rlm",
     "crates/codegen/xai-sqlite-journal",
     "crates/codegen/xai-system-power",
     "crates/codegen/xai-token-estimation",
@@ -253,7 +255,7 @@ regex = "1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
 reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
-rhai = { version = "1.25", features = ["serde"] }
+rhai = { version = "1.25", features = ["serde", "sync"] }
 ring = "0.17"
 rsa = "0.9"
 runfiles = "0.1"

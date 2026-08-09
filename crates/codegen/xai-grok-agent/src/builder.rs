@@ -693,8 +693,9 @@ impl AgentBuilder {
             if !preloaded.is_empty() {
                 let injection = crate::prompt::skills::format_skills_for_injection(&preloaded);
                 if !injection.is_empty() {
-                    definition.prompt_body =
-                        Some(injection + &definition.prompt_body.unwrap_or_default());
+                    let mut prompt_body = injection;
+                    prompt_body.push_str(&definition.prompt_body.unwrap_or_default());
+                    definition.prompt_body = Some(prompt_body);
                 }
             }
             paths

@@ -1,0 +1,83 @@
+[package]
+name = "xai-rlm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Embeddable recursive long-context runtime for question answering, summarization, and agent-context preparation"
+keywords = ["llm", "ai", "long-context", "recursive", "agent-runtime"]
+categories = ["text-processing", "api-bindings"]
+readme = "README.md"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+dotenvy = "0.15"
+futures = { workspace = true }
+memchr = { workspace = true }
+regex = { workspace = true }
+reqwest = { workspace = true }
+rhai = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tokio-stream = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[features]
+default = ["std"]
+std = []
+
+[[example]]
+name = "benchmark"
+path = "examples/benchmark.rs"
+
+[[example]]
+name = "parallel_benchmark"
+path = "examples/parallel_benchmark.rs"
+
+[[example]]
+name = "fast_search"
+path = "examples/fast_search.rs"
+
+[[example]]
+name = "phase1_demo"
+path = "examples/phase1_demo.rs"
+
+[[example]]
+name = "cache_demo"
+path = "examples/cache_demo.rs"
+
+[[example]]
+name = "streaming_demo"
+path = "examples/streaming_demo.rs"
+
+[[example]]
+name = "phase2_complete"
+path = "examples/phase2_complete.rs"
+
+[[example]]
+name = "multi_model_demo"
+path = "examples/multi_model_demo.rs"
+
+[[example]]
+name = "phase3_complete"
+path = "examples/phase3_complete.rs"
+
+[[example]]
+name = "ultimate_demo"
+path = "examples/ultimate_demo.rs"
+
+[[example]]
+name = "simple_test"
+path = "examples/simple_test.rs"
+
+[[example]]
+name = "recursive_reduce"
+path = "examples/recursive_reduce.rs"
+
+[lints]
+workspace = true
