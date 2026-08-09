@@ -1586,9 +1586,7 @@ impl Editor {
 		I: IntoIterator<Item = (K, ratatui::style::Color)>,
 		K: AsRef<str>,
 	{
-		let Some(mut theme) = self.theme_registry.get_cloned(base_theme) else {
-			return None;
-		};
+		let mut theme = self.theme_registry.get_cloned(base_theme)?;
 		theme.name = name.to_string();
 		let applied = theme.override_colors(overrides);
 		*self.theme.write().unwrap() = theme;

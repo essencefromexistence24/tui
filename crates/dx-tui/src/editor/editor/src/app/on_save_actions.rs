@@ -607,16 +607,11 @@ fn detect_shell() -> String {
 
 	#[cfg(windows)]
 	{
-		if let Ok(comspec) = std::env::var("COMSPEC") {
-			return comspec;
-		}
-		return "cmd.exe".to_string();
+		std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
 	}
 
 	#[cfg(not(any(unix, windows)))]
 	{
-		return "sh".to_string();
+		"sh".to_string()
 	}
-
-	"sh".to_string()
 }

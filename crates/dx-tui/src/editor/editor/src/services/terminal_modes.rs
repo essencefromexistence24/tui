@@ -14,12 +14,14 @@
 //! shared between direct mode (crossterm) and client/server mode (raw bytes).
 
 use anyhow::Result;
+#[cfg(not(windows))]
+use crossterm::event::EnableMouseCapture;
 use crossterm::{
 	ExecutableCommand,
 	cursor::SetCursorStyle,
 	event::{
-		DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-		KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
+		DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, KeyboardEnhancementFlags,
+		PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 	},
 	terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
