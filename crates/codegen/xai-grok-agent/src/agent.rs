@@ -3,6 +3,10 @@
 use std::sync::Arc;
 
 use xai_grok_sampling_types::HostedTool;
+use xai_grok_token_optimization::{
+    BudgetDecision, BudgetInput, OptimizationConfig, OptimizationPolicy, OptimizationRequestKind,
+    ToolCandidate, ToolRoutingConfig, route_tools,
+};
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::types::definition::ToolDefinition;
 
@@ -193,6 +197,74 @@ impl Agent {
     /// Built-in tool definitions only (excludes MCP tools).
     pub async fn tool_definitions_builtins_only(&self) -> Vec<ToolDefinition> {
         self.tool_bridge.tool_definitions_builtins_only().await
+    }
+
+    /// Return the model-facing tool subset for a request.
+    ///
+    /// The returned values are cloned presentation definitions. The bridge's
+    /// canonical definitions remain unchanged and continue to own dispatch,
+    /// validation, and execution. If routing finds no reliable match, it
+    /// safely returns the complete tool set.
+    pub async fn optimized_tool_definitions(
+        &self,
+        query: &str,
+        routing: &ToolRoutingConfig,
+    ) -> Vec<ToolDefinition> {
+        let definitions = self.tool_definitions().await;
+        let candidates = definitions
+            .iter()
+            .map(|definition| ToolCandidate {
+                name: definition.function.name.clone(),
+                description: definition.function.description.clone(),
+                always_include: false,
+            })
+            .collect::<Vec<_>>();
+        let route = route_tools(query, &candidates, routing);
+        route
+            .selected_indices
+            .into_iter()
+            .filter_map(|index| definitions.get(index).cloned())
+            .collect()
+    }
+
+    /// Build the complete model-facing presentation in one place. Routing
+    /// and schema minification operate on clones; the bridge's canonical
+    /// definitions remain untouched for dispatch and validation.
+    pub async fn optimized_model_tool_definitions(
+        &self,
+        query: &str,
+        config: &OptimizationConfig,
+    ) -> Vec<ToolDefinition> {
+        let mut definitions = if config.route_tools {
+            self.optimized_tool_definitions(query, &config.tool_routing)
+                .await
+        } else {
+            self.tool_definitions().await
+        };
+        if config.effective_mode() != xai_grok_token_optimization::OptimizationMode::Off
+            && config.optimize_tool_schemas
+        {
+            for definition in &mut definitions {
+                definition.function.parameters = xai_grok_token_optimization::minify_tool_schema(
+                    &definition.function.parameters,
+                );
+            }
+        }
+        definitions
+    }
+
+    /// Select the model-facing optimization policy for the current request.
+    ///
+    /// This is intentionally a policy-only boundary. Callers must apply the
+    /// returned policy to a presentation copy of prompts/tool definitions;
+    /// canonical tool definitions remain owned by `ToolBridge` for dispatch.
+    pub fn token_optimization_policy(
+        &self,
+        config: &OptimizationConfig,
+        request_kind: OptimizationRequestKind,
+        budget: BudgetInput,
+    ) -> (OptimizationPolicy, BudgetDecision) {
+        OptimizationPolicy::for_request(config, request_kind, budget)
     }
 
     /// Whether auto-compact should trigger given current token usage.

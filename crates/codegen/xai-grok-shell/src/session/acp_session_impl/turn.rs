@@ -1901,6 +1901,8 @@ impl SessionActor {
     ) -> Result<TurnOutcome, acp::Error> {
         let conv_turn_start = std::time::Instant::now();
         let conv_turn_clock = DualClock::now();
+        let token_optimization = self.agent.borrow().definition().token_optimization.clone();
+        let mut optimization_metrics = xai_grok_token_optimization::OptimizationMetrics::default();
         self.maybe_refresh_model_metadata_on_resume().await;
         self.maybe_compact_on_model_switch().await?;
         self.chat_state_handle
@@ -1934,7 +1936,22 @@ impl SessionActor {
         }
         let mut prompt_timing = Some(crate::session::prompt_timing::PromptTiming::start());
         let tool_prep_start = std::time::Instant::now();
+        let canonical_tool_definitions = self.agent.borrow().tool_bridge().tool_definitions().await;
+        let canonical_tool_schema_tokens =
+            xai_chat_state::estimate_tool_definitions_tokens(&canonical_tool_definitions);
         let (tool_definitions, mcp_wait_ms) = self.prepare_tool_definitions_timed().await;
+        let model_tool_schema_tokens =
+            xai_chat_state::estimate_tool_definitions_tokens(&tool_definitions);
+        let tool_schema_tokens_saved = if self
+            .chat_state_handle
+            .get_sampling_config()
+            .await
+            .is_some_and(|config| !crate::agent::local_model::is_local_base_url(&config.base_url))
+        {
+            canonical_tool_schema_tokens.saturating_sub(model_tool_schema_tokens)
+        } else {
+            0
+        };
         let total_prep_ms = tool_prep_start.elapsed().as_millis() as u64;
         if let Some(ref mut pt) = prompt_timing {
             pt.record_tool_prep(mcp_wait_ms, total_prep_ms);
@@ -1943,8 +1960,11 @@ impl SessionActor {
             "shell.turn.tool_prep_done",
             Some(self.session_info.id.0.as_ref()),
             Some(serde_json::json!({
-                "tool_count": tool_definitions.len(),
-                "mcp_wait_ms": mcp_wait_ms,
+                    "tool_count": tool_definitions.len(),
+                    "canonical_tool_schema_tokens": canonical_tool_schema_tokens,
+                    "model_tool_schema_tokens": model_tool_schema_tokens,
+                    "estimated_tool_schema_tokens_saved": tool_schema_tokens_saved,
+                    "mcp_wait_ms": mcp_wait_ms,
                 "total_prep_ms": total_prep_ms,
                 "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
             })),
@@ -2134,6 +2154,25 @@ impl SessionActor {
                     ),
                     parameters: schema,
                 });
+            }
+            if loop_index == 0
+                && let Ok(path) = std::env::var("DX_DUMP_TOOL_DEFINITIONS")
+                && !path.trim().is_empty()
+            {
+                if let Some(parent) = std::path::Path::new(&path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                if let Ok(json) = serde_json::to_string_pretty(&effective_tools) {
+                    if let Err(error) = std::fs::write(&path, format!("{json}\n")) {
+                        tracing::warn!(?error, path, "failed to dump first-turn tool definitions");
+                    } else {
+                        tracing::info!(
+                            path,
+                            count = effective_tools.len(),
+                            "dumped first-turn tool definitions"
+                        );
+                    }
+                }
             }
             let build_req_start = std::time::Instant::now();
             let request = self
@@ -2359,6 +2398,13 @@ impl SessionActor {
                 }
                 _ => None,
             };
+            if let Some(prompt_tokens) = prompt_tokens {
+                let actual_tokens = u64::from(prompt_tokens);
+                optimization_metrics.record_request(
+                    actual_tokens.saturating_add(tool_schema_tokens_saved),
+                    actual_tokens,
+                );
+            }
             xai_grok_telemetry::unified_log::info(
                 "shell.turn.inference_done",
                 Some(self.session_info.id.0.as_ref()),
@@ -2374,6 +2420,10 @@ impl SessionActor {
                     "completion_tokens": completion_tokens,
                     "reasoning_tokens": reasoning_tokens,
                     "tokens_per_sec": tokens_per_sec,
+                    "estimated_unoptimized_prompt_tokens": prompt_tokens
+                        .map(|tokens| u64::from(tokens).saturating_add(tool_schema_tokens_saved)),
+                    "estimated_tool_schema_tokens_saved": tool_schema_tokens_saved,
+                    "optimization_savings_percent": optimization_metrics.savings_percent(),
                 })),
             );
             if let Some(usage) = response.usage.as_ref() {
@@ -2458,7 +2508,11 @@ impl SessionActor {
                         self.record_assistant_response(item).await;
                     }
                     _ => {
-                        self.chat_state_handle.push_tool_result(item);
+                        self.chat_state_handle
+                            .push_tool_result(optimize_conversation_item(
+                                item,
+                                &token_optimization,
+                            ));
                     }
                 }
             }
@@ -2740,6 +2794,31 @@ fn hash_step_signature(signature: &str) -> u64 {
     signature.hash(&mut hasher);
     hasher.finish()
 }
+
+/// Apply only the model-history presentation transform. Canonical tool-call
+/// IDs and image parts are preserved.
+fn optimize_conversation_item(
+    item: xai_grok_sampling_types::ConversationItem,
+    config: &xai_grok_token_optimization::OptimizationConfig,
+) -> xai_grok_sampling_types::ConversationItem {
+    if config.effective_mode() == xai_grok_token_optimization::OptimizationMode::Off
+        || !config.compress_tool_results
+    {
+        return item;
+    }
+    match item {
+        xai_grok_sampling_types::ConversationItem::ToolResult(mut result) => {
+            let compressed = xai_grok_token_optimization::compress_tool_result(
+                &result.content,
+                config.max_tool_result_chars,
+            );
+            result.content = std::sync::Arc::<str>::from(compressed);
+            xai_grok_sampling_types::ConversationItem::ToolResult(result)
+        }
+        other => other,
+    }
+}
+
 fn command_is_true(cmd: &str) -> bool {
     cmd.trim().eq_ignore_ascii_case("true")
 }

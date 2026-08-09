@@ -85,11 +85,21 @@ impl RepoDirChain {
 /// from `xai-grok-workspace`, which depends on THIS crate) to keep the dep edge
 /// one-way; backs the home-is-dotfiles guard in [`RepoDirChain::resolve`].
 fn is_home_dir(path: &Path) -> bool {
-    let Some(home) = dirs::home_dir() else {
+    let Some(home) = configured_home_dir() else {
         return false;
     };
     let canon = |p: &Path| dunce::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
     canon(path) == canon(&home)
+}
+
+fn configured_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let key = "USERPROFILE";
+    #[cfg(not(windows))]
+    let key = "HOME";
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 /// Existing `<dir>/<subdir>` directories under each dir of a precomputed
@@ -134,6 +144,20 @@ mod tests {
             match self.prev.take() {
                 Some(v) => unsafe { std::env::set_var(self.key, v) },
                 None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
+    }
+
+    struct HomeEnvGuard {
+        _home: EnvVarGuard,
+        _userprofile: EnvVarGuard,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &Path) -> Self {
+            Self {
+                _home: EnvVarGuard::set("HOME", path),
+                _userprofile: EnvVarGuard::set("USERPROFILE", path),
             }
         }
     }
@@ -191,7 +215,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
         git2::Repository::init(&home).unwrap();
-        let _home_guard = EnvVarGuard::set("HOME", &home);
+        let _home_guard = HomeEnvGuard::set(&home);
         let sub = home.join("proj");
         std::fs::create_dir_all(&sub).unwrap();
 
@@ -206,7 +230,7 @@ mod tests {
         // The guard is home-EXACT: a git root that is NOT $HOME still resolves
         // normally (no over-trigger), so $HOME points at an unrelated dir here.
         let home = tempfile::tempdir().unwrap();
-        let _home_guard = EnvVarGuard::set("HOME", home.path());
+        let _home_guard = HomeEnvGuard::set(home.path());
         let repo = tempfile::tempdir().unwrap();
         git2::Repository::init(repo.path()).unwrap();
         let sub = repo.path().join("pkg");

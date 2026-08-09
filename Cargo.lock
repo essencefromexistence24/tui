@@ -16071,6 +16071,7 @@ dependencies = [
  "xai-grok-config",
  "xai-grok-hooks",
  "xai-grok-sampling-types",
+ "xai-grok-token-optimization",
  "xai-grok-tools",
  "xai-token-estimation",
  "xai-tool-types",
@@ -16863,6 +16864,7 @@ dependencies = [
  "xai-grok-subagent-resolution",
  "xai-grok-telemetry",
  "xai-grok-test-support",
+ "xai-grok-token-optimization",
  "xai-grok-tools",
  "xai-grok-version",
  "xai-grok-workspace",
@@ -17027,6 +17029,14 @@ dependencies = [
  "url",
  "xai-acp-lib",
  "xai-tty-utils",
+]
+
+[[package]]
+name = "xai-grok-token-optimization"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

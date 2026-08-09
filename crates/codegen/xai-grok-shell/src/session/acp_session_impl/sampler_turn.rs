@@ -209,13 +209,27 @@ impl SessionActor {
             .store((!effective.is_empty()).then(|| std::sync::Arc::new(effective)));
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
-        let bridge = self.agent.borrow().tool_bridge().clone();
-        let mut defs = bridge.tool_definitions_builtins_only().await;
+        let token_optimization = self.agent.borrow().definition().token_optimization.clone();
         let local_model = self
             .chat_state_handle
             .get_sampling_config()
             .await
             .is_some_and(|config| crate::agent::local_model::is_local_base_url(&config.base_url));
+        let mut defs = if local_model {
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            bridge.tool_definitions_builtins_only().await
+        } else {
+            let query = self
+                .chat_state_handle
+                .snapshot()
+                .await
+                .and_then(|snapshot| snapshot.prompt_texts.last().cloned())
+                .unwrap_or_default();
+            self.agent
+                .borrow()
+                .optimized_model_tool_definitions(&query, &token_optimization)
+                .await
+        };
         if local_model {
             let original_count = defs.len();
             // MiniCPM 1B frequently turns ordinary questions into unrelated
@@ -227,6 +241,14 @@ impl SessionActor {
             tracing::debug!(
                 original_count,
                 "disabling tool schemas for reliable local-model chat"
+            );
+        }
+        if !local_model && token_optimization.route_tools && token_optimization.tool_routing.enabled
+        {
+            tracing::info!(
+                routed_count = defs.len(),
+                max_tools = token_optimization.tool_routing.max_tools,
+                "token optimization prepared centralized model-facing tool definitions"
             );
         }
         let plan_active = self.plan_mode.lock().is_active();
@@ -756,14 +778,15 @@ impl SessionActor {
                 &sampler_config.base_url,
             )
             .await
-            {
-                tracing::error!(
-                    model = %sampler_config.model,
-                    %error,
-                    "local model is unavailable before sampling"
-                );
-                return Err(acp::Error::internal_error()
-                    .data(format!("Local model could not start: {error}")));
+        {
+            tracing::error!(
+                model = %sampler_config.model,
+                %error,
+                "local model is unavailable before sampling"
+            );
+            return Err(
+                acp::Error::internal_error().data(format!("Local model could not start: {error}"))
+            );
         }
         if self.tool_context.task_output_token_budget.is_some()
             || self.tool_context.sampler_retry_only_before_output

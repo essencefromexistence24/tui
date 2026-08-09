@@ -4988,4 +4988,61 @@ mod tests {
         );
         assert!(got_terminal, "must observe terminal");
     }
+
+    /// Dump the active 18-tool GrokBuild schema set for the DX benchmark.
+    #[tokio::test]
+    async fn dump_grok_build_benchmark_schemas() {
+        let tmp = TempDir::new().unwrap();
+        let tools = vec![
+            ToolConfig::for_tool::<grok_build::BashTool>()
+                .with_name("run_terminal_command")
+                .with_param_rename("is_background", "background"),
+            ToolConfig::for_tool::<grok_build::ReadFileTool>(),
+            ToolConfig::for_tool::<grok_build::SearchReplaceTool>(),
+            ToolConfig::for_tool::<grok_build::ListDirTool>(),
+            ToolConfig::for_tool::<grok_build::GrepTool>(),
+            ToolConfig::for_tool::<grok_build::KillTaskTool>()
+                .with_name("kill_command_or_subagent"),
+            ToolConfig::for_tool::<grok_build::TodoWriteTool>(),
+            ToolConfig::for_tool::<grok_build::TaskOutputTool>()
+                .with_name("get_command_or_subagent_output"),
+            ToolConfig::for_tool::<grok_build::WaitTasksTool>()
+                .with_name("wait_commands_or_subagents"),
+            ToolConfig::for_tool::<grok_build::TaskTool>().with_name("spawn_subagent"),
+            ToolConfig::for_tool::<grok_build::SchedulerCreateTool>(),
+            ToolConfig::for_tool::<grok_build::SchedulerDeleteTool>(),
+            ToolConfig::for_tool::<grok_build::SchedulerListTool>(),
+            ToolConfig::for_tool::<grok_build::MonitorTool>(),
+            ToolConfig::for_tool::<crate::implementations::search_tool::SearchTool>(),
+            ToolConfig::for_tool::<crate::implementations::use_tool::UseTool>(),
+            ToolConfig::for_tool::<grok_build::UpdateGoalTool>(),
+            ToolConfig::for_tool::<grok_build::WorkflowTool>(),
+        ];
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools,
+                    behavior_preset: None,
+                },
+                test_session_context(&tmp),
+            )
+            .expect("finalize benchmark toolset");
+        let defs = toolset.tool_definitions();
+        let root = std::path::PathBuf::from(r"G:\Dx\benchmark\json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("combined.json"),
+            format!("{}\n", serde_json::to_string_pretty(&defs).unwrap()),
+        )
+        .unwrap();
+        for def in &defs {
+            let name = def.function.name.replace(['/', '\\'], "_");
+            std::fs::write(
+                root.join(format!("{name}.json")),
+                format!("{}\n", serde_json::to_string_pretty(def).unwrap()),
+            )
+            .unwrap();
+        }
+        assert_eq!(defs.len(), 18, "unexpected active benchmark tool count");
+    }
 }

@@ -1053,6 +1053,7 @@ mod tests {
         AgentDefinition {
             name: name.to_string(),
             description: desc.to_string(),
+            token_optimization: Default::default(),
             scope,
             agents_md: false,
             ..AgentDefinition::general_purpose()

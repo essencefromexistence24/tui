@@ -344,12 +344,26 @@ mod tests {
         }
     }
 
+    struct HomeEnvGuard {
+        _home: EnvVarGuard,
+        _userprofile: EnvVarGuard,
+    }
+
+    impl HomeEnvGuard {
+        fn set(path: &Path) -> Self {
+            Self {
+                _home: EnvVarGuard::set("HOME", path),
+                _userprofile: EnvVarGuard::set("USERPROFILE", path),
+            }
+        }
+    }
+
     // Canonical home: under-home auto-trust canonicalizes the candidate but not
     // `$HOME` (macOS `/var` -> `/private/var`). The guard restores `$HOME` on drop.
-    fn home_tempdir() -> (tempfile::TempDir, PathBuf, EnvVarGuard) {
+    fn home_tempdir() -> (tempfile::TempDir, PathBuf, HomeEnvGuard) {
         let tmp = tempfile::tempdir().unwrap();
         let home = dunce::canonicalize(tmp.path()).unwrap();
-        let guard = EnvVarGuard::set("HOME", &home);
+        let guard = HomeEnvGuard::set(&home);
         (tmp, home, guard)
     }
 

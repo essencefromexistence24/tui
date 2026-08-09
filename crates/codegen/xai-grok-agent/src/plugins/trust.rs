@@ -167,9 +167,10 @@ impl TrustStore {
     /// is under the user's home directory.  Otherwise it requires explicit
     /// trust via `~/.grok/trusted-plugins`.
     pub fn is_config_path_auto_trusted(plugin_root: &Path) -> bool {
-        let Some(home) = dirs::home_dir() else {
+        let Some(home) = configured_home_dir() else {
             return false;
         };
+        let home = dunce::canonicalize(&home).unwrap_or(home);
         match dunce::canonicalize(plugin_root) {
             Ok(canonical) => canonical.starts_with(&home),
             Err(_) => false,
@@ -206,6 +207,20 @@ impl TrustStore {
             })
             .collect()
     }
+}
+
+/// Resolve the effective home directory without allowing platform-specific
+/// `dirs` caching to hide a process-local HOME/USERPROFILE override. The
+/// explicit environment value is also what the application honors when it is
+/// launched with an isolated profile.
+fn configured_home_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    let key = "USERPROFILE";
+    #[cfg(not(windows))]
+    let key = "HOME";
+    std::env::var_os(key)
+        .map(PathBuf::from)
+        .or_else(dirs::home_dir)
 }
 
 // ── Errors ────────────────────────────────────────────────────────────

@@ -143,6 +143,7 @@ xai-grok-extra-ca = { workspace = true }
 xai-grok-sampler = { path = "../xai-grok-sampler" }
 xai-sqlite-journal = { workspace = true }
 xai-token-estimation = { workspace = true }
+xai-grok-token-optimization = { workspace = true }
 xai-grok-sampling-types = { path = "../xai-grok-sampling-types" }
 xai-grok-tools = { path = "../xai-grok-tools" }
 xai-tty-utils = { workspace = true }

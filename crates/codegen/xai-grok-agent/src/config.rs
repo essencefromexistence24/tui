@@ -747,6 +747,11 @@ pub struct AgentDefinition {
     pub prompt_mode: PromptMode,
     #[serde(default = "default_grok_build_toolset")]
     pub tool_config: ToolServerConfig,
+    /// Per-agent token optimization policy. This is session-scoped after the
+    /// definition is built; it is never read from process-global environment
+    /// state.
+    #[serde(default)]
+    pub token_optimization: xai_grok_token_optimization::OptimizationConfig,
     /// Runtime capability mode that constrains which tool kinds the agent
     /// can use. Applied during subagent spawn in `handle_subagent_request`
     /// by filtering the definition's `tool_config` before session creation.
@@ -1486,6 +1491,7 @@ impl AgentDefinition {
             plugin_name: None,
             prompt_mode: PromptMode::Extend,
             tool_config: default_grok_build_toolset(),
+            token_optimization: Default::default(),
             capability_mode: None,
             permission_mode: PermissionMode::Default,
             skills: vec![],
