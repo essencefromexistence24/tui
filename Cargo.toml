@@ -79,6 +79,66 @@ members = [
     "crates/common/xai-computer-hub-sdk",
     "crates/common/xai-grok-compaction",
     "crates/common/xai-grok-token-optimization",
+    # Vendored token optimization crates (rlm and serializer intentionally excluded)
+    "crates/common/token/core",
+    "crates/common/token/prefix-cache",
+    "crates/common/token/compaction",
+    "crates/common/token/governor",
+    "crates/common/token/reasoning-router",
+    "crates/common/token/vision-compress",
+    "crates/common/token/ocr-extract",
+    "crates/common/token/semantic-cache",
+    "crates/common/token/schema-minifier",
+    "crates/common/token/output-truncator",
+    "crates/common/token/dedup",
+    "crates/common/token/retrieval-budget",
+    "crates/common/token/patch-prefer",
+    "crates/common/token/context-pruner",
+    "crates/common/token/batch-router",
+    "crates/common/token/tool-router",
+    "crates/common/token/prompt-compress",
+    "crates/common/token/cot-compress",
+    "crates/common/token/vision-select",
+    "crates/common/token/response-cache",
+    "crates/common/token/token-budget",
+    "crates/common/token/history-summarizer",
+    "crates/common/token/embedding-compress",
+    "crates/common/token/parallel-tool-merge",
+    "crates/common/token/whitespace-normalize",
+    "crates/common/token/audio-compress",
+    "crates/common/token/audio-transcribe",
+    "crates/common/token/audio-segment",
+    "crates/common/token/live-frame-dedup",
+    "crates/common/token/live-token-prune",
+    "crates/common/token/live-kv-compress",
+    "crates/common/token/live-event-tree",
+    "crates/common/token/pdf-text-extract",
+    "crates/common/token/pdf-page-compress",
+    "crates/common/token/pdf-chart-detect",
+    "crates/common/token/doc-layout-compress",
+    "crates/common/token/video-temporal-merge",
+    "crates/common/token/video-keyframe-select",
+    "crates/common/token/video-scene-segment",
+    "crates/common/token/asset3d-multiview-compress",
+    "crates/common/token/asset3d-pointcloud-compress",
+    "crates/common/token/asset3d-mesh-summarize",
+    "crates/common/token/multimodal-router",
+    "crates/common/token/cross-modal-dedup",
+    # Vendored route engines
+    "crates/common/token/route/core",
+    "crates/common/token/route/lite",
+    "crates/common/token/route/caveman",
+    "crates/common/token/route/rtk",
+    "crates/common/token/route/ultra",
+    "crates/common/token/route/aggressive",
+    "crates/common/token/route/headroom",
+    "crates/common/token/route/dedup",
+    "crates/common/token/route/ccr",
+    "crates/common/token/route/storage",
+    "crates/common/token/route/cli",
+    "crates/common/token/route/mcp",
+    "crates/common/token/route/proxy",
+    "crates/common/token/route/benches",
     "crates/common/xai-interjection-core",
     "crates/common/xai-test-utils",
     "crates/common/xai-tool-protocol",
@@ -104,6 +164,12 @@ homepage = "https://github.com/xai-org/grok-cli"
 rust-version = "1.85"
 
 [workspace.dependencies]
+dx-core = { package = "dx-token-core", path = "crates/common/token/core" }
+dx-route-core = { path = "crates/common/token/route/core" }
+dx-route-lite = { path = "crates/common/token/route/lite" }
+audio-compress = { path = "crates/common/token/audio-compress" }
+semantic-cache = { path = "crates/common/token/semantic-cache" }
+vision-compress = { path = "crates/common/token/vision-compress" }
 agent-client-protocol = { version = "0.10.4", features = ["unstable"] }
 alacritty_terminal = "0.26.0"
 ansi-to-tui = "8.0.1"
@@ -204,6 +270,7 @@ http-body-util = "0.1"
 humantime-serde = "1"
 ignore = "0.4"
 image = { version = "0.25.10", default-features = false }
+fast_image_resize = "4"
 indexmap = { version = "2", features = ["serde"] }
 indicatif = "0.18"
 infer = "0.19.0"
@@ -253,7 +320,9 @@ rayon = "1"
 rcgen = { version = "0.13", features = ["pem"] }
 reflink-copy = "0.1"
 regex = "1"
+regex-lite = "0.1"
 reqwest = { version = "0.12", features = ["rustls-tls", "stream", "json", "multipart", "http2", "blocking", "socks"], default-features = false }
+redb = "2"
 reqwest-middleware = { version = "0.4.1", features = ["json", "multipart"] }
 resvg = { version = "0.47", default-features = false, features = ["text"] }
 rhai = { version = "1.25", features = ["serde", "sync"] }
@@ -262,6 +331,7 @@ rsa = "0.9"
 runfiles = "0.1"
 rustc-hash = "2"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
+shellexpand = "3"
 schemars = "1"
 scraper = "0.23"
 semver = "1"
@@ -294,6 +364,7 @@ tikv-jemallocator = { version = "0.6", features = ["profiling", "unprefixed_mall
 time = "0.3"
 tiny-skia = "0.12"
 tokio = { version = "1", features = ["full"] }
+tiktoken-rs = "0.6"
 tokio-retry = "0.3"
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-tungstenite = "0.27"

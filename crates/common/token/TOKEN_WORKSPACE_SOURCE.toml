@@ -1,0 +1,129 @@
+[workspace]
+resolver = "2"
+members = [
+    "dx-core",
+    # "serializer", # intentionally disabled: serializer is not part of the merged runtime yet
+    # ── TEXT / IMAGE TOKEN SAVERS ──
+    "prefix-cache",
+    "compaction",
+    "governor",
+    "reasoning-router",
+    "vision-compress",
+    "ocr-extract",
+    "semantic-cache",
+    "schema-minifier",
+    "output-truncator",
+    "dedup",
+    "retrieval-budget",
+    "patch-prefer",
+    "context-pruner",
+    # "rlm", # RLM is maintained and integrated separately
+    "batch-router",
+    "tool-router",
+    "prompt-compress",
+    "cot-compress",
+    "vision-select",
+    "response-cache",
+    "token-budget",
+    "history-summarizer",
+    "embedding-compress",
+    "parallel-tool-merge",
+    "whitespace-normalize",
+    # ── MULTIMODAL TOKEN SAVERS ──
+    "audio-compress",
+    "audio-transcribe",
+    "audio-segment",
+    "live-frame-dedup",
+    "live-token-prune",
+    "live-kv-compress",
+    "live-event-tree",
+    "pdf-text-extract",
+    "pdf-page-compress",
+    "pdf-chart-detect",
+    "doc-layout-compress",
+    "video-temporal-merge",
+    "video-keyframe-select",
+    "video-scene-segment",
+    "asset3d-multiview-compress",
+    "asset3d-pointcloud-compress",
+    "asset3d-mesh-summarize",
+    "multimodal-router",
+    "cross-modal-dedup",
+    # ── MERGED DX-ROUTE ENGINES ──
+    "route/core",
+    "route/lite",
+    "route/caveman",
+    "route/rtk",
+    "route/ultra",
+    "route/aggressive",
+    "route/headroom",
+    "route/dedup",
+    "route/ccr",
+    "route/storage",
+    "route/cli",
+    "route/mcp",
+    "route/proxy",
+    "route/benches",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/najmus-sakib-hossain/dx"
+
+[workspace.dependencies]
+# Core async
+async-trait = "0.1"
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Hashing
+blake3 = "1"
+
+# Image processing
+image = { version = "0.25", features = ["jpeg", "png", "gif", "webp"] }
+fast_image_resize = "4"
+
+# Caching
+moka = { version = "0.12", features = ["sync"] }
+
+# Regex
+regex-lite = "0.1"
+
+# Text diff
+similar = "2"
+
+# Persistent storage
+redb = "2"
+
+# Compression
+zstd = "0.13"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# DX-route workspace dependencies
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tiktoken-rs = "0.6"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "request-id"] }
+bytes = "1"
+shellexpand = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+# Internal crates
+dx-core = { path = "dx-core" }
+vision-compress = { path = "vision-compress" }
+semantic-cache = { path = "semantic-cache" }
+audio-compress = { path = "audio-compress" }

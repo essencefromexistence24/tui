@@ -9,6 +9,9 @@ description = "Policy, budgeting, and measurement primitives for safe DX prompt 
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+tracing = { workspace = true }
+dx-route-core = { workspace = true }
+dx-route-lite = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

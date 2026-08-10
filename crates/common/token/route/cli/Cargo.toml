@@ -1,0 +1,27 @@
+[package]
+name = "dx-route-cli"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "dx-route CLI — compress stdin text through any engine"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+shellexpand.workspace = true
+tokio = { workspace = true, features = ["rt", "io-util", "macros"] }
+
+dx-route-core = { path = "../core" }
+dx-route-lite = { path = "../lite" }
+dx-route-caveman = { path = "../caveman" }
+dx-route-rtk = { path = "../rtk" }
+dx-route-ultra = { path = "../ultra" }
+dx-route-aggressive = { path = "../aggressive" }
+dx-route-headroom = { path = "../headroom" }
+dx-route-dedup = { path = "../dedup" }
+dx-route-ccr = { path = "../ccr" }
+dx-route-storage = { path = "../storage" }

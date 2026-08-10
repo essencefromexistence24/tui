@@ -1,5 +1,57 @@
 use serde_json::Value;
 
+/// Run the vendored route pipeline's safe normalization stage.
+///
+/// The route pipeline is deliberately configured to use only `lite` here:
+/// destructive modes (ultra/aggressive) are opt-in and must never be applied
+/// implicitly to tool results that may contain source code or structured data.
+fn route_normalize(text: &str) -> String {
+    #[derive(Debug)]
+    struct LiteEngine;
+
+    impl dx_route_core::Engine for LiteEngine {
+        fn name(&self) -> &'static str {
+            "lite"
+        }
+
+        fn apply(
+            &self,
+            body: &str,
+            intensity: &str,
+        ) -> dx_route_core::CoreResult<dx_route_core::EngineOutput> {
+            dx_route_lite::compress(body, intensity)
+                .map(|output| dx_route_core::EngineOutput::new(output.text))
+                .map_err(|error| {
+                    dx_route_core::CoreError::EngineFailed("lite".into(), Box::new(error))
+                })
+        }
+    }
+
+    let mut config = dx_route_core::Config::default();
+    config.default_mode = dx_route_core::CompressionMode::Lite;
+    config.auto_trigger_mode = dx_route_core::CompressionMode::Lite;
+    config.active_combo_id = None;
+    config.compression_combos.clear();
+
+    let mut pipeline = dx_route_core::CompressionPipeline::new(config);
+    pipeline.register(LiteEngine);
+
+    let context = dx_route_core::RequestContext {
+        header_override: Some(dx_route_core::CompressionMode::Lite),
+        combo_id: "tool-result".into(),
+        estimated_tokens: dx_route_core::estimate_tokens(text).unwrap_or(0) as u32,
+        body: text.to_owned(),
+    };
+
+    pipeline
+        .compress(&context)
+        .map(|output| output.text)
+        .unwrap_or_else(|error| {
+            tracing::debug!(%error, "route normalization failed; retaining original tool result");
+            text.to_owned()
+        })
+}
+
 /// Remove schema metadata that cannot affect validation or tool dispatch.
 /// The input is cloned so the canonical dispatch schema is never mutated.
 pub fn minify_tool_schema(schema: &Value) -> Value {
@@ -23,10 +75,11 @@ pub fn minify_tool_schema(schema: &Value) -> Value {
 /// and immediately repeated identical lines are removed. Optional truncation
 /// preserves both ends and emits an explicit marker.
 pub fn compress_tool_result(text: &str, max_chars: usize) -> String {
-    let mut normalized = String::with_capacity(text.len());
+    let routed = route_normalize(text);
+    let mut normalized = String::with_capacity(routed.len());
     let mut previous_line: Option<&str> = None;
     let mut blank_run = 0usize;
-    for line in text.lines() {
+    for line in routed.lines() {
         let line = line.trim_end();
         if previous_line == Some(line) {
             continue;
