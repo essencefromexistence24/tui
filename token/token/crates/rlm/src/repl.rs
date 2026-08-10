@@ -1,35 +1,34 @@
 use crate::error::{RLMError, Result};
 use rhai::{Engine, Scope, AST};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::sync::Mutex;
 
 pub struct REPLExecutor {
     engine: Engine,
     max_output_chars: usize,
-    ast_cache: Arc<Mutex<HashMap<String, AST>>>,
-    cache_hits: Arc<Mutex<usize>>,
-    cache_misses: Arc<Mutex<usize>>,
+    ast_cache: Mutex<HashMap<String, AST>>,
+    cache_hits: Mutex<usize>,
+    cache_misses: Mutex<usize>,
 }
 
 impl REPLExecutor {
     pub fn new() -> Self {
         let mut engine = Engine::new();
-        
+
         // Configure engine for safety
         engine.set_max_expr_depths(50, 50);
         engine.set_max_operations(100_000);
         engine.set_max_string_size(10_000_000); // 10MB max string
-        
+
         // Register SIMD-accelerated search functions
         Self::register_fast_search(&mut engine);
-        
+
         Self {
             engine,
             max_output_chars: 2000,
-            ast_cache: Arc::new(Mutex::new(HashMap::new())),
-            cache_hits: Arc::new(Mutex::new(0)),
-            cache_misses: Arc::new(Mutex::new(0)),
+            ast_cache: Mutex::new(HashMap::new()),
+            cache_hits: Mutex::new(0),
+            cache_misses: Mutex::new(0),
         }
     }
 
@@ -77,7 +76,7 @@ impl REPLExecutor {
         // Check cache first (30-50% speedup on repeated patterns)
         let ast = {
             let mut cache = self.ast_cache.lock().unwrap();
-            
+
             if let Some(cached_ast) = cache.get(&code) {
                 // Cache hit!
                 *self.cache_hits.lock().unwrap() += 1;
@@ -85,22 +84,24 @@ impl REPLExecutor {
             } else {
                 // Cache miss - compile and store
                 *self.cache_misses.lock().unwrap() += 1;
-                
-                let ast = self.engine
+
+                let ast = self
+                    .engine
                     .compile(&code)
                     .map_err(|e| RLMError::REPLError(format!("Compilation error: {}", e)))?;
-                
+
                 // Store in cache (limit cache size to prevent memory bloat)
                 if cache.len() < 1000 {
                     cache.insert(code.clone(), ast.clone());
                 }
-                
+
                 ast
             }
         };
 
         // Execute with scope
-        let result: rhai::Dynamic = self.engine
+        let result: rhai::Dynamic = self
+            .engine
             .eval_ast_with_scope(scope, &ast)
             .map_err(|e| RLMError::REPLError(format!("Execution error: {}", e)))?;
 
@@ -131,7 +132,7 @@ impl REPLExecutor {
                     return text[start..start + end].trim().to_string();
                 }
             }
-            
+
             if let Some(start) = text.find("```") {
                 let start = start + 3;
                 if let Some(end) = text[start..].find("```") {

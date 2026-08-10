@@ -54,10 +54,10 @@ pub fn is_final(response: &str) -> bool {
 pub fn extract_final(response: &str) -> Option<String> {
     // Try different FINAL patterns in order of preference
     let patterns = vec![
-        r#"FINAL\s*\(\s*"""(.*)"""\s*\)"#,  // Triple double quotes
-        r#"FINAL\s*\(\s*'''(.*)'''\s*\)"#,  // Triple single quotes
-        r#"FINAL\s*\(\s*"([^"]*)"\s*\)"#,   // Double quotes
-        r#"FINAL\s*\(\s*'([^']*)'\s*\)"#,   // Single quotes
+        r#"FINAL\s*\(\s*"""(.*)"""\s*\)"#, // Triple double quotes
+        r#"FINAL\s*\(\s*'''(.*)'''\s*\)"#, // Triple single quotes
+        r#"FINAL\s*\(\s*"([^"]*)"\s*\)"#,  // Double quotes
+        r#"FINAL\s*\(\s*'([^']*)'\s*\)"#,  // Single quotes
     ];
 
     for pattern in patterns {
@@ -94,9 +94,6 @@ mod tests {
             Some("the answer is 42".to_string())
         );
 
-        assert_eq!(
-            extract_final("No final here"),
-            None
-        );
+        assert_eq!(extract_final("No final here"), None);
     }
 }

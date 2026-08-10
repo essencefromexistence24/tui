@@ -52,12 +52,26 @@ impl LiveKvCompress {
     }
 }
 
+impl Default for LiveKvCompress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for LiveKvCompress {
-    fn name(&self) -> &str { "live-kv-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::InterTurn }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::Live }
+    fn name(&self) -> &str {
+        "live-kv-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::InterTurn
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::Live
+    }
 
     async fn process_multimodal(
         &self,
@@ -69,17 +83,31 @@ impl MultiModalTokenSaver for LiveKvCompress {
         if input.live_frames.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "live-kv-compress".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No live frames.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
         // Find the most recent timestamp
-        let max_time = input.live_frames.iter()
+        let max_time = input
+            .live_frames
+            .iter()
             .map(|f| f.timestamp_secs)
             .fold(f64::NEG_INFINITY, f64::max);
 
@@ -98,18 +126,30 @@ impl MultiModalTokenSaver for LiveKvCompress {
         if old_frames.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "live-kv-compress".into(),
-                tokens_before, tokens_after: tokens_before, tokens_saved: 0,
+                tokens_before,
+                tokens_after: tokens_before,
+                tokens_saved: 0,
                 description: "No frames old enough to compress.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: recent_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: recent_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
         // Group old frames and create text summaries
         let old_tokens: usize = old_frames.iter().map(|f| f.token_estimate).sum();
-        let num_groups = (old_frames.len() + self.config.group_size - 1) / self.config.group_size;
+        let num_groups = old_frames.len().div_ceil(self.config.group_size);
         let summary_tokens = num_groups * self.config.max_summary_tokens;
 
         // Add summary as a system message
@@ -142,15 +182,28 @@ impl MultiModalTokenSaver for LiveKvCompress {
             description: format!(
                 "Compressed {} old frames ({} tokens) → {} summary tokens. \
                  Kept {} recent frames ({} tokens). {:.0}% saved.",
-                old_frames.len(), old_tokens, summary_tokens,
-                recent_frames.len(), recent_tokens,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                old_frames.len(),
+                old_tokens,
+                summary_tokens,
+                recent_frames.len(),
+                recent_tokens,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: new_messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
+            base: SaverOutput {
+                messages: new_messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
             audio: input.audio,
             live_frames: recent_frames,
             documents: input.documents,
@@ -169,16 +222,30 @@ mod tests {
     use super::*;
 
     fn frame(idx: u64, time: f64) -> LiveFrame {
-        LiveFrame { image_data: vec![], timestamp_secs: time, frame_index: idx, token_estimate: 85, is_keyframe: false }
+        LiveFrame {
+            image_data: vec![],
+            timestamp_secs: time,
+            frame_index: idx,
+            token_estimate: 85,
+            is_keyframe: false,
+        }
     }
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
     async fn test_compresses_old_frames() {
-        let config = LiveKvCompressConfig { age_threshold_secs: 10.0, ..Default::default() };
+        let config = LiveKvCompressConfig {
+            age_threshold_secs: 10.0,
+            ..Default::default()
+        };
         let saver = LiveKvCompress::with_config(config);
         let ctx = SaverContext::default();
         // 20 frames: 0-19 seconds. Most recent is t=19, threshold=10, so frames 0-8 are old.
@@ -186,7 +253,9 @@ mod tests {
             base: empty_base(),
             audio: vec![],
             live_frames: (0..20).map(|i| frame(i, i as f64)).collect(),
-            documents: vec![], videos: vec![], assets_3d: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(out.live_frames.len() < 20);

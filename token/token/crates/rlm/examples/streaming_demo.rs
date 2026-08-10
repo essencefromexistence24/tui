@@ -6,8 +6,7 @@ use std::time::Instant;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    let api_key = std::env::var("GROQ_API_KEY")
-        .expect("GROQ_API_KEY must be set");
+    let api_key = std::env::var("GROQ_API_KEY").expect("GROQ_API_KEY must be set");
 
     println!("================================================================================");
     println!("⚡ STREAMING EXECUTION DEMO - Phase 2 Optimization");
@@ -26,7 +25,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rlm = RLM::new(
         api_key,
         "meta-llama/llama-4-scout-17b-16e-instruct".to_string(),
-    ).with_max_iterations(20);
+    )
+    .with_max_iterations(20);
 
     let query = "What is the AI market size? Use fast_find to search.";
 

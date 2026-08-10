@@ -45,11 +45,21 @@ impl Default for ToolRouterConfig {
                     vec!["run_tests".into(), "test_failure".into()],
                 ),
                 (
-                    vec!["git".into(), "commit".into(), "branch".into(), "merge".into()],
+                    vec![
+                        "git".into(),
+                        "commit".into(),
+                        "branch".into(),
+                        "merge".into(),
+                    ],
                     vec!["git_diff".into(), "git_log".into(), "git_status".into()],
                 ),
                 (
-                    vec!["database".into(), "sql".into(), "query".into(), "migration".into()],
+                    vec![
+                        "database".into(),
+                        "sql".into(),
+                        "query".into(),
+                        "migration".into(),
+                    ],
                     vec!["run_sql".into(), "db_schema".into()],
                 ),
                 (
@@ -88,7 +98,11 @@ impl ToolRouterSaver {
     }
 
     /// Figure out which tools are relevant for this turn.
-    fn select_tools<'a>(&self, messages: &[Message], available: &'a [ToolSchema]) -> Vec<&'a ToolSchema> {
+    fn select_tools<'a>(
+        &self,
+        messages: &[Message],
+        available: &'a [ToolSchema],
+    ) -> Vec<&'a ToolSchema> {
         let mut selected_names: HashSet<String> = HashSet::new();
 
         // Always include core tools
@@ -97,7 +111,10 @@ impl ToolRouterSaver {
         }
 
         // Analyze recent messages for context
-        let recent_text: String = messages.iter().rev().take(4)
+        let recent_text: String = messages
+            .iter()
+            .rev()
+            .take(4)
             .map(|m| m.content.to_lowercase())
             .collect::<Vec<_>>()
             .join(" ");
@@ -121,13 +138,15 @@ impl ToolRouterSaver {
         }
 
         // Collect matching tools and cap at max
-        let mut result: Vec<&ToolSchema> = available.iter()
+        let mut result: Vec<&ToolSchema> = available
+            .iter()
             .filter(|t| selected_names.contains(&t.name))
             .collect();
 
         // If we're under max, add more tools by token cost (cheapest first)
         if result.len() < self.config.max_tools {
-            let mut remaining: Vec<&ToolSchema> = available.iter()
+            let mut remaining: Vec<&ToolSchema> = available
+                .iter()
                 .filter(|t| !selected_names.contains(&t.name))
                 .collect();
             remaining.sort_by_key(|t| t.token_count);
@@ -144,11 +163,23 @@ impl ToolRouterSaver {
     }
 }
 
+impl Default for ToolRouterSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for ToolRouterSaver {
-    fn name(&self) -> &str { "tool-router" }
-    fn stage(&self) -> SaverStage { SaverStage::PromptAssembly }
-    fn priority(&self) -> u32 { 15 }
+    fn name(&self) -> &str {
+        "tool-router"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PromptAssembly
+    }
+    fn priority(&self) -> u32 {
+        15
+    }
 
     async fn process(
         &self,
@@ -164,7 +195,11 @@ impl TokenSaver for ToolRouterSaver {
         let tools_kept = selected_tools.len();
 
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
-        let pct = if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 };
+        let pct = if tokens_before > 0 {
+            tokens_saved as f64 / tokens_before as f64 * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "tool-router".into(),
@@ -198,10 +233,21 @@ mod tests {
     use super::*;
 
     fn tool(name: &str, tokens: usize) -> ToolSchema {
-        ToolSchema { name: name.into(), description: format!("{} desc", name), parameters: serde_json::json!({}), token_count: tokens }
+        ToolSchema {
+            name: name.into(),
+            description: format!("{} desc", name),
+            parameters: serde_json::json!({}),
+            token_count: tokens,
+        }
     }
     fn user_msg(content: &str) -> Message {
-        Message { role: "user".into(), content: content.into(), images: vec![], tool_call_id: None, token_count: content.len() / 4 }
+        Message {
+            role: "user".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: content.len() / 4,
+        }
     }
 
     #[tokio::test]

@@ -23,13 +23,18 @@ Starship achieved its first orbital flight in March 2024.
     println!("📄 Context: {} characters", context.len());
     println!();
 
-    let rlm = RLM::new(api_key, "llama-3.3-70b-versatile".to_string())
-        .with_max_iterations(10);
+    let rlm = RLM::new(api_key, "llama-3.3-70b-versatile".to_string()).with_max_iterations(10);
 
     println!("Query: What is the AI market size in 2024?");
     println!();
 
-    match rlm.complete("What is the AI market size in 2024? Use fast_find to search for 'AI market'.", context).await {
+    match rlm
+        .complete(
+            "What is the AI market size in 2024? Use fast_find to search for 'AI market'.",
+            context,
+        )
+        .await
+    {
         Ok((answer, stats)) => {
             println!("✅ Answer: {}", answer);
             println!();

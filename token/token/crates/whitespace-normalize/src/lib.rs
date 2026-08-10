@@ -77,21 +77,24 @@ impl WhitespaceNormalize {
         }
 
         // 3. Process line by line
-        let lines: Vec<String> = s.lines().map(|line| {
-            let mut l = line.to_string();
+        let lines: Vec<String> = s
+            .lines()
+            .map(|line| {
+                let mut l = line.to_string();
 
-            // Convert tabs to spaces
-            if self.config.tab_width > 0 {
-                l = l.replace('\t', &" ".repeat(self.config.tab_width));
-            }
+                // Convert tabs to spaces
+                if self.config.tab_width > 0 {
+                    l = l.replace('\t', &" ".repeat(self.config.tab_width));
+                }
 
-            // Strip trailing whitespace
-            if self.config.strip_trailing {
-                l = l.trim_end().to_string();
-            }
+                // Strip trailing whitespace
+                if self.config.strip_trailing {
+                    l = l.trim_end().to_string();
+                }
 
-            l
-        }).collect();
+                l
+            })
+            .collect();
 
         // 4. Collapse consecutive blank lines
         if self.config.max_consecutive_blank_lines > 0 {
@@ -116,10 +119,8 @@ impl WhitespaceNormalize {
         }
 
         // Preserve trailing newline if original had one
-        if input.ends_with('\n') || input.ends_with("\r\n") {
-            if !s.ends_with('\n') {
-                s.push('\n');
-            }
+        if (input.ends_with('\n') || input.ends_with("\r\n")) && !s.ends_with('\n') {
+            s.push('\n');
         }
 
         // 5. Trim entire content
@@ -131,11 +132,23 @@ impl WhitespaceNormalize {
     }
 }
 
+impl Default for WhitespaceNormalize {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for WhitespaceNormalize {
-    fn name(&self) -> &str { "whitespace-normalize" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 1 }
+    fn name(&self) -> &str {
+        "whitespace-normalize"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        1
+    }
 
     async fn process(
         &self,
@@ -176,15 +189,34 @@ impl TokenSaver for WhitespaceNormalize {
                 "Normalized whitespace: {} → {} chars ({:.1}% reduction). \
                  Operations: {}{}{}{}{}. \
                  Zero-risk, zero semantic impact.",
-                chars_before, chars_after,
+                chars_before,
+                chars_after,
                 if chars_before > 0 {
                     (1.0 - chars_after as f64 / chars_before as f64) * 100.0
-                } else { 0.0 },
+                } else {
+                    0.0
+                },
                 if self.config.remove_bom { "BOM " } else { "" },
-                if self.config.normalize_line_endings { "CRLF→LF " } else { "" },
-                if self.config.strip_trailing { "trailing " } else { "" },
-                if self.config.max_consecutive_blank_lines > 0 { "blank-lines " } else { "" },
-                if self.config.tab_width > 0 { "tabs " } else { "" },
+                if self.config.normalize_line_endings {
+                    "CRLF→LF "
+                } else {
+                    ""
+                },
+                if self.config.strip_trailing {
+                    "trailing "
+                } else {
+                    ""
+                },
+                if self.config.max_consecutive_blank_lines > 0 {
+                    "blank-lines "
+                } else {
+                    ""
+                },
+                if self.config.tab_width > 0 {
+                    "tabs "
+                } else {
+                    ""
+                },
             ),
         };
         *self.report.lock().unwrap() = report;
@@ -208,7 +240,13 @@ mod tests {
     use super::*;
 
     fn msg(content: &str, tokens: usize) -> Message {
-        Message { role: "user".into(), content: content.into(), images: vec![], tool_call_id: None, token_count: tokens }
+        Message {
+            role: "user".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: tokens,
+        }
     }
 
     #[tokio::test]
@@ -256,7 +294,12 @@ mod tests {
         };
         let out = saver.process(input, &ctx).await.unwrap();
         for line in out.messages[0].content.lines() {
-            assert_eq!(line, line.trim_end(), "Line has trailing whitespace: {:?}", line);
+            assert_eq!(
+                line,
+                line.trim_end(),
+                "Line has trailing whitespace: {:?}",
+                line
+            );
         }
     }
 }

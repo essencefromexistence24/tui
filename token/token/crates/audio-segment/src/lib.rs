@@ -80,13 +80,17 @@ impl AudioSegment {
         for i in 0..total_frames.min(1000) {
             let offset = i * frame_size * 2;
             let end = (offset + frame_size * 2).min(audio.data.len());
-            if offset >= end { break; }
+            if offset >= end {
+                break;
+            }
 
             // RMS energy estimation
             let chunk = &audio.data[offset..end];
-            let energy: f64 = chunk.iter()
+            let energy: f64 = chunk
+                .iter()
                 .map(|&b| (b as f64 - 128.0).powi(2))
-                .sum::<f64>() / chunk.len() as f64;
+                .sum::<f64>()
+                / chunk.len() as f64;
             let rms = energy.sqrt() / 128.0;
 
             if rms > self.config.energy_threshold {
@@ -98,12 +102,26 @@ impl AudioSegment {
     }
 }
 
+impl Default for AudioSegment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for AudioSegment {
-    fn name(&self) -> &str { "audio-segment" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 3 }
-    fn modality(&self) -> Modality { Modality::Audio }
+    fn name(&self) -> &str {
+        "audio-segment"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        3
+    }
+    fn modality(&self) -> Modality {
+        Modality::Audio
+    }
 
     async fn process_multimodal(
         &self,
@@ -115,12 +133,24 @@ impl MultiModalTokenSaver for AudioSegment {
         if input.audio.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "audio-segment".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No audio to segment.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -129,10 +159,11 @@ impl MultiModalTokenSaver for AudioSegment {
 
         for audio in input.audio {
             let speech_ratio = self.estimate_speech_ratio(&audio);
-            let effective_duration = (audio.duration_secs * speech_ratio)
-                .min(self.config.max_output_secs);
-            let new_tokens = (audio.naive_token_estimate as f64
-                * effective_duration / audio.duration_secs).ceil() as usize;
+            let effective_duration =
+                (audio.duration_secs * speech_ratio).min(self.config.max_output_secs);
+            let new_tokens = (audio.naive_token_estimate as f64 * effective_duration
+                / audio.duration_secs)
+                .ceil() as usize;
             let saved = audio.naive_token_estimate.saturating_sub(new_tokens);
             total_saved += saved;
 
@@ -152,14 +183,25 @@ impl MultiModalTokenSaver for AudioSegment {
             description: format!(
                 "Segmented audio (silence removal): {} → {} tokens ({:.0}% saved). \
                  Using energy-based VAD estimation. In production, use WebRTC/silero VAD.",
-                tokens_before, tokens_after,
-                if tokens_before > 0 { total_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    total_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
             audio: new_audio,
             live_frames: input.live_frames,
             documents: input.documents,
@@ -178,7 +220,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -196,7 +243,10 @@ mod tests {
                 naive_token_estimate: 1920,
                 compressed_tokens: 1920,
             }],
-            live_frames: vec![], documents: vec![], videos: vec![], assets_3d: vec![],
+            live_frames: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         // Should reduce tokens since much of audio is "silence"

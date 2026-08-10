@@ -55,12 +55,26 @@ impl PdfPageCompress {
     }
 }
 
+impl Default for PdfPageCompress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for PdfPageCompress {
-    fn name(&self) -> &str { "pdf-page-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 8 }
-    fn modality(&self) -> Modality { Modality::Document }
+    fn name(&self) -> &str {
+        "pdf-page-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        8
+    }
+    fn modality(&self) -> Modality {
+        Modality::Document
+    }
 
     async fn process_multimodal(
         &self,
@@ -72,12 +86,24 @@ impl MultiModalTokenSaver for PdfPageCompress {
         if input.documents.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "pdf-page-compress".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No documents.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -118,18 +144,33 @@ impl MultiModalTokenSaver for PdfPageCompress {
             description: format!(
                 "Compressed {} documents: {} → {} tokens ({:.0}% saved). \
                  Default detail: {:?}, max pages: {}.",
-                new_docs.len(), tokens_before, tokens_after,
-                if tokens_before > 0 { total_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
-                self.config.default_detail, self.config.max_pages
+                new_docs.len(),
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    total_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
+                self.config.default_detail,
+                self.config.max_pages
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames,
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
             documents: new_docs,
-            videos: input.videos, assets_3d: input.assets_3d,
+            videos: input.videos,
+            assets_3d: input.assets_3d,
         })
     }
 
@@ -143,7 +184,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -152,14 +198,16 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![],
+            audio: vec![],
+            live_frames: vec![],
             documents: vec![DocumentInput {
                 data: vec![],
                 doc_type: DocumentType::Pdf,
                 page_count: Some(50),
                 naive_token_estimate: 50 * 765, // high detail
             }],
-            videos: vec![], assets_3d: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(saver.last_savings().tokens_saved > 0);

@@ -119,11 +119,23 @@ impl PrefixCacheSaver {
     }
 }
 
+impl Default for PrefixCacheSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for PrefixCacheSaver {
-    fn name(&self) -> &str { "prefix-cache" }
-    fn stage(&self) -> SaverStage { SaverStage::PromptAssembly }
-    fn priority(&self) -> u32 { 10 }
+    fn name(&self) -> &str {
+        "prefix-cache"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PromptAssembly
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
 
     async fn process(
         &self,
@@ -148,18 +160,18 @@ impl TokenSaver for PrefixCacheSaver {
         }
 
         // Compute prefix hash (stable messages + sorted tools)
-        let prefix_messages: Vec<Message> = stable_idxs.iter()
+        let prefix_messages: Vec<Message> = stable_idxs
+            .iter()
             .map(|&i| input.messages[i].clone())
             .collect();
         let prefix_hash = Self::hash_prefix(&prefix_messages, &tools);
 
         // Calculate prefix token count
-        let prefix_tokens: usize = prefix_messages.iter()
-            .map(|m| m.token_count)
-            .sum::<usize>()
+        let prefix_tokens: usize = prefix_messages.iter().map(|m| m.token_count).sum::<usize>()
             + tools.iter().map(|t| t.token_count).sum::<usize>();
 
-        let total_tokens: usize = ordered_messages.iter()
+        let total_tokens: usize = ordered_messages
+            .iter()
             .map(|m| m.token_count)
             .sum::<usize>()
             + tools.iter().map(|t| t.token_count).sum::<usize>();
@@ -270,10 +282,7 @@ mod tests {
             ..Default::default()
         };
         let input = SaverInput {
-            messages: vec![
-                user_msg("hello", 100),
-                sys_msg("You are helpful.", 600),
-            ],
+            messages: vec![user_msg("hello", 100), sys_msg("You are helpful.", 600)],
             tools: vec![tool("read_file", 500)],
             images: vec![],
             turn_number: 1,
@@ -298,9 +307,10 @@ mod tests {
             ..Default::default()
         };
         let input = SaverInput {
-            messages: vec![
-                sys_msg("You are a coding assistant. Help the user with their code.", 1100),
-            ],
+            messages: vec![sys_msg(
+                "You are a coding assistant. Help the user with their code.",
+                1100,
+            )],
             tools: vec![tool("read_file", 200)],
             images: vec![],
             turn_number: 1,

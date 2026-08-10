@@ -49,14 +49,14 @@ impl RLMStats {
     pub fn cache_hit_rate(&self) -> f64 {
         let total_ast = self.ast_cache_hits + self.ast_cache_misses;
         let total_llm = self.llm_cache_hits + self.llm_cache_misses;
-        
+
         if total_ast + total_llm == 0 {
             return 0.0;
         }
-        
+
         let hits = self.ast_cache_hits + self.llm_cache_hits;
         let total = total_ast + total_llm;
-        
+
         ((hits as f64 / total as f64) * 100.0 * 100.0).round() / 100.0
     }
 
@@ -73,13 +73,13 @@ impl RLMStats {
         if total_calls == 0 {
             return 0.0;
         }
-        
+
         // Baseline: all calls use smart model (1.0x cost each)
         let baseline_cost = total_calls as f64;
-        
+
         // Actual: fast model = 0.1x, smart model = 1.0x
         let actual_cost = (self.fast_model_calls as f64 * 0.1) + (self.smart_model_calls as f64);
-        
+
         ((baseline_cost - actual_cost) / baseline_cost * 100.0 * 100.0).round() / 100.0
     }
 }
@@ -254,28 +254,13 @@ impl RLM {
         &self,
         queries: Vec<(&str, Arc<String>)>,
     ) -> Result<Vec<Result<(String, RLMStats)>>> {
-        let mut handles = Vec::new();
-
-        for (query, context) in queries {
-            let rlm = self.clone();
-            let query = query.to_string();
-            let context = context.clone();
-
-            let handle = tokio::spawn(async move {
-                rlm.complete_with_arc(&query, context).await
-            });
-
-            handles.push(handle);
-        }
-
-        // Wait for all to complete
-        let results = futures::future::join_all(handles).await;
-
-        // Unwrap JoinHandles
-        Ok(results
+        let futures = queries
             .into_iter()
-            .map(|r| r.unwrap_or_else(|e| Err(RLMError::LLMError(format!("Task failed: {}", e)))))
-            .collect())
+            .map(|(query, context)| self.complete_with_arc(query, context));
+
+        // Rhai's engine is intentionally single-threaded, so use concurrent
+        // future polling without spawning non-Send RLM state onto worker threads.
+        Ok(futures::future::join_all(futures).await)
     }
 
     pub async fn complete(&self, query: &str, context: &str) -> Result<(String, RLMStats)> {
@@ -284,7 +269,11 @@ impl RLM {
         self.complete_with_arc(query, context_arc).await
     }
 
-    pub async fn complete_with_arc(&self, query: &str, context: Arc<String>) -> Result<(String, RLMStats)> {
+    pub async fn complete_with_arc(
+        &self,
+        query: &str,
+        context: Arc<String>,
+    ) -> Result<(String, RLMStats)> {
         let start = Instant::now();
 
         if self.current_depth >= self.max_depth {
@@ -311,13 +300,10 @@ impl RLM {
         scope.push("context", (*context).clone());
         scope.push("query", query.to_string());
 
-        let mut llm_calls = 0;
-        let mut iterations = 0;
-
         // Main iteration loop
-        for iteration in 0..self.max_iterations {
-            iterations = iteration + 1;
-            llm_calls += 1;
+        for (iteration, _) in (0..self.max_iterations).enumerate() {
+            let llm_calls = iteration + 1;
+            let iterations = llm_calls;
 
             // Call LLM
             let response = self.llm_client.complete(messages.clone()).await?;
@@ -326,12 +312,12 @@ impl RLM {
             if is_final(&response) {
                 if let Some(answer) = extract_final(&response) {
                     let elapsed_ms = start.elapsed().as_millis();
-                    
+
                     // Get cache stats
                     let (ast_hits, ast_misses) = self.repl.cache_stats();
                     let (llm_hits, llm_misses) = self.llm_client.cache_stats();
                     let (fast_calls, smart_calls) = self.llm_client.model_stats();
-                    
+
                     return Ok((
                         answer,
                         RLMStats {
@@ -444,9 +430,14 @@ Depth: {}
     )
 }
 
-    /// Streaming execution (Phase 2 optimization)
-    /// Executes code as LLM tokens arrive, reducing latency by 2-3 seconds
-    pub async fn complete_streaming(&self, query: &str, context: Arc<String>) -> Result<(String, RLMStats)> {
+/// Streaming execution (Phase 2 optimization)
+/// Executes code as LLM tokens arrive, reducing latency by 2-3 seconds
+impl RLM {
+    pub async fn complete_streaming(
+        &self,
+        query: &str,
+        context: Arc<String>,
+    ) -> Result<(String, RLMStats)> {
         let start = Instant::now();
 
         if self.current_depth >= self.max_depth {
@@ -470,12 +461,9 @@ Depth: {}
         scope.push("context", (*context).clone());
         scope.push("query", query.to_string());
 
-        let mut llm_calls = 0;
-        let mut iterations = 0;
-
-        for iteration in 0..self.max_iterations {
-            iterations = iteration + 1;
-            llm_calls += 1;
+        for (iteration, _) in (0..self.max_iterations).enumerate() {
+            let llm_calls = iteration + 1;
+            let iterations = llm_calls;
 
             // Stream response
             let mut rx = self.llm_client.stream(messages.clone()).await?;
@@ -504,7 +492,7 @@ Depth: {}
                         let (ast_hits, ast_misses) = self.repl.cache_stats();
                         let (llm_hits, llm_misses) = self.llm_client.cache_stats();
                         let (fast_calls, smart_calls) = self.llm_client.model_stats();
-                        
+
                         return Ok((
                             answer,
                             RLMStats {
@@ -541,3 +529,4 @@ Depth: {}
 
         Err(RLMError::MaxIterations(self.max_iterations))
     }
+}

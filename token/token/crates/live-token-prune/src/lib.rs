@@ -66,7 +66,10 @@ impl LiveTokenPrune {
         }
         // Always include the last frame
         if let Some(last) = frames.last() {
-            if selected.last().map_or(true, |s| s.frame_index != last.frame_index) {
+            if selected
+                .last()
+                .is_none_or(|s| s.frame_index != last.frame_index)
+            {
                 if selected.len() >= max_count {
                     selected.pop();
                 }
@@ -77,12 +80,26 @@ impl LiveTokenPrune {
     }
 }
 
+impl Default for LiveTokenPrune {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for LiveTokenPrune {
-    fn name(&self) -> &str { "live-token-prune" }
-    fn stage(&self) -> SaverStage { SaverStage::PreCall }
-    fn priority(&self) -> u32 { 3 }
-    fn modality(&self) -> Modality { Modality::Live }
+    fn name(&self) -> &str {
+        "live-token-prune"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PreCall
+    }
+    fn priority(&self) -> u32 {
+        3
+    }
+    fn modality(&self) -> Modality {
+        Modality::Live
+    }
 
     async fn process_multimodal(
         &self,
@@ -95,22 +112,37 @@ impl MultiModalTokenSaver for LiveTokenPrune {
         if tokens_before <= self.config.max_live_tokens && frame_count <= self.config.max_frames {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "live-token-prune".into(),
-                tokens_before, tokens_after: tokens_before, tokens_saved: 0,
-                description: format!("Within limits: {} frames, {} tokens.", frame_count, tokens_before),
+                tokens_before,
+                tokens_after: tokens_before,
+                tokens_saved: 0,
+                description: format!(
+                    "Within limits: {} frames, {} tokens.",
+                    frame_count, tokens_before
+                ),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
         // Determine how many frames we can keep
-        let avg_tokens_per_frame = if frame_count > 0 { tokens_before / frame_count } else { 85 };
-        let max_by_tokens = if avg_tokens_per_frame > 0 {
-            self.config.max_live_tokens / avg_tokens_per_frame
-        } else {
-            self.config.max_frames
-        };
+        let avg_tokens_per_frame = tokens_before.checked_div(frame_count).unwrap_or(85);
+        let max_by_tokens = self
+            .config
+            .max_live_tokens
+            .checked_div(avg_tokens_per_frame)
+            .unwrap_or(self.config.max_frames);
         let target_count = self.config.max_frames.min(max_by_tokens).max(1);
 
         let pruned = if self.config.temporal_sampling {
@@ -132,15 +164,32 @@ impl MultiModalTokenSaver for LiveTokenPrune {
             description: format!(
                 "Pruned live frames: {} → {} frames ({} → {} tokens, {:.0}% saved). \
                  Strategy: {}.",
-                frame_count, pruned.len(), tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
-                if self.config.temporal_sampling { "temporal sampling" } else { "keep recent" }
+                frame_count,
+                pruned.len(),
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
+                if self.config.temporal_sampling {
+                    "temporal sampling"
+                } else {
+                    "keep recent"
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
             audio: input.audio,
             live_frames: pruned,
             documents: input.documents,
@@ -159,23 +208,40 @@ mod tests {
     use super::*;
 
     fn frame(idx: u64) -> LiveFrame {
-        LiveFrame { image_data: vec![0u8; 100], timestamp_secs: idx as f64, frame_index: idx, token_estimate: 85, is_keyframe: false }
+        LiveFrame {
+            image_data: vec![0u8; 100],
+            timestamp_secs: idx as f64,
+            frame_index: idx,
+            token_estimate: 85,
+            is_keyframe: false,
+        }
     }
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
     async fn test_prunes_excess_frames() {
-        let config = LiveTokenPruneConfig { max_frames: 5, max_live_tokens: 1000, temporal_sampling: true };
+        let config = LiveTokenPruneConfig {
+            max_frames: 5,
+            max_live_tokens: 1000,
+            temporal_sampling: true,
+        };
         let saver = LiveTokenPrune::with_config(config);
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
             audio: vec![],
             live_frames: (0..100).map(frame).collect(),
-            documents: vec![], videos: vec![], assets_3d: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(out.live_frames.len() <= 5);

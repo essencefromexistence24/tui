@@ -73,20 +73,36 @@ impl PdfChartDetect {
     fn detect_charts(&self, _data: &[u8], page_count: usize) -> Vec<ChartDetection> {
         // Heuristic: assume ~20% of pages in a document contain charts
         let chart_pages = (page_count as f64 * 0.2).ceil() as usize;
-        (0..chart_pages).map(|i| ChartDetection {
-            page_index: i,
-            chart_type: ChartType::Unknown,
-            confidence: 0.7,
-        }).collect()
+        (0..chart_pages)
+            .map(|i| ChartDetection {
+                page_index: i,
+                chart_type: ChartType::Unknown,
+                confidence: 0.7,
+            })
+            .collect()
+    }
+}
+
+impl Default for PdfChartDetect {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for PdfChartDetect {
-    fn name(&self) -> &str { "pdf-chart-detect" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 10 }
-    fn modality(&self) -> Modality { Modality::Document }
+    fn name(&self) -> &str {
+        "pdf-chart-detect"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
+    fn modality(&self) -> Modality {
+        Modality::Document
+    }
 
     async fn process_multimodal(
         &self,
@@ -98,12 +114,24 @@ impl MultiModalTokenSaver for PdfChartDetect {
         if input.documents.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "pdf-chart-detect".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No documents.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -115,7 +143,8 @@ impl MultiModalTokenSaver for PdfChartDetect {
         for doc in input.documents {
             let page_count = doc.page_count.unwrap_or(1);
             let charts = self.detect_charts(&doc.data, page_count);
-            let confident_charts: Vec<_> = charts.into_iter()
+            let confident_charts: Vec<_> = charts
+                .into_iter()
                 .filter(|c| c.confidence >= self.config.detection_threshold)
                 .collect();
 
@@ -127,9 +156,10 @@ impl MultiModalTokenSaver for PdfChartDetect {
             charts_found += confident_charts.len();
 
             // For each detected chart, estimate savings from data extraction
-            let tokens_per_page = if page_count > 0 {
-                doc.naive_token_estimate / page_count
-            } else { 765 };
+            let tokens_per_page = doc
+                .naive_token_estimate
+                .checked_div(page_count)
+                .unwrap_or(765);
 
             let chart_image_tokens = confident_charts.len() * tokens_per_page;
             let chart_data_tokens = confident_charts.len() * self.config.max_data_tokens;
@@ -143,7 +173,9 @@ impl MultiModalTokenSaver for PdfChartDetect {
                     content: format!(
                         "[Chart data placeholder: page {}, type {:?}, confidence {:.0}%. \
                          In production, use chart-data-extraction model here.]",
-                        chart.page_index, chart.chart_type, chart.confidence * 100.0
+                        chart.page_index,
+                        chart.chart_type,
+                        chart.confidence * 100.0
                     ),
                     images: vec![],
                     tool_call_id: None,
@@ -168,17 +200,31 @@ impl MultiModalTokenSaver for PdfChartDetect {
             description: format!(
                 "Detected {} charts, extracted data: {} → {} tokens ({:.0}% saved). \
                  NOTE: Stub detection. Production needs CV model.",
-                charts_found, tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved_from_charts as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                charts_found,
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved_from_charts as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: new_messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames,
+            base: SaverOutput {
+                messages: new_messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
             documents: new_docs,
-            videos: input.videos, assets_3d: input.assets_3d,
+            videos: input.videos,
+            assets_3d: input.assets_3d,
         })
     }
 
@@ -192,7 +238,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -201,14 +252,16 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![],
+            audio: vec![],
+            live_frames: vec![],
             documents: vec![DocumentInput {
                 data: vec![0u8; 100],
                 doc_type: DocumentType::Pdf,
                 page_count: Some(20),
                 naive_token_estimate: 20 * 765,
             }],
-            videos: vec![], assets_3d: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         // Should have detected some charts and added messages

@@ -32,10 +32,10 @@ impl ReasoningEffort {
     /// Approximate token multiplier vs high effort
     pub fn cost_multiplier(&self) -> f64 {
         match self {
-            ReasoningEffort::None => 0.0,   // No reasoning tokens at all
-            ReasoningEffort::Low => 0.20,   // ~80% savings
+            ReasoningEffort::None => 0.0,    // No reasoning tokens at all
+            ReasoningEffort::Low => 0.20,    // ~80% savings
             ReasoningEffort::Medium => 0.50, // ~50% savings
-            ReasoningEffort::High => 1.0,   // baseline
+            ReasoningEffort::High => 1.0,    // baseline
         }
     }
 
@@ -87,16 +87,33 @@ impl Default for ReasoningRouterConfig {
             expert_effort: ReasoningEffort::High,
             non_reasoning_model: "gpt-5".into(),
             complex_keywords: vec![
-                "prove".into(), "formally verify".into(), "mathematical".into(),
-                "step by step".into(), "analyze all".into(), "debug this complex".into(),
-                "architect".into(), "design pattern".into(), "optimize algorithm".into(),
-                "security audit".into(), "race condition".into(), "deadlock".into(),
+                "prove".into(),
+                "formally verify".into(),
+                "mathematical".into(),
+                "step by step".into(),
+                "analyze all".into(),
+                "debug this complex".into(),
+                "architect".into(),
+                "design pattern".into(),
+                "optimize algorithm".into(),
+                "security audit".into(),
+                "race condition".into(),
+                "deadlock".into(),
             ],
             simple_keywords: vec![
-                "format".into(), "rename".into(), "list".into(), "what is".into(),
-                "define".into(), "translate".into(), "convert".into(), "hello".into(),
-                "add a comment".into(), "fix typo".into(), "update version".into(),
-                "change the name".into(), "remove unused".into(),
+                "format".into(),
+                "rename".into(),
+                "list".into(),
+                "what is".into(),
+                "define".into(),
+                "translate".into(),
+                "convert".into(),
+                "hello".into(),
+                "add a comment".into(),
+                "fix typo".into(),
+                "update version".into(),
+                "change the name".into(),
+                "remove unused".into(),
             ],
         }
     }
@@ -139,7 +156,9 @@ impl ReasoningRouterSaver {
     /// Classify the task complexity based on the latest user message.
     fn classify_task(&self, messages: &[Message]) -> TaskComplexity {
         // Find the most recent user message
-        let user_msg = messages.iter().rev()
+        let user_msg = messages
+            .iter()
+            .rev()
             .find(|m| m.role == "user")
             .map(|m| m.content.to_lowercase());
 
@@ -149,11 +168,17 @@ impl ReasoningRouterSaver {
         };
 
         // Count complexity signals
-        let complex_signals: usize = self.config.complex_keywords.iter()
+        let complex_signals: usize = self
+            .config
+            .complex_keywords
+            .iter()
             .filter(|kw| text.contains(kw.as_str()))
             .count();
 
-        let simple_signals: usize = self.config.simple_keywords.iter()
+        let simple_signals: usize = self
+            .config
+            .simple_keywords
+            .iter()
             .filter(|kw| text.contains(kw.as_str()))
             .count();
 
@@ -181,35 +206,29 @@ impl ReasoningRouterSaver {
                 self.config.simple_effort,
                 Some(self.config.non_reasoning_model.clone()),
             ),
-            TaskComplexity::Standard => (
-                self.config.standard_effort,
-                None,
-            ),
-            TaskComplexity::Complex => (
-                self.config.complex_effort,
-                None,
-            ),
-            TaskComplexity::Expert => (
-                self.config.expert_effort,
-                None,
-            ),
+            TaskComplexity::Standard => (self.config.standard_effort, None),
+            TaskComplexity::Complex => (self.config.complex_effort, None),
+            TaskComplexity::Expert => (self.config.expert_effort, None),
         };
 
         let savings_pct = (1.0 - effort.cost_multiplier()) * 100.0;
         let explanation = match complexity {
             TaskComplexity::Simple => format!(
                 "Simple task → no reasoning needed. Use {} for ~{:.0}% reasoning token savings.",
-                model_override.as_deref().unwrap_or("non-reasoning model"), savings_pct
+                model_override.as_deref().unwrap_or("non-reasoning model"),
+                savings_pct
             ),
             TaskComplexity::Standard => format!(
-                "Standard task → low reasoning effort. ~{:.0}% reasoning token savings.", savings_pct
+                "Standard task → low reasoning effort. ~{:.0}% reasoning token savings.",
+                savings_pct
             ),
             TaskComplexity::Complex => format!(
-                "Complex task → medium reasoning effort. ~{:.0}% reasoning token savings.", savings_pct
+                "Complex task → medium reasoning effort. ~{:.0}% reasoning token savings.",
+                savings_pct
             ),
-            TaskComplexity::Expert => format!(
-                "Expert task → full reasoning effort. No savings on reasoning tokens."
-            ),
+            TaskComplexity::Expert => {
+                "Expert task → full reasoning effort. No savings on reasoning tokens.".to_string()
+            }
         };
 
         RoutingDecision {
@@ -222,11 +241,23 @@ impl ReasoningRouterSaver {
     }
 }
 
+impl Default for ReasoningRouterSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for ReasoningRouterSaver {
-    fn name(&self) -> &str { "reasoning-router" }
-    fn stage(&self) -> SaverStage { SaverStage::PreCall }
-    fn priority(&self) -> u32 { 10 }
+    fn name(&self) -> &str {
+        "reasoning-router"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PreCall
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
 
     async fn process(
         &self,
@@ -240,7 +271,8 @@ impl TokenSaver for ReasoningRouterSaver {
         // Estimate reasoning tokens (typically 2-4x visible output for o-series)
         // Conservative estimate: 30% of input tokens become reasoning tokens
         let estimated_reasoning = (tokens_before as f64 * 0.30) as usize;
-        let tokens_saved = (estimated_reasoning as f64 * (1.0 - decision.effort.cost_multiplier())) as usize;
+        let tokens_saved =
+            (estimated_reasoning as f64 * (1.0 - decision.effort.cost_multiplier())) as usize;
 
         let report = TokenSavingsReport {
             technique: "reasoning-router".into(),
@@ -309,6 +341,9 @@ mod tests {
         };
         let _ = saver.process(input, &ctx).await.unwrap();
         let decision = saver.last_decision().unwrap();
-        assert!(decision.complexity == TaskComplexity::Expert || decision.complexity == TaskComplexity::Complex);
+        assert!(
+            decision.complexity == TaskComplexity::Expert
+                || decision.complexity == TaskComplexity::Complex
+        );
     }
 }

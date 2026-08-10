@@ -62,12 +62,26 @@ impl AudioTranscribe {
     }
 }
 
+impl Default for AudioTranscribe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for AudioTranscribe {
-    fn name(&self) -> &str { "audio-transcribe" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 10 }
-    fn modality(&self) -> Modality { Modality::Audio }
+    fn name(&self) -> &str {
+        "audio-transcribe"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
+    fn modality(&self) -> Modality {
+        Modality::Audio
+    }
 
     async fn process_multimodal(
         &self,
@@ -79,12 +93,24 @@ impl MultiModalTokenSaver for AudioTranscribe {
         if input.audio.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "audio-transcribe".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No audio to transcribe.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -123,7 +149,10 @@ impl MultiModalTokenSaver for AudioTranscribe {
         }
 
         let tokens_after = total_transcript_tokens
-            + remaining_audio.iter().map(|a| a.naive_token_estimate).sum::<usize>();
+            + remaining_audio
+                .iter()
+                .map(|a| a.naive_token_estimate)
+                .sum::<usize>();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
 
         let report = TokenSavingsReport {
@@ -134,8 +163,14 @@ impl MultiModalTokenSaver for AudioTranscribe {
             description: format!(
                 "Transcribed {} audio clips: {} audio tokens → {} text tokens ({:.0}% saved). \
                  NOTE: Requires STT API call (added latency + cost not reflected here).",
-                transcribed_count, tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                transcribed_count,
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
@@ -166,11 +201,24 @@ mod tests {
     use super::*;
 
     fn test_audio(duration: f64, tokens: usize) -> AudioInput {
-        AudioInput { data: vec![], format: AudioFormat::Wav, sample_rate: 16000, duration_secs: duration, channels: 1, naive_token_estimate: tokens, compressed_tokens: tokens }
+        AudioInput {
+            data: vec![],
+            format: AudioFormat::Wav,
+            sample_rate: 16000,
+            duration_secs: duration,
+            channels: 1,
+            naive_token_estimate: tokens,
+            compressed_tokens: tokens,
+        }
     }
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -181,7 +229,10 @@ mod tests {
         let input = MultiModalSaverInput {
             base: empty_base(),
             audio: vec![test_audio(60.0, 1920)],
-            live_frames: vec![], documents: vec![], videos: vec![], assets_3d: vec![],
+            live_frames: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(out.audio.is_empty()); // Audio consumed

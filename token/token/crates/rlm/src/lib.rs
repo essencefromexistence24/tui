@@ -43,11 +43,11 @@
 //! - 10x less memory usage
 //! - 50-70% lower costs (with multi-model routing)
 
-pub mod rlm;
-pub mod llm;
-pub mod repl;
-pub mod parser;
 pub mod error;
+pub mod llm;
+pub mod parser;
+pub mod repl;
+pub mod rlm;
 
-pub use rlm::{RLM, RLMStats};
 pub use error::{RLMError, Result};
+pub use rlm::{RLMStats, RLM};

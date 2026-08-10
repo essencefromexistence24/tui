@@ -92,12 +92,26 @@ impl LiveEventTree {
     }
 }
 
+impl Default for LiveEventTree {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for LiveEventTree {
-    fn name(&self) -> &str { "live-event-tree" }
-    fn stage(&self) -> SaverStage { SaverStage::PromptAssembly }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::Live }
+    fn name(&self) -> &str {
+        "live-event-tree"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PromptAssembly
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::Live
+    }
 
     async fn process_multimodal(
         &self,
@@ -110,30 +124,46 @@ impl MultiModalTokenSaver for LiveEventTree {
         if frame_count == 0 {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "live-event-tree".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No live frames.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
         let scenes = self.segment_into_scenes(&input.live_frames);
 
         // Select most recent scenes up to max_events_in_context
-        let selected_scenes: Vec<&Scene> = scenes.iter().rev()
+        let selected_scenes: Vec<&Scene> = scenes
+            .iter()
+            .rev()
             .take(self.config.max_events_in_context)
             .collect();
 
         // Collect keyframe indices from selected scenes
-        let mut kept_indices: Vec<usize> = selected_scenes.iter()
+        let mut kept_indices: Vec<usize> = selected_scenes
+            .iter()
             .flat_map(|s| s.keyframes.iter().copied())
             .collect();
         kept_indices.sort_unstable();
         kept_indices.dedup();
 
-        let kept_frames: Vec<LiveFrame> = kept_indices.iter()
+        let kept_frames: Vec<LiveFrame> = kept_indices
+            .iter()
             .filter_map(|&i| input.live_frames.get(i).cloned())
             .collect();
 
@@ -145,8 +175,16 @@ impl MultiModalTokenSaver for LiveEventTree {
             scenes.len(),
             selected_scenes.len(),
             kept_frames.len(),
-            input.live_frames.first().map(|f| f.timestamp_secs).unwrap_or(0.0),
-            input.live_frames.last().map(|f| f.timestamp_secs).unwrap_or(0.0),
+            input
+                .live_frames
+                .first()
+                .map(|f| f.timestamp_secs)
+                .unwrap_or(0.0),
+            input
+                .live_frames
+                .last()
+                .map(|f| f.timestamp_secs)
+                .unwrap_or(0.0),
         );
         new_messages.push(Message {
             role: "system".into(),
@@ -166,15 +204,28 @@ impl MultiModalTokenSaver for LiveEventTree {
             tokens_saved,
             description: format!(
                 "Event tree: {} scenes, {} → {} frames ({} → {} tokens, {:.0}% saved).",
-                scenes.len(), frame_count, kept_frames.len(),
-                tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                scenes.len(),
+                frame_count,
+                kept_frames.len(),
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: new_messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
+            base: SaverOutput {
+                messages: new_messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
             audio: input.audio,
             live_frames: kept_frames,
             documents: input.documents,
@@ -193,11 +244,22 @@ mod tests {
     use super::*;
 
     fn frame(idx: u64, time: f64) -> LiveFrame {
-        LiveFrame { image_data: vec![], timestamp_secs: time, frame_index: idx, token_estimate: 85, is_keyframe: false }
+        LiveFrame {
+            image_data: vec![],
+            timestamp_secs: time,
+            frame_index: idx,
+            token_estimate: 85,
+            is_keyframe: false,
+        }
     }
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -211,7 +273,9 @@ mod tests {
             base: empty_base(),
             audio: vec![],
             live_frames: frames,
-            documents: vec![], videos: vec![], assets_3d: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(out.live_frames.len() < 20); // Should prune

@@ -90,7 +90,8 @@ impl SchemaMinifierSaver {
                             MinifyLevel::Moderate => {
                                 if let serde_json::Value::String(s) = val {
                                     let shortened = self.shorten_description(s);
-                                    new_map.insert(key.clone(), serde_json::Value::String(shortened));
+                                    new_map
+                                        .insert(key.clone(), serde_json::Value::String(shortened));
                                     continue;
                                 }
                             }
@@ -111,14 +112,18 @@ impl SchemaMinifierSaver {
     /// Shorten a description to its first sentence or max length.
     fn shorten_description(&self, desc: &str) -> String {
         // First sentence
-        let first_sentence = desc.split_once(". ")
+        let first_sentence = desc
+            .split_once(". ")
             .map(|(s, _)| format!("{}.", s))
             .unwrap_or_else(|| desc.to_string());
 
         if first_sentence.len() <= self.config.max_description_len {
             first_sentence
         } else {
-            format!("{}…", &first_sentence[..self.config.max_description_len.saturating_sub(1)])
+            format!(
+                "{}…",
+                &first_sentence[..self.config.max_description_len.saturating_sub(1)]
+            )
         }
     }
 
@@ -162,11 +167,23 @@ impl SchemaMinifierSaver {
     }
 }
 
+impl Default for SchemaMinifierSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for SchemaMinifierSaver {
-    fn name(&self) -> &str { "schema-minifier" }
-    fn stage(&self) -> SaverStage { SaverStage::PromptAssembly }
-    fn priority(&self) -> u32 { 20 }
+    fn name(&self) -> &str {
+        "schema-minifier"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PromptAssembly
+    }
+    fn priority(&self) -> u32 {
+        20
+    }
 
     async fn process(
         &self,
@@ -175,15 +192,16 @@ impl TokenSaver for SchemaMinifierSaver {
     ) -> Result<SaverOutput, SaverError> {
         let tokens_before: usize = input.tools.iter().map(|t| t.token_count).sum();
 
-        let minified_tools: Vec<ToolSchema> = input.tools.iter()
-            .map(|t| self.minify_tool(t))
-            .collect();
+        let minified_tools: Vec<ToolSchema> =
+            input.tools.iter().map(|t| self.minify_tool(t)).collect();
 
         let tokens_after: usize = minified_tools.iter().map(|t| t.token_count).sum();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
         let pct = if tokens_before > 0 {
             tokens_saved as f64 / tokens_before as f64 * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "schema-minifier".into(),
@@ -193,9 +211,13 @@ impl TokenSaver for SchemaMinifierSaver {
             description: format!(
                 "Minified {} tool schemas ({:?} level): {} → {} tokens ({:.1}% saved). \
                  Stripped keys: {:?}. Protected: {:?}.",
-                minified_tools.len(), self.config.level,
-                tokens_before, tokens_after, pct,
-                self.config.strip_keys, self.config.protected_tools
+                minified_tools.len(),
+                self.config.level,
+                tokens_before,
+                tokens_after,
+                pct,
+                self.config.strip_keys,
+                self.config.protected_tools
             ),
         };
         *self.report.lock().unwrap() = report;

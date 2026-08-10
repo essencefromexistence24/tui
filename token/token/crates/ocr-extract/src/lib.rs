@@ -94,7 +94,9 @@ impl OcrExtractSaver {
             let mut edge_count = 0u64;
             for y in 0..h {
                 for x in 1..w {
-                    let diff = (gray.get_pixel(x, y)[0] as i32 - gray.get_pixel(x - 1, y)[0] as i32).unsigned_abs();
+                    let diff = (gray.get_pixel(x, y)[0] as i32
+                        - gray.get_pixel(x - 1, y)[0] as i32)
+                        .unsigned_abs();
                     if diff > 30 {
                         edge_count += 1;
                     }
@@ -182,11 +184,23 @@ enum OcrResult {
     },
 }
 
+impl Default for OcrExtractSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for OcrExtractSaver {
-    fn name(&self) -> &str { "ocr-extract" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 5 }
+    fn name(&self) -> &str {
+        "ocr-extract"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
 
     async fn process(
         &self,
@@ -208,7 +222,9 @@ impl TokenSaver for OcrExtractSaver {
                     total_tokens_after += kept.original_tokens;
                     remaining_images.push(kept);
                 }
-                OcrResult::ReplaceWithText { text, text_tokens, .. } => {
+                OcrResult::ReplaceWithText {
+                    text, text_tokens, ..
+                } => {
                     total_tokens_after += text_tokens;
                     images_converted += 1;
                     ocr_texts.push(text);
@@ -226,7 +242,9 @@ impl TokenSaver for OcrExtractSaver {
                         total_tokens_after += kept.original_tokens;
                         new_images.push(kept);
                     }
-                    OcrResult::ReplaceWithText { text, text_tokens, .. } => {
+                    OcrResult::ReplaceWithText {
+                        text, text_tokens, ..
+                    } => {
                         total_tokens_after += text_tokens;
                         images_converted += 1;
                         // Append OCR text to message content
@@ -245,7 +263,11 @@ impl TokenSaver for OcrExtractSaver {
             let combined_tokens = combined.len() / 4;
             messages.push(Message {
                 role: "user".into(),
-                content: format!("[OCR extracted from {} images]:\n{}", ocr_texts.len(), combined),
+                content: format!(
+                    "[OCR extracted from {} images]:\n{}",
+                    ocr_texts.len(),
+                    combined
+                ),
                 images: vec![],
                 tool_call_id: None,
                 token_count: combined_tokens,
@@ -255,7 +277,9 @@ impl TokenSaver for OcrExtractSaver {
         let tokens_saved = total_image_tokens_before.saturating_sub(total_tokens_after);
         let pct = if total_image_tokens_before > 0 {
             tokens_saved as f64 / total_image_tokens_before as f64 * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "ocr-extract".into(),

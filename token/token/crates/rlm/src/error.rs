@@ -52,9 +52,15 @@ pub enum RLMError {
 
     /// Rhai script execution error.
     #[error("Rhai error: {0}")]
-    RhaiError(#[from] Box<rhai::EvalAltResult>),
+    RhaiError(String),
 
     /// File I/O error.
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+}
+
+impl From<Box<rhai::EvalAltResult>> for RLMError {
+    fn from(error: Box<rhai::EvalAltResult>) -> Self {
+        Self::RhaiError(error.to_string())
+    }
 }

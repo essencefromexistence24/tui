@@ -27,11 +27,11 @@ impl DxSerializer {
 
         // Use single-char role abbreviations
         let role_abbrev = match msg.role.as_str() {
-            "system"    => "s",
-            "user"      => "u",
+            "system" => "s",
+            "user" => "u",
             "assistant" => "a",
-            "tool"      => "t",
-            other       => other,
+            "tool" => "t",
+            other => other,
         };
         obj.insert("r".into(), serde_json::Value::String(role_abbrev.into()));
 
@@ -66,16 +66,28 @@ impl DxSerializer {
 }
 
 impl Default for DxSerializer {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait::async_trait]
 impl TokenSaver for DxSerializer {
-    fn name(&self) -> &str { "serializer" }
-    fn stage(&self) -> SaverStage { SaverStage::PostResponse }
-    fn priority(&self) -> u32 { 15 }
+    fn name(&self) -> &str {
+        "serializer"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PostResponse
+    }
+    fn priority(&self) -> u32 {
+        15
+    }
 
-    async fn process(&self, mut input: SaverInput, _ctx: &SaverContext) -> Result<SaverOutput, SaverError> {
+    async fn process(
+        &self,
+        mut input: SaverInput,
+        _ctx: &SaverContext,
+    ) -> Result<SaverOutput, SaverError> {
         let tokens_before: usize = input.messages.iter().map(|m| m.token_count).sum::<usize>()
             + input.tools.iter().map(|t| t.token_count).sum::<usize>();
 
@@ -103,7 +115,8 @@ impl TokenSaver for DxSerializer {
             tokens_saved: saved,
             description: format!(
                 "compact serialization: {} → {} tokens ({:.1}% saved)",
-                tokens_before, tokens_after,
+                tokens_before,
+                tokens_after,
                 saved as f64 / tokens_before.max(1) as f64 * 100.0
             ),
         };

@@ -6,8 +6,7 @@ use std::time::Instant;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load API key from environment
     dotenvy::dotenv().ok();
-    let api_key = std::env::var("GROQ_API_KEY")
-        .expect("GROQ_API_KEY must be set");
+    let api_key = std::env::var("GROQ_API_KEY").expect("GROQ_API_KEY must be set");
 
     println!("================================================================================");
     println!("🦀 RUST RLM BENCHMARK");
@@ -17,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load massive document
     let doc_path = "integrations/recursive-llm/massive_doc.txt";
     let context = fs::read_to_string(doc_path)?;
-    
+
     let doc_chars = context.len();
     let doc_tokens = 79743; // From dx token command
 
@@ -38,7 +37,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Test queries
-    let queries = vec![
+    let queries = [
         "What is the total AI market size and its growth rate?",
         "How many SpaceX launches were there in 2024?",
         "What percentage of tech workers work fully remote?",
@@ -65,16 +64,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!("✅ Answer: {}", answer);
                 println!("⚡ Time: {:.2}s", elapsed.as_secs_f64());
-                println!("📊 Stats: {} LLM calls, {} iterations", 
-                    stats.llm_calls, stats.iterations);
-                println!("💾 Cache: {:.1}% hit rate ({} hits)", 
+                println!(
+                    "📊 Stats: {} LLM calls, {} iterations",
+                    stats.llm_calls, stats.iterations
+                );
+                println!(
+                    "💾 Cache: {:.1}% hit rate ({} hits)",
                     stats.cache_hit_rate(),
-                    stats.ast_cache_hits + stats.llm_cache_hits);
-                println!("💰 Models: {} fast, {} smart (cost savings: {:.1}%)",
+                    stats.ast_cache_hits + stats.llm_cache_hits
+                );
+                println!(
+                    "💰 Models: {} fast, {} smart (cost savings: {:.1}%)",
                     stats.fast_model_calls,
                     stats.smart_model_calls,
-                    stats.cost_savings());
-                
+                    stats.cost_savings()
+                );
+
                 total_time += elapsed.as_millis();
                 total_llm_calls += stats.llm_calls;
                 total_iterations += stats.iterations;
@@ -96,7 +101,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let estimated_tokens = total_llm_calls * 400;
     let traditional_tokens = doc_tokens * queries.len();
-    let savings = ((traditional_tokens - estimated_tokens) as f64 / traditional_tokens as f64) * 100.0;
+    let savings =
+        ((traditional_tokens - estimated_tokens) as f64 / traditional_tokens as f64) * 100.0;
 
     println!("Document: {} tokens", doc_tokens);
     println!("Queries: {}", queries.len());
@@ -112,7 +118,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  • Total LLM calls: {}", total_llm_calls);
     println!("  • Total iterations: {}", total_iterations);
     println!("  • Total time: {:.2}s", total_time as f64 / 1000.0);
-    println!("  • Avg time/query: {:.2}s", total_time as f64 / 1000.0 / queries.len() as f64);
+    println!(
+        "  • Avg time/query: {:.2}s",
+        total_time as f64 / 1000.0 / queries.len() as f64
+    );
     println!();
 
     println!("💰 TOKEN SAVINGS: {:.1}%", savings);

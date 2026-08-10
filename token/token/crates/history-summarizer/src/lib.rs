@@ -66,7 +66,11 @@ impl HistorySummarizer {
         let total_tokens: usize = messages.iter().map(|m| m.token_count).sum();
 
         for msg in messages {
-            let lines: Vec<&str> = msg.content.lines().filter(|l| !l.trim().is_empty()).collect();
+            let lines: Vec<&str> = msg
+                .content
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .collect();
             if lines.is_empty() {
                 continue;
             }
@@ -80,7 +84,12 @@ impl HistorySummarizer {
                 summary_parts.push(format!("{} {}", role_prefix, lines.join(" ")));
             } else {
                 // First line + last line as extractive summary
-                summary_parts.push(format!("{} {} ... {}", role_prefix, lines[0], lines[lines.len()-1]));
+                summary_parts.push(format!(
+                    "{} {} ... {}",
+                    role_prefix,
+                    lines[0],
+                    lines[lines.len() - 1]
+                ));
             }
         }
 
@@ -106,11 +115,23 @@ impl HistorySummarizer {
     }
 }
 
+impl Default for HistorySummarizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for HistorySummarizer {
-    fn name(&self) -> &str { "history-summarizer" }
-    fn stage(&self) -> SaverStage { SaverStage::InterTurn }
-    fn priority(&self) -> u32 { 15 }
+    fn name(&self) -> &str {
+        "history-summarizer"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::InterTurn
+    }
+    fn priority(&self) -> u32 {
+        15
+    }
 
     async fn process(
         &self,
@@ -198,9 +219,16 @@ impl TokenSaver for HistorySummarizer {
                  Kept {} recent messages ({} tokens). \
                  Compression: {:.0}%. \
                  NOTE: Net savings only positive if summary reused across 2+ turns.",
-                split_point, old_tokens, summary_tokens,
-                keep_count, keep_tokens,
-                if old_tokens > 0 { (1.0 - summary_tokens as f64 / old_tokens as f64) * 100.0 } else { 0.0 }
+                split_point,
+                old_tokens,
+                summary_tokens,
+                keep_count,
+                keep_tokens,
+                if old_tokens > 0 {
+                    (1.0 - summary_tokens as f64 / old_tokens as f64) * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
@@ -224,7 +252,13 @@ mod tests {
     use super::*;
 
     fn msg(role: &str, content: &str, tokens: usize) -> Message {
-        Message { role: role.into(), content: content.into(), images: vec![], tool_call_id: None, token_count: tokens }
+        Message {
+            role: role.into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: tokens,
+        }
     }
 
     #[tokio::test]
@@ -254,8 +288,16 @@ mod tests {
         let ctx = SaverContext::default();
         let input = SaverInput {
             messages: vec![
-                msg("user", "First question with lots of detail about topic A", 200),
-                msg("assistant", "Detailed answer about topic A with examples", 300),
+                msg(
+                    "user",
+                    "First question with lots of detail about topic A",
+                    200,
+                ),
+                msg(
+                    "assistant",
+                    "Detailed answer about topic A with examples",
+                    300,
+                ),
                 msg("user", "Follow up about topic A with more context", 200),
                 msg("assistant", "More details about A", 250),
                 msg("user", "New question about topic B", 100),

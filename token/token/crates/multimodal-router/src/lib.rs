@@ -67,7 +67,11 @@ impl MultimodalRouter {
     fn decide_route(&self, input: &MultiModalSaverInput, current_model: &str) -> RoutingDecision {
         let has_audio = !input.audio.is_empty();
         let has_complex_images = input.base.images.len() > self.config.image_complexity_threshold
-            || input.base.images.iter().any(|i| i.detail == ImageDetail::High);
+            || input
+                .base
+                .images
+                .iter()
+                .any(|i| i.detail == ImageDetail::High);
         let has_3d = !input.assets_3d.is_empty();
         let has_video = !input.videos.is_empty();
 
@@ -77,46 +81,83 @@ impl MultimodalRouter {
         }
 
         // Simple image tasks → cheaper model
-        if !has_audio && !has_3d && !has_video && !has_complex_images {
-            if current_model.contains("gpt-4o") && !current_model.contains("mini") {
-                return RoutingDecision::RouteToModel(self.config.cheap_vision_model.clone());
-            }
+        if !has_audio
+            && !has_3d
+            && !has_video
+            && !has_complex_images
+            && current_model.contains("gpt-4o")
+            && !current_model.contains("mini")
+        {
+            return RoutingDecision::RouteToModel(self.config.cheap_vision_model.clone());
         }
 
         RoutingDecision::KeepCurrent
     }
 }
 
+impl Default for MultimodalRouter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for MultimodalRouter {
-    fn name(&self) -> &str { "multimodal-router" }
-    fn stage(&self) -> SaverStage { SaverStage::PreCall }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::CrossModal }
+    fn name(&self) -> &str {
+        "multimodal-router"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PreCall
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::CrossModal
+    }
 
     async fn process_multimodal(
         &self,
         input: MultiModalSaverInput,
         ctx: &SaverContext,
     ) -> Result<MultiModalSaverOutput, SaverError> {
-        let total_tokens: usize = input.base.messages.iter().map(|m| m.token_count).sum::<usize>()
-            + input.audio.iter().map(|a| a.naive_token_estimate).sum::<usize>()
-            + input.videos.iter().map(|v| v.naive_token_estimate).sum::<usize>();
+        let total_tokens: usize = input
+            .base
+            .messages
+            .iter()
+            .map(|m| m.token_count)
+            .sum::<usize>()
+            + input
+                .audio
+                .iter()
+                .map(|a| a.naive_token_estimate)
+                .sum::<usize>()
+            + input
+                .videos
+                .iter()
+                .map(|v| v.naive_token_estimate)
+                .sum::<usize>();
 
         let decision = self.decide_route(&input, &ctx.model);
 
         let (description, cost_savings_pct) = match &decision {
-            RoutingDecision::KeepCurrent => {
-                ("Keeping current model — no cheaper alternative appropriate.".into(), 0.0)
-            }
+            RoutingDecision::KeepCurrent => (
+                "Keeping current model — no cheaper alternative appropriate.".into(),
+                0.0,
+            ),
             RoutingDecision::RouteToModel(model) => {
                 // Estimate cost savings (rough: mini is ~10× cheaper for vision)
                 let savings = if model.contains("mini") { 0.6 } else { 0.3 };
-                (format!(
-                    "ROUTING: {} → {} (estimated {:.0}% cost savings). \
+                (
+                    format!(
+                        "ROUTING: {} → {} (estimated {:.0}% cost savings). \
                      NOTE: This changes the model used, not the token count.",
-                    ctx.model, model, savings * 100.0
-                ), savings)
+                        ctx.model,
+                        model,
+                        savings * 100.0
+                    ),
+                    savings,
+                )
             }
         };
 
@@ -172,15 +213,34 @@ mod tests {
     #[tokio::test]
     async fn test_routes_simple_to_mini() {
         let saver = MultimodalRouter::new();
-        let ctx = SaverContext { model: "gpt-4o".into(), ..Default::default() };
+        let ctx = SaverContext {
+            model: "gpt-4o".into(),
+            ..Default::default()
+        };
         let input = MultiModalSaverInput {
             base: SaverInput {
-                messages: vec![Message { role: "user".into(), content: "describe this".into(), images: vec![], tool_call_id: None, token_count: 5 }],
+                messages: vec![Message {
+                    role: "user".into(),
+                    content: "describe this".into(),
+                    images: vec![],
+                    tool_call_id: None,
+                    token_count: 5,
+                }],
                 tools: vec![],
-                images: vec![ImageInput { data: vec![], mime: "image/jpeg".into(), detail: ImageDetail::Low, original_tokens: 85, processed_tokens: 85 }],
+                images: vec![ImageInput {
+                    data: vec![],
+                    mime: "image/jpeg".into(),
+                    detail: ImageDetail::Low,
+                    original_tokens: 85,
+                    processed_tokens: 85,
+                }],
                 turn_number: 1,
             },
-            audio: vec![], live_frames: vec![], documents: vec![], videos: vec![], assets_3d: vec![],
+            audio: vec![],
+            live_frames: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(!out.base.skipped);

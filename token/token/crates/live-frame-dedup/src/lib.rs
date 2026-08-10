@@ -56,19 +56,35 @@ impl LiveFrameDedup {
         if a.is_empty() || b.is_empty() || a.len() != b.len() {
             return 1.0; // Different sizes = different frames
         }
-        let diff_count = a.iter().zip(b.iter())
+        let diff_count = a
+            .iter()
+            .zip(b.iter())
             .filter(|(x, y)| (**x as i16 - **y as i16).unsigned_abs() > 10)
             .count();
         diff_count as f64 / a.len() as f64
     }
 }
 
+impl Default for LiveFrameDedup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for LiveFrameDedup {
-    fn name(&self) -> &str { "live-frame-dedup" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 2 }
-    fn modality(&self) -> Modality { Modality::Live }
+    fn name(&self) -> &str {
+        "live-frame-dedup"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        2
+    }
+    fn modality(&self) -> Modality {
+        Modality::Live
+    }
 
     async fn process_multimodal(
         &self,
@@ -81,12 +97,24 @@ impl MultiModalTokenSaver for LiveFrameDedup {
         if frame_count <= 1 {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "live-frame-dedup".into(),
-                tokens_before, tokens_after: tokens_before, tokens_saved: 0,
+                tokens_before,
+                tokens_after: tokens_before,
+                tokens_saved: 0,
                 description: format!("Only {} frame(s), nothing to dedup.", frame_count),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -96,7 +124,8 @@ impl MultiModalTokenSaver for LiveFrameDedup {
 
         for (i, frame) in input.live_frames.into_iter().enumerate() {
             let force_keep = i % self.config.force_keep_every_n == 0;
-            let time_ok = (frame.timestamp_secs - last_kept_time) >= self.config.min_frame_interval_secs;
+            let time_ok =
+                (frame.timestamp_secs - last_kept_time) >= self.config.min_frame_interval_secs;
 
             if force_keep || frame.is_keyframe {
                 last_kept_data = Some(frame.image_data.clone());
@@ -110,7 +139,10 @@ impl MultiModalTokenSaver for LiveFrameDedup {
             }
 
             let is_different = match &last_kept_data {
-                Some(prev) => Self::frame_diff_ratio(prev, &frame.image_data) > self.config.similarity_threshold,
+                Some(prev) => {
+                    Self::frame_diff_ratio(prev, &frame.image_data)
+                        > self.config.similarity_threshold
+                }
                 None => true,
             };
 
@@ -132,8 +164,15 @@ impl MultiModalTokenSaver for LiveFrameDedup {
             description: format!(
                 "Deduped live frames: {} → {} frames ({} → {} tokens, {:.0}% saved). \
                  Threshold: {:.1}% pixel diff, min interval: {:.1}s.",
-                frame_count, kept_frames.len(), tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
+                frame_count,
+                kept_frames.len(),
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
                 self.config.similarity_threshold * 100.0,
                 self.config.min_frame_interval_secs
             ),
@@ -141,7 +180,13 @@ impl MultiModalTokenSaver for LiveFrameDedup {
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
             audio: input.audio,
             live_frames: kept_frames,
             documents: input.documents,
@@ -160,11 +205,22 @@ mod tests {
     use super::*;
 
     fn frame(idx: u64, time: f64, data: &[u8]) -> LiveFrame {
-        LiveFrame { image_data: data.to_vec(), timestamp_secs: time, frame_index: idx, token_estimate: 85, is_keyframe: false }
+        LiveFrame {
+            image_data: data.to_vec(),
+            timestamp_secs: time,
+            frame_index: idx,
+            token_estimate: 85,
+            is_keyframe: false,
+        }
     }
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -175,8 +231,12 @@ mod tests {
         let input = MultiModalSaverInput {
             base: empty_base(),
             audio: vec![],
-            live_frames: (0..60).map(|i| frame(i, i as f64 * 0.5, &same_data)).collect(),
-            documents: vec![], videos: vec![], assets_3d: vec![],
+            live_frames: (0..60)
+                .map(|i| frame(i, i as f64 * 0.5, &same_data))
+                .collect(),
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         // Most identical frames should be dropped

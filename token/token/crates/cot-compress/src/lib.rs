@@ -94,7 +94,10 @@ impl CotCompressSaver {
                 continue;
             }
 
-            let is_thinking = self.config.thinking_prefixes.iter()
+            let is_thinking = self
+                .config
+                .thinking_prefixes
+                .iter()
                 .any(|prefix| trimmed.starts_with(prefix.as_str()));
 
             if is_thinking && removed < max_removable {
@@ -107,7 +110,7 @@ impl CotCompressSaver {
 
         if removed > 0 && !result_lines.is_empty() {
             // Add a note about compression
-            result_lines.push(&"");
+            result_lines.push("");
             // Return joined result
             let mut result = result_lines.join("\n");
             result.push_str(&format!("[{} thinking lines compressed]", removed));
@@ -118,11 +121,23 @@ impl CotCompressSaver {
     }
 }
 
+impl Default for CotCompressSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for CotCompressSaver {
-    fn name(&self) -> &str { "cot-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::InterTurn }
-    fn priority(&self) -> u32 { 20 }
+    fn name(&self) -> &str {
+        "cot-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::InterTurn
+    }
+    fn priority(&self) -> u32 {
+        20
+    }
 
     async fn process(
         &self,
@@ -137,7 +152,9 @@ impl TokenSaver for CotCompressSaver {
         let mut user_turn = 0usize;
         let mut msg_turns: Vec<usize> = Vec::new();
         for msg in &messages {
-            if msg.role == "user" { user_turn += 1; }
+            if msg.role == "user" {
+                user_turn += 1;
+            }
             msg_turns.push(user_turn);
         }
 
@@ -145,8 +162,12 @@ impl TokenSaver for CotCompressSaver {
 
         for (i, msg) in messages.iter_mut().enumerate() {
             // Only compress assistant messages
-            if msg.role != "assistant" { continue; }
-            if msg.token_count < self.config.min_tokens { continue; }
+            if msg.role != "assistant" {
+                continue;
+            }
+            if msg.token_count < self.config.min_tokens {
+                continue;
+            }
 
             // Don't compress recent turns
             if current_turn.saturating_sub(msg_turns[i]) < self.config.protect_recent_turns {
@@ -164,7 +185,11 @@ impl TokenSaver for CotCompressSaver {
 
         let tokens_after: usize = messages.iter().map(|m| m.token_count).sum();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
-        let pct = if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 };
+        let pct = if tokens_before > 0 {
+            tokens_saved as f64 / tokens_before as f64 * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "cot-compress".into(),
@@ -175,7 +200,10 @@ impl TokenSaver for CotCompressSaver {
                 format!(
                     "Compressed CoT in {} assistant messages: {} → {} tokens ({:.1}% saved). \
                      Max removal capped at {:.0}% per message for safety.",
-                    compressed_count, tokens_before, tokens_after, pct,
+                    compressed_count,
+                    tokens_before,
+                    tokens_after,
+                    pct,
                     self.config.max_removal_pct * 100.0
                 )
             } else {

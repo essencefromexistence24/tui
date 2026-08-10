@@ -98,7 +98,10 @@ impl RetrievalBudgetSaver {
 
         for line in &lines {
             if char_count + line.len() > max_chars {
-                result.push_str(&format!("\n[... chunk truncated at {} tokens ...]", max_tokens));
+                result.push_str(&format!(
+                    "\n[... chunk truncated at {} tokens ...]",
+                    max_tokens
+                ));
                 break;
             }
             result.push_str(line);
@@ -110,11 +113,23 @@ impl RetrievalBudgetSaver {
     }
 }
 
+impl Default for RetrievalBudgetSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for RetrievalBudgetSaver {
-    fn name(&self) -> &str { "retrieval-budget" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 15 }
+    fn name(&self) -> &str {
+        "retrieval-budget"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        15
+    }
 
     async fn process(
         &self,
@@ -136,9 +151,8 @@ impl TokenSaver for RetrievalBudgetSaver {
             }
         }
 
-        let retrieval_tokens_before: usize = retrieval_chunks.iter()
-            .map(|(_, m, _)| m.token_count)
-            .sum();
+        let retrieval_tokens_before: usize =
+            retrieval_chunks.iter().map(|(_, m, _)| m.token_count).sum();
 
         // Filter by relevance threshold
         if self.config.prioritize_by_relevance {
@@ -183,8 +197,11 @@ impl TokenSaver for RetrievalBudgetSaver {
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
         let retrieval_pct = if retrieval_tokens_before > 0 {
             (retrieval_tokens_before.saturating_sub(total_retrieval_tokens)) as f64
-                / retrieval_tokens_before as f64 * 100.0
-        } else { 0.0 };
+                / retrieval_tokens_before as f64
+                * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "retrieval-budget".into(),
@@ -194,8 +211,11 @@ impl TokenSaver for RetrievalBudgetSaver {
             description: format!(
                 "Retrieval budget: {} retrieval tokens → {} ({:.1}% reduction). \
                  Budget: {} tokens max, {} chunks max. Reduces noise, improves quality.",
-                retrieval_tokens_before, total_retrieval_tokens, retrieval_pct,
-                self.config.max_retrieval_tokens, self.config.max_chunks
+                retrieval_tokens_before,
+                total_retrieval_tokens,
+                retrieval_pct,
+                self.config.max_retrieval_tokens,
+                self.config.max_chunks
             ),
         };
         *self.report.lock().unwrap() = report;

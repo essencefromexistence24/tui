@@ -80,12 +80,26 @@ impl AudioCompress {
     }
 }
 
+impl Default for AudioCompress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for AudioCompress {
-    fn name(&self) -> &str { "audio-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::Audio }
+    fn name(&self) -> &str {
+        "audio-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::Audio
+    }
 
     async fn process_multimodal(
         &self,
@@ -140,7 +154,11 @@ impl MultiModalTokenSaver for AudioCompress {
             new_audio.push(AudioInput {
                 format: self.config.target_format,
                 sample_rate: self.config.target_sample_rate.min(audio.sample_rate),
-                channels: if self.config.force_mono { 1 } else { audio.channels },
+                channels: if self.config.force_mono {
+                    1
+                } else {
+                    audio.channels
+                },
                 duration_secs: effective_duration,
                 compressed_tokens: new_tokens,
                 ..audio
@@ -157,10 +175,20 @@ impl MultiModalTokenSaver for AudioCompress {
             description: format!(
                 "Compressed {} audio inputs: {}→{} tokens ({:.0}% saved). \
                  Target: {}Hz {}.",
-                new_audio.len(), tokens_before, tokens_after,
-                if tokens_before > 0 { total_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
+                new_audio.len(),
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    total_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
                 self.config.target_sample_rate,
-                if self.config.force_mono { "mono" } else { "original channels" }
+                if self.config.force_mono {
+                    "mono"
+                } else {
+                    "original channels"
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
@@ -203,7 +231,12 @@ mod tests {
     }
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]

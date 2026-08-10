@@ -54,21 +54,35 @@ impl PdfTextExtract {
     /// Attempt to detect if a document is text-heavy by examining raw bytes.
     /// In production, use a proper PDF parser (pdf-extract, lopdf).
     fn estimate_text_ratio(data: &[u8]) -> f64 {
-        if data.is_empty() { return 0.0; }
+        if data.is_empty() {
+            return 0.0;
+        }
         // Count printable ASCII bytes as a crude proxy
-        let printable = data.iter()
-            .filter(|&&b| b >= 32 && b < 127)
-            .count();
+        let printable = data.iter().filter(|&&b| (32..127).contains(&b)).count();
         printable as f64 / data.len() as f64
+    }
+}
+
+impl Default for PdfTextExtract {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for PdfTextExtract {
-    fn name(&self) -> &str { "pdf-text-extract" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::Document }
+    fn name(&self) -> &str {
+        "pdf-text-extract"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::Document
+    }
 
     async fn process_multimodal(
         &self,
@@ -80,12 +94,24 @@ impl MultiModalTokenSaver for PdfTextExtract {
         if input.documents.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "pdf-text-extract".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No documents.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -144,18 +170,32 @@ impl MultiModalTokenSaver for PdfTextExtract {
             description: format!(
                 "Extracted text from {} PDFs: {} → {} tokens ({:.0}% saved). \
                  {} docs kept as images (too visual).",
-                extracted_count, tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
+                extracted_count,
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
                 remaining_docs.len()
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: new_messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames,
+            base: SaverOutput {
+                messages: new_messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
             documents: remaining_docs,
-            videos: input.videos, assets_3d: input.assets_3d,
+            videos: input.videos,
+            assets_3d: input.assets_3d,
         })
     }
 
@@ -169,7 +209,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -178,14 +223,17 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![],
+            audio: vec![],
+            live_frames: vec![],
             documents: vec![DocumentInput {
-                data: b"This is a text-heavy PDF with lots of readable content and paragraphs".to_vec(),
+                data: b"This is a text-heavy PDF with lots of readable content and paragraphs"
+                    .to_vec(),
                 doc_type: DocumentType::Pdf,
                 page_count: Some(10),
                 naive_token_estimate: 7650, // 10 pages × 765 tokens/page
             }],
-            videos: vec![], assets_3d: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(out.documents.is_empty()); // PDF consumed

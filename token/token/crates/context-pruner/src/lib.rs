@@ -70,11 +70,23 @@ impl ContextPrunerSaver {
     }
 }
 
+impl Default for ContextPrunerSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for ContextPrunerSaver {
-    fn name(&self) -> &str { "context-pruner" }
-    fn stage(&self) -> SaverStage { SaverStage::InterTurn }
-    fn priority(&self) -> u32 { 10 }
+    fn name(&self) -> &str {
+        "context-pruner"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::InterTurn
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
 
     async fn process(
         &self,
@@ -96,7 +108,9 @@ impl TokenSaver for ContextPrunerSaver {
 
             // Never prune protected roles or recent messages
             if self.config.protected_roles.contains(&msg.role) || i >= protected_start {
-                if msg.role == "tool" { tool_output_count += 1; }
+                if msg.role == "tool" {
+                    tool_output_count += 1;
+                }
                 messages.push(msg);
                 continue;
             }
@@ -110,7 +124,10 @@ impl TokenSaver for ContextPrunerSaver {
                 pruned_count += 1;
                 messages.push(Message {
                     role: msg.role,
-                    content: format!("[Previous tool output pruned — {} tokens, turn {}]", msg.token_count, msg_turn),
+                    content: format!(
+                        "[Previous tool output pruned — {} tokens, turn {}]",
+                        msg.token_count, msg_turn
+                    ),
                     images: vec![],
                     tool_call_id: msg.tool_call_id,
                     token_count: 15,
@@ -125,7 +142,10 @@ impl TokenSaver for ContextPrunerSaver {
                     pruned_count += 1;
                     messages.push(Message {
                         role: msg.role,
-                        content: format!("[Tool output pruned — exceeded {} limit]", self.config.max_tool_outputs),
+                        content: format!(
+                            "[Tool output pruned — exceeded {} limit]",
+                            self.config.max_tool_outputs
+                        ),
                         images: vec![],
                         tool_call_id: msg.tool_call_id,
                         token_count: 10,
@@ -139,7 +159,11 @@ impl TokenSaver for ContextPrunerSaver {
 
         let tokens_after: usize = messages.iter().map(|m| m.token_count).sum();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
-        let pct = if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 };
+        let pct = if tokens_before > 0 {
+            tokens_saved as f64 / tokens_before as f64 * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "context-pruner".into(),
@@ -150,8 +174,12 @@ impl TokenSaver for ContextPrunerSaver {
                 format!(
                     "Pruned {} stale context entries: {} → {} tokens ({:.1}% saved). \
                      Threshold: {} turns stale. Protected {} recent messages.",
-                    pruned_count, tokens_before, tokens_after, pct,
-                    self.config.stale_turn_threshold, self.config.protect_recent
+                    pruned_count,
+                    tokens_before,
+                    tokens_after,
+                    pct,
+                    self.config.stale_turn_threshold,
+                    self.config.protect_recent
                 )
             } else {
                 "No stale context to prune.".into()
@@ -182,7 +210,11 @@ mod tests {
             role: role.into(),
             content: content.into(),
             images: vec![],
-            tool_call_id: if role == "tool" { Some("tc_1".into()) } else { None },
+            tool_call_id: if role == "tool" {
+                Some("tc_1".into())
+            } else {
+                None
+            },
             token_count: tokens,
         }
     }
@@ -195,7 +227,10 @@ mod tests {
             ..Default::default()
         };
         let saver = ContextPrunerSaver::with_config(config);
-        let ctx = SaverContext { turn_number: 10, ..Default::default() };
+        let ctx = SaverContext {
+            turn_number: 10,
+            ..Default::default()
+        };
         let input = SaverInput {
             messages: vec![
                 msg("system", "sys", 50),

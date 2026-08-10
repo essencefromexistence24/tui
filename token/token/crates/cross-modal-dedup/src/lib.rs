@@ -72,16 +72,21 @@ impl CrossModalDedup {
         // Heuristic: if a user message contains OCR markers or mentions
         // "screenshot", "image shows", etc., it may overlap with images
         let overlap_markers = [
-            "screenshot", "image shows", "as shown", "the text reads",
-            "from the image", "OCR", "extracted text",
+            "screenshot",
+            "image shows",
+            "as shown",
+            "the text reads",
+            "from the image",
+            "OCR",
+            "extracted text",
         ];
 
         let mut redundant_image_indices: Vec<usize> = Vec::new();
         for (i, _img) in images.iter().enumerate() {
             let has_text_description = messages.iter().any(|m| {
-                overlap_markers.iter().any(|marker|
-                    m.content.to_lowercase().contains(&marker.to_lowercase())
-                )
+                overlap_markers
+                    .iter()
+                    .any(|marker| m.content.to_lowercase().contains(&marker.to_lowercase()))
             });
             if has_text_description {
                 redundant_image_indices.push(i);
@@ -91,12 +96,26 @@ impl CrossModalDedup {
     }
 }
 
+impl Default for CrossModalDedup {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for CrossModalDedup {
-    fn name(&self) -> &str { "cross-modal-dedup" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 15 }
-    fn modality(&self) -> Modality { Modality::CrossModal }
+    fn name(&self) -> &str {
+        "cross-modal-dedup"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        15
+    }
+    fn modality(&self) -> Modality {
+        Modality::CrossModal
+    }
 
     async fn process_multimodal(
         &self,
@@ -117,12 +136,17 @@ impl MultiModalTokenSaver for CrossModalDedup {
         if self.config.dedup_text_image && self.config.prefer_modality == PreferredModality::Text {
             let redundant = Self::detect_text_image_overlap(&input.base.messages, &new_images);
             if !redundant.is_empty() {
-                let removed_tokens: usize = redundant.iter()
+                let removed_tokens: usize = redundant
+                    .iter()
                     .filter_map(|&i| new_images.get(i))
                     .map(|img| img.processed_tokens)
                     .sum();
                 tokens_saved += removed_tokens;
-                dedup_actions.push(format!("Removed {} redundant images ({} tokens)", redundant.len(), removed_tokens));
+                dedup_actions.push(format!(
+                    "Removed {} redundant images ({} tokens)",
+                    redundant.len(),
+                    removed_tokens
+                ));
 
                 // Remove in reverse order to preserve indices
                 let mut to_remove = redundant;
@@ -138,13 +162,17 @@ impl MultiModalTokenSaver for CrossModalDedup {
         // Transcript ↔ Audio dedup
         if self.config.dedup_transcript_audio && !new_audio.is_empty() {
             // Check if there's already a transcript message
-            let has_transcript = input.base.messages.iter().any(|m|
+            let has_transcript = input.base.messages.iter().any(|m| {
                 m.content.contains("[Audio transcript") || m.content.contains("transcript")
-            );
+            });
             if has_transcript && self.config.prefer_modality == PreferredModality::Text {
                 let audio_removed: usize = new_audio.iter().map(|a| a.naive_token_estimate).sum();
                 tokens_saved += audio_removed;
-                dedup_actions.push(format!("Removed {} audio clips with existing transcripts ({} tokens)", new_audio.len(), audio_removed));
+                dedup_actions.push(format!(
+                    "Removed {} audio clips with existing transcripts ({} tokens)",
+                    new_audio.len(),
+                    audio_removed
+                ));
                 new_audio.clear();
             }
         }
@@ -159,9 +187,16 @@ impl MultiModalTokenSaver for CrossModalDedup {
             description: if dedup_actions.is_empty() {
                 "No cross-modal redundancy detected.".into()
             } else {
-                format!("Cross-modal dedup: {}. {} → {} tokens ({:.0}% saved).",
-                    dedup_actions.join("; "), tokens_before, tokens_after,
-                    if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                format!(
+                    "Cross-modal dedup: {}. {} → {} tokens ({:.0}% saved).",
+                    dedup_actions.join("; "),
+                    tokens_before,
+                    tokens_after,
+                    if tokens_before > 0 {
+                        tokens_saved as f64 / tokens_before as f64 * 100.0
+                    } else {
+                        0.0
+                    }
                 )
             },
         };
@@ -200,20 +235,28 @@ mod tests {
             base: SaverInput {
                 messages: vec![Message {
                     role: "user".into(),
-                    content: "Here is a screenshot of the error. The text reads: Error 404 Not Found".into(),
+                    content:
+                        "Here is a screenshot of the error. The text reads: Error 404 Not Found"
+                            .into(),
                     images: vec![],
                     tool_call_id: None,
                     token_count: 20,
                 }],
                 tools: vec![],
                 images: vec![ImageInput {
-                    data: vec![], mime: "image/png".into(),
+                    data: vec![],
+                    mime: "image/png".into(),
                     detail: ImageDetail::High,
-                    original_tokens: 765, processed_tokens: 765,
+                    original_tokens: 765,
+                    processed_tokens: 765,
                 }],
                 turn_number: 1,
             },
-            audio: vec![], live_frames: vec![], documents: vec![], videos: vec![], assets_3d: vec![],
+            audio: vec![],
+            live_frames: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         // Should remove the image since text description exists
@@ -236,13 +279,19 @@ mod tests {
                 }],
                 tools: vec![],
                 images: vec![ImageInput {
-                    data: vec![], mime: "image/jpeg".into(),
+                    data: vec![],
+                    mime: "image/jpeg".into(),
                     detail: ImageDetail::Low,
-                    original_tokens: 85, processed_tokens: 85,
+                    original_tokens: 85,
+                    processed_tokens: 85,
                 }],
                 turn_number: 1,
             },
-            audio: vec![], live_frames: vec![], documents: vec![], videos: vec![], assets_3d: vec![],
+            audio: vec![],
+            live_frames: vec![],
+            documents: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert_eq!(out.base.images.len(), 1); // Kept

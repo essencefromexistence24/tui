@@ -78,8 +78,12 @@ impl VideoKeyframeSelect {
         match self.config.strategy {
             KeyframeStrategy::Uniform => {
                 let n = self.config.max_keyframes;
-                if n == 0 { return vec![]; }
-                if n == 1 { return vec![duration_secs / 2.0]; }
+                if n == 0 {
+                    return vec![];
+                }
+                if n == 1 {
+                    return vec![duration_secs / 2.0];
+                }
                 let step = duration_secs / n as f64;
                 (0..n).map(|i| step * i as f64 + step / 2.0).collect()
             }
@@ -101,12 +105,26 @@ impl VideoKeyframeSelect {
     }
 }
 
+impl Default for VideoKeyframeSelect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for VideoKeyframeSelect {
-    fn name(&self) -> &str { "video-keyframe-select" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::Video }
+    fn name(&self) -> &str {
+        "video-keyframe-select"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::Video
+    }
 
     async fn process_multimodal(
         &self,
@@ -118,12 +136,24 @@ impl MultiModalTokenSaver for VideoKeyframeSelect {
         if input.videos.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "video-keyframe-select".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No videos.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -145,7 +175,8 @@ impl MultiModalTokenSaver for VideoKeyframeSelect {
                     data: vec![], // In production: actual decoded frame
                     mime: "image/jpeg".into(),
                     detail: self.config.keyframe_detail,
-                    original_tokens: video.naive_token_estimate / (video.fps * video.duration_secs).max(1.0) as usize,
+                    original_tokens: video.naive_token_estimate
+                        / (video.fps * video.duration_secs).max(1.0) as usize,
                     processed_tokens: self.keyframe_tokens(1),
                 });
                 let _ = ts; // timestamp used for extraction
@@ -165,17 +196,32 @@ impl MultiModalTokenSaver for VideoKeyframeSelect {
                 "Selected {} keyframes from {} videos: {} → {} tokens ({:.0}% saved). \
                  Strategy: {:?}, detail: {:?}. \
                  This is the single biggest win for video content.",
-                total_keyframes, input.videos.len(),
-                tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
-                self.config.strategy, self.config.keyframe_detail
+                total_keyframes,
+                input.videos.len(),
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
+                self.config.strategy,
+                self.config.keyframe_detail
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: new_images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames, documents: input.documents,
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: new_images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
+            documents: input.documents,
             videos: vec![], // Consumed
             assets_3d: input.assets_3d,
         })
@@ -191,7 +237,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -200,7 +251,8 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![],
+            audio: vec![],
+            live_frames: vec![],
             documents: vec![],
             videos: vec![VideoInput {
                 source: VideoSource::Url("test.mp4".into()),

@@ -14,8 +14,8 @@
 pub use self::error::SaverError;
 pub use self::report::TokenSavingsReport;
 pub use self::stage::SaverStage;
+pub use self::traits::{MultiModalTokenSaver, TokenSaver};
 pub use self::types::*;
-pub use self::traits::{TokenSaver, MultiModalTokenSaver};
 
 // ─── Modules ────────────────────────────────────────────────────────────────
 
@@ -346,8 +346,8 @@ pub mod traits {
         report::TokenSavingsReport,
         stage::SaverStage,
         types::{
-            SaverInput, SaverOutput, SaverContext,
-            MultiModalSaverInput, MultiModalSaverOutput, Modality,
+            Modality, MultiModalSaverInput, MultiModalSaverOutput, SaverContext, SaverInput,
+            SaverOutput,
         },
     };
 

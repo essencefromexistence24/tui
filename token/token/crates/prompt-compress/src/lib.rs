@@ -70,6 +70,30 @@ pub struct PromptCompressSaver {
     report: Mutex<TokenSavingsReport>,
 }
 
+/// Find a case-insensitive substring while preserving byte boundaries in the
+/// original string. Lowercasing can expand a Unicode character, so indices
+/// from a lowercased copy must never be used directly on the source string.
+fn find_case_insensitive(haystack: &str, needle: &str) -> Option<(usize, usize)> {
+    if needle.is_empty() {
+        return None;
+    }
+
+    let needle_lower = needle.to_lowercase();
+    let mut lowered = String::new();
+    let mut byte_spans = Vec::new();
+
+    for (start, character) in haystack.char_indices() {
+        let end = start + character.len_utf8();
+        let lowered_character = character.to_lowercase().collect::<String>();
+        lowered.push_str(&lowered_character);
+        byte_spans.extend(std::iter::repeat_n((start, end), lowered_character.len()));
+    }
+
+    let position = lowered.find(&needle_lower)?;
+    let last_byte = position.checked_add(needle_lower.len())?.checked_sub(1)?;
+    Some((byte_spans.get(position)?.0, byte_spans.get(last_byte)?.1))
+}
+
 impl PromptCompressSaver {
     pub fn new() -> Self {
         Self::with_config(PromptCompressConfig::default())
@@ -88,14 +112,18 @@ impl PromptCompressSaver {
 
         // Remove filler phrases (case-insensitive)
         for filler in &self.config.filler_phrases {
-            let lower = result.to_lowercase();
-            let filler_lower = filler.to_lowercase();
-            while let Some(pos) = lower.find(&filler_lower) {
+            while let Some((pos, end)) = find_case_insensitive(&result, filler) {
                 // Only remove if at start of sentence or after punctuation/newline
-                let before = if pos > 0 { result.as_bytes().get(pos - 1).copied() } else { Some(b'\n') };
-                if matches!(before, Some(b'\n') | Some(b'.') | Some(b'!') | Some(b'?') | Some(b' ') | None) {
-                    result = format!("{}{}", &result[..pos], &result[pos + filler.len()..]);
-                    break; // Re-search from scratch since indices shifted
+                let before = if pos > 0 {
+                    result.as_bytes().get(pos - 1).copied()
+                } else {
+                    Some(b'\n')
+                };
+                if matches!(
+                    before,
+                    Some(b'\n') | Some(b'.') | Some(b'!') | Some(b'?') | Some(b' ') | None
+                ) {
+                    result.replace_range(pos..end, "");
                 } else {
                     break;
                 }
@@ -119,7 +147,8 @@ impl PromptCompressSaver {
         }
 
         // Trim trailing whitespace per line
-        result = result.lines()
+        result = result
+            .lines()
             .map(|line| line.trim_end())
             .collect::<Vec<_>>()
             .join("\n");
@@ -128,11 +157,23 @@ impl PromptCompressSaver {
     }
 }
 
+impl Default for PromptCompressSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for PromptCompressSaver {
-    fn name(&self) -> &str { "prompt-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 25 }
+    fn name(&self) -> &str {
+        "prompt-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        25
+    }
 
     async fn process(
         &self,
@@ -143,8 +184,12 @@ impl TokenSaver for PromptCompressSaver {
         let mut messages = input.messages;
 
         for msg in &mut messages {
-            if !self.config.compress_roles.contains(&msg.role) { continue; }
-            if msg.token_count < self.config.min_tokens { continue; }
+            if !self.config.compress_roles.contains(&msg.role) {
+                continue;
+            }
+            if msg.token_count < self.config.min_tokens {
+                continue;
+            }
 
             let compressed = self.compress_text(&msg.content);
             let new_tokens = compressed.len() / 4;
@@ -156,7 +201,11 @@ impl TokenSaver for PromptCompressSaver {
 
         let tokens_after: usize = messages.iter().map(|m| m.token_count).sum();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
-        let pct = if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 };
+        let pct = if tokens_before > 0 {
+            tokens_saved as f64 / tokens_before as f64 * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "prompt-compress".into(),

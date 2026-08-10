@@ -6,8 +6,7 @@ use std::time::Instant;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     dotenvy::dotenv().ok();
-    let api_key = std::env::var("GROQ_API_KEY")
-        .expect("GROQ_API_KEY must be set");
+    let api_key = std::env::var("GROQ_API_KEY").expect("GROQ_API_KEY must be set");
 
     println!("================================================================================");
     println!("🦀 RUST RLM PARALLEL BENCHMARK");
@@ -17,7 +16,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let doc_path = "integrations/recursive-llm/massive_doc.txt";
     let context = fs::read_to_string(doc_path)?;
     let context_arc = Arc::new(context.clone());
-    
+
     let doc_chars = context.len();
     let doc_tokens = 79743;
 
@@ -29,9 +28,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rlm = RLM::new(
         api_key,
         "meta-llama/llama-4-scout-17b-16e-instruct".to_string(),
-    ).with_max_iterations(30);
+    )
+    .with_max_iterations(30);
 
-    let queries = vec![
+    let queries = [
         "What is the total AI market size and its growth rate?",
         "How many SpaceX launches were there in 2024?",
         "What percentage of tech workers work fully remote?",
@@ -61,7 +61,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let sequential_time = start.elapsed();
-    println!("Total sequential time: {:.2}s", sequential_time.as_secs_f64());
+    println!(
+        "Total sequential time: {:.2}s",
+        sequential_time.as_secs_f64()
+    );
     println!();
 
     println!("================================================================================");
@@ -72,10 +75,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
     // Prepare parallel queries
-    let parallel_queries: Vec<_> = queries
-        .iter()
-        .map(|q| (*q, context_arc.clone()))
-        .collect();
+    let parallel_queries: Vec<_> = queries.iter().map(|q| (*q, context_arc.clone())).collect();
 
     println!("🚀 Launching {} queries in parallel...", queries.len());
     println!();
@@ -109,16 +109,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let speedup = sequential_time.as_secs_f64() / parallel_time.as_secs_f64();
 
-    println!("Sequential execution: {:.2}s", sequential_time.as_secs_f64());
+    println!(
+        "Sequential execution: {:.2}s",
+        sequential_time.as_secs_f64()
+    );
     println!("Parallel execution:   {:.2}s", parallel_time.as_secs_f64());
     println!();
-    println!("🚀 SPEEDUP: {:.2}x faster with parallel execution!", speedup);
+    println!(
+        "🚀 SPEEDUP: {:.2}x faster with parallel execution!",
+        speedup
+    );
     println!();
 
     println!("Benefits of Rust RLM:");
     println!("  ✅ Zero-copy context sharing (Arc<String>)");
     println!("  ✅ SIMD-accelerated text search (10-100x faster)");
-    println!("  ✅ Parallel recursive execution ({:.1}x speedup)", speedup);
+    println!(
+        "  ✅ Parallel recursive execution ({:.1}x speedup)",
+        speedup
+    );
     println!("  ✅ Memory safe (no GIL, no copying)");
     println!();
 

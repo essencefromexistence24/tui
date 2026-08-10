@@ -90,9 +90,14 @@ impl TokenBudgetSaver {
             self.config.hard_limit
         } else {
             // Try exact match, then prefix match
-            self.config.model_limits.get(model).copied()
+            self.config
+                .model_limits
+                .get(model)
+                .copied()
                 .or_else(|| {
-                    self.config.model_limits.iter()
+                    self.config
+                        .model_limits
+                        .iter()
                         .find(|(k, _)| model.starts_with(k.as_str()))
                         .map(|(_, v)| *v)
                 })
@@ -121,11 +126,23 @@ impl TokenBudgetSaver {
     }
 }
 
+impl Default for TokenBudgetSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for TokenBudgetSaver {
-    fn name(&self) -> &str { "token-budget" }
-    fn stage(&self) -> SaverStage { SaverStage::PreCall }
-    fn priority(&self) -> u32 { 20 }
+    fn name(&self) -> &str {
+        "token-budget"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PreCall
+    }
+    fn priority(&self) -> u32 {
+        20
+    }
 
     async fn process(
         &self,
@@ -137,7 +154,9 @@ impl TokenSaver for TokenBudgetSaver {
         let total_image_tokens: usize = input.images.iter().map(|i| i.processed_tokens).sum();
         let tokens_before = total_msg_tokens + total_tool_tokens + total_image_tokens;
 
-        let budget = ctx.token_budget.unwrap_or_else(|| self.budget_for_model(&ctx.model));
+        let budget = ctx
+            .token_budget
+            .unwrap_or_else(|| self.budget_for_model(&ctx.model));
 
         if tokens_before <= budget {
             let report = TokenSavingsReport {
@@ -148,9 +167,11 @@ impl TokenSaver for TokenBudgetSaver {
                 description: format!(
                     "Within budget: {} tokens / {} limit ({:.1}% utilization). \
                      Model: {}, reserve: {} for response.",
-                    tokens_before, budget,
+                    tokens_before,
+                    budget,
                     tokens_before as f64 / budget as f64 * 100.0,
-                    ctx.model, self.config.response_reserve
+                    ctx.model,
+                    self.config.response_reserve
                 ),
             };
             *self.report.lock().unwrap() = report;
@@ -176,7 +197,8 @@ impl TokenSaver for TokenBudgetSaver {
                 )));
             }
             OverflowStrategy::WarnOnly => {
-                description = format!(
+                description =
+                    format!(
                     "WARNING: Over budget by {} tokens ({} > {}). No truncation (warn-only mode).",
                     tokens_before - budget, tokens_before, budget
                 );
@@ -187,7 +209,8 @@ impl TokenSaver for TokenBudgetSaver {
                 let removed = Self::truncate_to_budget(&mut messages, msg_budget);
                 tokens_saved = removed;
                 let tokens_after: usize = messages.iter().map(|m| m.token_count).sum::<usize>()
-                    + total_tool_tokens + total_image_tokens;
+                    + total_tool_tokens
+                    + total_image_tokens;
                 description = format!(
                     "BUDGET ENFORCED: {} → {} tokens. Removed {} tokens of oldest messages. \
                      Model: {}, budget: {}.",
@@ -225,13 +248,22 @@ mod tests {
     use super::*;
 
     fn msg(role: &str, tokens: usize) -> Message {
-        Message { role: role.into(), content: "x".repeat(tokens * 4), images: vec![], tool_call_id: None, token_count: tokens }
+        Message {
+            role: role.into(),
+            content: "x".repeat(tokens * 4),
+            images: vec![],
+            tool_call_id: None,
+            token_count: tokens,
+        }
     }
 
     #[tokio::test]
     async fn test_within_budget() {
         let saver = TokenBudgetSaver::new();
-        let ctx = SaverContext { model: "gpt-4o".into(), ..Default::default() };
+        let ctx = SaverContext {
+            model: "gpt-4o".into(),
+            ..Default::default()
+        };
         let input = SaverInput {
             messages: vec![msg("system", 100), msg("user", 100)],
             tools: vec![],
@@ -250,7 +282,10 @@ mod tests {
             ..Default::default()
         };
         let saver = TokenBudgetSaver::with_config(config);
-        let ctx = SaverContext { model: "test".into(), ..Default::default() };
+        let ctx = SaverContext {
+            model: "test".into(),
+            ..Default::default()
+        };
         let input = SaverInput {
             messages: vec![
                 msg("system", 100),

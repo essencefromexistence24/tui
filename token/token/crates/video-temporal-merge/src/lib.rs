@@ -49,12 +49,26 @@ impl VideoTemporalMerge {
     }
 }
 
+impl Default for VideoTemporalMerge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for VideoTemporalMerge {
-    fn name(&self) -> &str { "video-temporal-merge" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 7 }
-    fn modality(&self) -> Modality { Modality::Video }
+    fn name(&self) -> &str {
+        "video-temporal-merge"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        7
+    }
+    fn modality(&self) -> Modality {
+        Modality::Video
+    }
 
     async fn process_multimodal(
         &self,
@@ -66,12 +80,24 @@ impl MultiModalTokenSaver for VideoTemporalMerge {
         if input.videos.len() < self.config.min_videos {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "video-temporal-merge".into(),
-                tokens_before, tokens_after: tokens_before, tokens_saved: 0,
+                tokens_before,
+                tokens_after: tokens_before,
+                tokens_saved: 0,
                 description: "Not enough videos to merge.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -114,15 +140,28 @@ impl MultiModalTokenSaver for VideoTemporalMerge {
             tokens_saved,
             description: format!(
                 "Merged video segments: {} → {} tokens ({:.0}% saved).",
-                tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames, documents: input.documents,
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
+            documents: input.documents,
             videos: merged_videos,
             assets_3d: input.assets_3d,
         })
@@ -138,14 +177,21 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     fn video(duration: f64, tokens: usize) -> VideoInput {
         VideoInput {
             source: VideoSource::Url("test.mp4".into()),
             duration_secs: duration,
-            fps: 30.0, width: 1920, height: 1080,
+            fps: 30.0,
+            width: 1920,
+            height: 1080,
             naive_token_estimate: tokens,
         }
     }
@@ -156,7 +202,9 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![], documents: vec![],
+            audio: vec![],
+            live_frames: vec![],
+            documents: vec![],
             videos: vec![video(10.0, 1000), video(10.0, 1000), video(10.0, 1000)],
             assets_3d: vec![],
         };

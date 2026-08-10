@@ -42,7 +42,8 @@ impl Default for PatchPreferConfig {
                 "Include 3 lines of context before and after each change. ",
                 "NEVER output the entire file when only a few lines change. ",
                 "This saves 90-98% of output tokens on edits."
-            ).into(),
+            )
+            .into(),
             min_file_tokens: 100,
             include_example: true,
         }
@@ -70,30 +71,46 @@ impl PatchPreferSaver {
     fn editing_context(messages: &[Message]) -> bool {
         messages.iter().any(|m| {
             let lower = m.content.to_lowercase();
-            lower.contains("edit") || lower.contains("change") || lower.contains("modify")
-                || lower.contains("update") || lower.contains("fix")
-                || lower.contains("refactor") || lower.contains("replace")
-                || lower.contains("write_file") || lower.contains("create_file")
+            lower.contains("edit")
+                || lower.contains("change")
+                || lower.contains("modify")
+                || lower.contains("update")
+                || lower.contains("fix")
+                || lower.contains("refactor")
+                || lower.contains("replace")
+                || lower.contains("write_file")
+                || lower.contains("create_file")
         })
     }
 
     /// Check if diff instruction already exists in system prompt.
     fn has_diff_instruction(messages: &[Message]) -> bool {
         messages.iter().any(|m| {
-            m.role == "system" && (
-                m.content.contains("unified diff")
-                || m.content.contains("ALWAYS output a")
-                || m.content.contains("patch format")
-            )
+            m.role == "system"
+                && (m.content.contains("unified diff")
+                    || m.content.contains("ALWAYS output a")
+                    || m.content.contains("patch format"))
         })
+    }
+}
+
+impl Default for PatchPreferSaver {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait::async_trait]
 impl TokenSaver for PatchPreferSaver {
-    fn name(&self) -> &str { "patch-prefer" }
-    fn stage(&self) -> SaverStage { SaverStage::PromptAssembly }
-    fn priority(&self) -> u32 { 25 }
+    fn name(&self) -> &str {
+        "patch-prefer"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PromptAssembly
+    }
+    fn priority(&self) -> u32 {
+        25
+    }
 
     async fn process(
         &self,
@@ -104,7 +121,8 @@ impl TokenSaver for PatchPreferSaver {
         let mut messages = input.messages;
 
         // Only inject if editing context is detected and instruction not already present
-        let should_inject = Self::editing_context(&messages) && !Self::has_diff_instruction(&messages);
+        let should_inject =
+            Self::editing_context(&messages) && !Self::has_diff_instruction(&messages);
 
         if should_inject {
             // Find system message to append to, or create one
@@ -113,19 +131,24 @@ impl TokenSaver for PatchPreferSaver {
             match sys_idx {
                 Some(idx) => {
                     messages[idx].content.push_str("\n\n");
-                    messages[idx].content.push_str(&self.config.diff_instruction);
+                    messages[idx]
+                        .content
+                        .push_str(&self.config.diff_instruction);
                     let added_tokens = self.config.diff_instruction.len() / 4;
                     messages[idx].token_count += added_tokens;
                 }
                 None => {
                     let instruction_tokens = self.config.diff_instruction.len() / 4;
-                    messages.insert(0, Message {
-                        role: "system".into(),
-                        content: self.config.diff_instruction.clone(),
-                        images: vec![],
-                        tool_call_id: None,
-                        token_count: instruction_tokens,
-                    });
+                    messages.insert(
+                        0,
+                        Message {
+                            role: "system".into(),
+                            content: self.config.diff_instruction.clone(),
+                            images: vec![],
+                            tool_call_id: None,
+                            token_count: instruction_tokens,
+                        },
+                    );
                 }
             }
         }
@@ -178,10 +201,22 @@ mod tests {
     use super::*;
 
     fn sys_msg(content: &str) -> Message {
-        Message { role: "system".into(), content: content.into(), images: vec![], tool_call_id: None, token_count: content.len() / 4 }
+        Message {
+            role: "system".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: content.len() / 4,
+        }
     }
     fn user_msg(content: &str) -> Message {
-        Message { role: "user".into(), content: content.into(), images: vec![], tool_call_id: None, token_count: content.len() / 4 }
+        Message {
+            role: "user".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: content.len() / 4,
+        }
     }
 
     #[tokio::test]

@@ -121,10 +121,13 @@ impl GovernorSaver {
         // Check same tool count
         if let Some(&count) = tracker.tool_counts.get(tool_name) {
             if count >= self.config.max_same_tool_calls {
-                return (false, format!(
+                return (
+                    false,
+                    format!(
                     "CIRCUIT BREAKER: '{}' called {} times (limit {}). Try a different approach.",
                     tool_name, count, self.config.max_same_tool_calls
-                ));
+                ),
+                );
             }
         }
 
@@ -142,11 +145,23 @@ impl GovernorSaver {
     }
 }
 
+impl Default for GovernorSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for GovernorSaver {
-    fn name(&self) -> &str { "governor" }
-    fn stage(&self) -> SaverStage { SaverStage::PreCall }
-    fn priority(&self) -> u32 { 5 }
+    fn name(&self) -> &str {
+        "governor"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PreCall
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
 
     async fn process(
         &self,

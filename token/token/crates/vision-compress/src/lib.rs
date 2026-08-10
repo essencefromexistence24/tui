@@ -109,7 +109,8 @@ impl VisionCompressSaver {
 
         // Re-encode as JPEG
         let mut buf = Cursor::new(Vec::new());
-        resized.write_to(&mut buf, image::ImageFormat::Jpeg)
+        resized
+            .write_to(&mut buf, image::ImageFormat::Jpeg)
             .map_err(|e| SaverError::Failed(format!("jpeg encode: {}", e)))?;
         let compressed_data = buf.into_inner();
 
@@ -147,11 +148,23 @@ impl VisionCompressSaver {
     }
 }
 
+impl Default for VisionCompressSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for VisionCompressSaver {
-    fn name(&self) -> &str { "vision-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 10 }
+    fn name(&self) -> &str {
+        "vision-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
 
     async fn process(
         &self,
@@ -214,7 +227,9 @@ impl TokenSaver for VisionCompressSaver {
         let tokens_saved = total_before.saturating_sub(total_after);
         let pct = if total_before > 0 {
             tokens_saved as f64 / total_before as f64 * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "vision-compress".into(),
@@ -253,7 +268,10 @@ mod tests {
 
     #[test]
     fn test_token_cost_low_detail() {
-        assert_eq!(VisionCompressSaver::calculate_token_cost(4096, 4096, ImageDetail::Low), 85);
+        assert_eq!(
+            VisionCompressSaver::calculate_token_cost(4096, 4096, ImageDetail::Low),
+            85
+        );
     }
 
     #[test]
@@ -270,6 +288,10 @@ mod tests {
         let high = VisionCompressSaver::calculate_token_cost(2048, 4096, ImageDetail::High);
         let low = VisionCompressSaver::calculate_token_cost(2048, 4096, ImageDetail::Low);
         let savings_pct = (high - low) as f64 / high as f64 * 100.0;
-        assert!(savings_pct > 90.0, "Expected >90% savings, got {:.1}%", savings_pct);
+        assert!(
+            savings_pct > 90.0,
+            "Expected >90% savings, got {:.1}%",
+            savings_pct
+        );
     }
 }

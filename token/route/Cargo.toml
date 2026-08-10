@@ -1,20 +1,20 @@
 [workspace]
 resolver = "2"
 members = [
-  "crates/dx-route-core",
-  "crates/dx-route-lite",
-  "crates/dx-route-caveman",
-  "crates/dx-route-rtk",
-  "crates/dx-route-ultra",
-  "crates/dx-route-aggressive",
-  "crates/dx-route-headroom",
-  "crates/dx-route-dedup",
-  "crates/dx-route-ccr",
-  "crates/dx-route-storage",
-  "crates/dx-route-cli",
-  "crates/dx-route-mcp",
-  "crates/dx-route-proxy",
-  "crates/dx-route-benches",
+  "dx-route-core",
+  "dx-route-lite",
+  "dx-route-caveman",
+  "dx-route-rtk",
+  "dx-route-ultra",
+  "dx-route-aggressive",
+  "dx-route-headroom",
+  "dx-route-dedup",
+  "dx-route-ccr",
+  "dx-route-storage",
+  "dx-route-cli",
+  "dx-route-mcp",
+  "dx-route-proxy",
+  "dx-route-benches",
 ]
 
 [workspace.package]

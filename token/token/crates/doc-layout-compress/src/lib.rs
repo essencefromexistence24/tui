@@ -72,12 +72,26 @@ impl DocLayoutCompress {
     }
 }
 
+impl Default for DocLayoutCompress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for DocLayoutCompress {
-    fn name(&self) -> &str { "doc-layout-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 12 }
-    fn modality(&self) -> Modality { Modality::Document }
+    fn name(&self) -> &str {
+        "doc-layout-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        12
+    }
+    fn modality(&self) -> Modality {
+        Modality::Document
+    }
 
     async fn process_multimodal(
         &self,
@@ -89,12 +103,24 @@ impl MultiModalTokenSaver for DocLayoutCompress {
         if input.documents.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "doc-layout-compress".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No documents.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -123,19 +149,40 @@ impl MultiModalTokenSaver for DocLayoutCompress {
             description: format!(
                 "Layout compression: {} → {} tokens ({:.0}% saved). \
                  Removed: {}{}. In production, use layout detection model.",
-                tokens_before, tokens_after,
-                if tokens_before > 0 { total_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
-                if self.config.remove_headers { "headers " } else { "" },
-                if self.config.remove_footers { "footers" } else { "" },
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    total_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
+                if self.config.remove_headers {
+                    "headers "
+                } else {
+                    ""
+                },
+                if self.config.remove_footers {
+                    "footers"
+                } else {
+                    ""
+                },
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames,
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: input.base.images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
             documents: new_docs,
-            videos: input.videos, assets_3d: input.assets_3d,
+            videos: input.videos,
+            assets_3d: input.assets_3d,
         })
     }
 
@@ -149,7 +196,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -158,14 +210,16 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![],
+            audio: vec![],
+            live_frames: vec![],
             documents: vec![DocumentInput {
                 data: vec![],
                 doc_type: DocumentType::Pdf,
                 page_count: Some(20),
                 naive_token_estimate: 20 * 765,
             }],
-            videos: vec![], assets_3d: vec![],
+            videos: vec![],
+            assets_3d: vec![],
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(out.documents[0].naive_token_estimate < 20 * 765);

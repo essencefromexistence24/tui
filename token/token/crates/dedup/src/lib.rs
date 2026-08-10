@@ -75,11 +75,23 @@ impl DedupSaver {
     }
 }
 
+impl Default for DedupSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for DedupSaver {
-    fn name(&self) -> &str { "dedup" }
-    fn stage(&self) -> SaverStage { SaverStage::PostResponse }
-    fn priority(&self) -> u32 { 25 }
+    fn name(&self) -> &str {
+        "dedup"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PostResponse
+    }
+    fn priority(&self) -> u32 {
+        25
+    }
 
     async fn process(
         &self,
@@ -101,7 +113,9 @@ impl TokenSaver for DedupSaver {
         // Limit tracker size
         while tracker.seen.len() > self.config.max_tracked {
             // Remove the oldest entries
-            if let Some(oldest_hash) = tracker.seen.iter()
+            if let Some(oldest_hash) = tracker
+                .seen
+                .iter()
                 .min_by_key(|(_, (t, _, _))| *t)
                 .map(|(h, _)| *h)
             {
@@ -124,16 +138,17 @@ impl TokenSaver for DedupSaver {
 
             if let Some((orig_turn, orig_id, _orig_tokens)) = tracker.seen.get(&hash) {
                 // Duplicate found
-                let ref_text = if self.config.keep_reference {
-                    format!(
+                let ref_text =
+                    if self.config.keep_reference {
+                        format!(
                         "[Duplicate output — same as turn {}{}, {} tokens. Content deduplicated.]",
                         orig_turn,
                         orig_id.as_ref().map_or(String::new(), |id| format!(" ({})", id)),
                         msg.token_count
                     )
-                } else {
-                    "[Duplicate output removed.]".into()
-                };
+                    } else {
+                        "[Duplicate output removed.]".into()
+                    };
 
                 let old_tokens = msg.token_count;
                 let new_tokens = ref_text.len() / 4 + 5;
@@ -143,10 +158,9 @@ impl TokenSaver for DedupSaver {
                 deduped_count += 1;
             } else {
                 // Register this content
-                tracker.seen.insert(
-                    hash,
-                    (turn, msg.tool_call_id.clone(), msg.token_count),
-                );
+                tracker
+                    .seen
+                    .insert(hash, (turn, msg.tool_call_id.clone(), msg.token_count));
             }
         }
 
@@ -155,7 +169,9 @@ impl TokenSaver for DedupSaver {
         let tokens_after = tokens_before.saturating_sub(tokens_saved_total);
         let pct = if tokens_before > 0 {
             tokens_saved_total as f64 / tokens_before as f64 * 100.0
-        } else { 0.0 };
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "dedup".into(),
@@ -205,12 +221,12 @@ mod tests {
     #[tokio::test]
     async fn test_no_dedup_different_content() {
         let saver = DedupSaver::new();
-        let ctx = SaverContext { turn_number: 1, ..Default::default() };
+        let ctx = SaverContext {
+            turn_number: 1,
+            ..Default::default()
+        };
         let input = SaverInput {
-            messages: vec![
-                tool_msg("output A", 100),
-                tool_msg("output B", 100),
-            ],
+            messages: vec![tool_msg("output A", 100), tool_msg("output B", 100)],
             tools: vec![],
             images: vec![],
             turn_number: 1,
@@ -222,7 +238,10 @@ mod tests {
     #[tokio::test]
     async fn test_dedup_identical_content() {
         let saver = DedupSaver::new();
-        let ctx = SaverContext { turn_number: 1, ..Default::default() };
+        let ctx = SaverContext {
+            turn_number: 1,
+            ..Default::default()
+        };
         let input = SaverInput {
             messages: vec![
                 tool_msg("identical output content here", 200),

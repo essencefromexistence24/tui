@@ -39,18 +39,34 @@ impl Default for BatchRouterConfig {
     fn default() -> Self {
         Self {
             batch_keywords: vec![
-                "analyze".into(), "report".into(), "summarize all".into(),
-                "bulk".into(), "batch".into(), "background".into(),
-                "when you have time".into(), "no rush".into(),
-                "overnight".into(), "generate docs".into(),
-                "run tests".into(), "lint all".into(),
-                "process all".into(), "migrate".into(),
+                "analyze".into(),
+                "report".into(),
+                "summarize all".into(),
+                "bulk".into(),
+                "batch".into(),
+                "background".into(),
+                "when you have time".into(),
+                "no rush".into(),
+                "overnight".into(),
+                "generate docs".into(),
+                "run tests".into(),
+                "lint all".into(),
+                "process all".into(),
+                "migrate".into(),
             ],
             realtime_keywords: vec![
-                "urgent".into(), "now".into(), "immediately".into(),
-                "asap".into(), "quick".into(), "help me".into(),
-                "fix this".into(), "error".into(), "broken".into(),
-                "debug".into(), "why".into(), "how".into(),
+                "urgent".into(),
+                "now".into(),
+                "immediately".into(),
+                "asap".into(),
+                "quick".into(),
+                "help me".into(),
+                "fix this".into(),
+                "error".into(),
+                "broken".into(),
+                "debug".into(),
+                "why".into(),
+                "how".into(),
             ],
             min_messages_for_batch: 1,
             default_to_batch: false,
@@ -84,24 +100,32 @@ impl BatchRouterSaver {
 
     /// Classify whether the current task is batch-eligible.
     fn classify(&self, messages: &[Message]) -> BatchDecision {
-        let user_text = messages.iter().rev()
+        let user_text = messages
+            .iter()
+            .rev()
             .find(|m| m.role == "user")
             .map(|m| m.content.to_lowercase())
             .unwrap_or_default();
 
-        let batch_signals: usize = self.config.batch_keywords.iter()
+        let batch_signals: usize = self
+            .config
+            .batch_keywords
+            .iter()
             .filter(|kw| user_text.contains(kw.as_str()))
             .count();
 
-        let realtime_signals: usize = self.config.realtime_keywords.iter()
+        let realtime_signals: usize = self
+            .config
+            .realtime_keywords
+            .iter()
             .filter(|kw| user_text.contains(kw.as_str()))
             .count();
 
         if realtime_signals > batch_signals {
             BatchDecision::RealTime
-        } else if batch_signals > 0 && batch_signals > realtime_signals {
-            BatchDecision::Batch
-        } else if self.config.default_to_batch {
+        } else if (batch_signals > 0 && batch_signals > realtime_signals)
+            || self.config.default_to_batch
+        {
             BatchDecision::Batch
         } else {
             BatchDecision::RealTime
@@ -109,11 +133,23 @@ impl BatchRouterSaver {
     }
 }
 
+impl Default for BatchRouterSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for BatchRouterSaver {
-    fn name(&self) -> &str { "batch-router" }
-    fn stage(&self) -> SaverStage { SaverStage::PreCall }
-    fn priority(&self) -> u32 { 15 }
+    fn name(&self) -> &str {
+        "batch-router"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PreCall
+    }
+    fn priority(&self) -> u32 {
+        15
+    }
 
     async fn process(
         &self,
@@ -144,7 +180,9 @@ impl TokenSaver for BatchRouterSaver {
                      Task appears non-urgent. Completes within 24h.",
                     tokens_saved
                 ),
-                BatchDecision::RealTime => "Real-time API: task requires immediate response.".into(),
+                BatchDecision::RealTime => {
+                    "Real-time API: task requires immediate response.".into()
+                }
             },
         };
         *self.report.lock().unwrap() = report;
@@ -168,7 +206,13 @@ mod tests {
     use super::*;
 
     fn user_msg(content: &str) -> Message {
-        Message { role: "user".into(), content: content.into(), images: vec![], tool_call_id: None, token_count: content.len() / 4 }
+        Message {
+            role: "user".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: content.len() / 4,
+        }
     }
 
     #[tokio::test]
@@ -176,7 +220,9 @@ mod tests {
         let saver = BatchRouterSaver::new();
         let ctx = SaverContext::default();
         let input = SaverInput {
-            messages: vec![user_msg("please generate docs for all modules in the background when you have time")],
+            messages: vec![user_msg(
+                "please generate docs for all modules in the background when you have time",
+            )],
             tools: vec![],
             images: vec![],
             turn_number: 1,

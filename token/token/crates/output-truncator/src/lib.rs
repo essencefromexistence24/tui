@@ -37,13 +37,22 @@ impl Default for OutputTruncatorConfig {
             head_lines: 30,
             tail_lines: 30,
             no_truncate_patterns: vec![
-                "fn ".into(), "def ".into(), "class ".into(),
-                "impl ".into(), "pub ".into(), "{".into(),
+                "fn ".into(),
+                "def ".into(),
+                "class ".into(),
+                "impl ".into(),
+                "pub ".into(),
+                "{".into(),
             ],
             safe_truncate_patterns: vec![
-                "total ".into(), "drwx".into(), "-rw-".into(),  // ls output
-                "warning:".into(), "error:".into(),              // compiler output
-                "│".into(), "├".into(), "└".into(),             // tree output
+                "total ".into(),
+                "drwx".into(),
+                "-rw-".into(), // ls output
+                "warning:".into(),
+                "error:".into(), // compiler output
+                "│".into(),
+                "├".into(),
+                "└".into(), // tree output
             ],
         }
     }
@@ -72,12 +81,18 @@ impl OutputTruncatorSaver {
         let sample = lines.join("\n").to_lowercase();
 
         // Check if it looks like code (dangerous to truncate)
-        let code_signals: usize = self.config.no_truncate_patterns.iter()
+        let code_signals: usize = self
+            .config
+            .no_truncate_patterns
+            .iter()
             .filter(|p| sample.contains(p.as_str()))
             .count();
 
         // Check if it looks like logs/listings (safe to truncate)
-        let safe_signals: usize = self.config.safe_truncate_patterns.iter()
+        let safe_signals: usize = self
+            .config
+            .safe_truncate_patterns
+            .iter()
             .filter(|p| sample.contains(p.as_str()))
             .count();
 
@@ -124,7 +139,9 @@ impl OutputTruncatorSaver {
 
         result.push_str(&format!(
             "\n[... {} lines omitted ({} → {} lines kept) ...]\n\n",
-            omitted, total_lines, head + tail
+            omitted,
+            total_lines,
+            head + tail
         ));
 
         for line in &lines[total_lines - tail..] {
@@ -143,11 +160,23 @@ enum TruncationSafety {
     Dangerous,
 }
 
+impl Default for OutputTruncatorSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for OutputTruncatorSaver {
-    fn name(&self) -> &str { "output-truncator" }
-    fn stage(&self) -> SaverStage { SaverStage::PostResponse }
-    fn priority(&self) -> u32 { 10 }
+    fn name(&self) -> &str {
+        "output-truncator"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PostResponse
+    }
+    fn priority(&self) -> u32 {
+        10
+    }
 
     async fn process(
         &self,
@@ -177,7 +206,11 @@ impl TokenSaver for OutputTruncatorSaver {
 
         let tokens_after: usize = messages.iter().map(|m| m.token_count).sum();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
-        let pct = if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 };
+        let pct = if tokens_before > 0 {
+            tokens_saved as f64 / tokens_before as f64 * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "output-truncator".into(),
@@ -248,7 +281,10 @@ mod tests {
         // Simulate long log output (safe to truncate)
         let mut log_content = String::new();
         for i in 0..200 {
-            log_content.push_str(&format!("warning: unused variable `x{}` at line {}\n", i, i));
+            log_content.push_str(&format!(
+                "warning: unused variable `x{}` at line {}\n",
+                i, i
+            ));
         }
 
         let input = SaverInput {

@@ -36,7 +36,7 @@ impl Default for SemanticCacheConfig {
     fn default() -> Self {
         Self {
             max_entries: 1000,
-            similarity_threshold: 0.95, // High threshold for agents
+            similarity_threshold: 0.95,     // High threshold for agents
             ttl: Duration::from_secs(3600), // 1 hour
             min_query_tokens: 10,
             require_system_match: true,
@@ -78,7 +78,9 @@ pub struct CacheStats {
 
 impl CacheStats {
     pub fn hit_rate(&self) -> f64 {
-        if self.total_queries == 0 { return 0.0; }
+        if self.total_queries == 0 {
+            return 0.0;
+        }
         self.cache_hits as f64 / self.total_queries as f64 * 100.0
     }
 }
@@ -141,7 +143,8 @@ impl SemanticCacheSaver {
 
     /// Extract word set for Jaccard similarity.
     fn word_set(text: &str) -> Vec<String> {
-        let mut words: Vec<String> = text.split_whitespace()
+        let mut words: Vec<String> = text
+            .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
             .filter(|w| !w.is_empty() && w.len() > 2)
             .collect();
@@ -152,8 +155,12 @@ impl SemanticCacheSaver {
 
     /// Jaccard similarity between two word sets.
     fn jaccard_similarity(a: &[String], b: &[String]) -> f64 {
-        if a.is_empty() && b.is_empty() { return 1.0; }
-        if a.is_empty() || b.is_empty() { return 0.0; }
+        if a.is_empty() && b.is_empty() {
+            return 1.0;
+        }
+        if a.is_empty() || b.is_empty() {
+            return 0.0;
+        }
 
         let mut intersection = 0usize;
         let mut union = b.len();
@@ -206,10 +213,10 @@ impl SemanticCacheSaver {
 
             // Jaccard similarity
             let sim = Self::jaccard_similarity(&word_set, &entry.word_set);
-            if sim >= self.config.similarity_threshold {
-                if best_match.map_or(true, |(_, best_sim)| sim > best_sim) {
-                    best_match = Some((i, sim));
-                }
+            if sim >= self.config.similarity_threshold
+                && best_match.is_none_or(|(_, best_sim)| sim > best_sim)
+            {
+                best_match = Some((i, sim));
             }
         }
 
@@ -228,11 +235,23 @@ impl SemanticCacheSaver {
     }
 }
 
+impl Default for SemanticCacheSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for SemanticCacheSaver {
-    fn name(&self) -> &str { "semantic-cache" }
-    fn stage(&self) -> SaverStage { SaverStage::CallElimination }
-    fn priority(&self) -> u32 { 1 }
+    fn name(&self) -> &str {
+        "semantic-cache"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::CallElimination
+    }
+    fn priority(&self) -> u32 {
+        1
+    }
 
     async fn process(
         &self,
@@ -242,7 +261,10 @@ impl TokenSaver for SemanticCacheSaver {
         let tokens_before: usize = input.messages.iter().map(|m| m.token_count).sum();
 
         // Extract the latest user query
-        let user_query = input.messages.iter().rev()
+        let user_query = input
+            .messages
+            .iter()
+            .rev()
             .find(|m| m.role == "user")
             .map(|m| m.content.as_str());
 
@@ -269,7 +291,9 @@ impl TokenSaver for SemanticCacheSaver {
         };
 
         // Get system prompt hash
-        let system_prompt = input.messages.iter()
+        let system_prompt = input
+            .messages
+            .iter()
             .find(|m| m.role == "system")
             .map(|m| m.content.as_str())
             .unwrap_or("");
@@ -293,8 +317,10 @@ impl TokenSaver for SemanticCacheSaver {
                     description: format!(
                         "CACHE HIT (similarity: {:.2}). Skipping API call entirely. \
                          Hit rate: {:.1}% ({} hits / {} queries).",
-                        similarity, hit_rate,
-                        self.stats().cache_hits, self.stats().total_queries
+                        similarity,
+                        hit_rate,
+                        self.stats().cache_hits,
+                        self.stats().total_queries
                     ),
                 };
                 *self.report.lock().unwrap() = report;
@@ -370,7 +396,8 @@ mod tests {
         let saver = SemanticCacheSaver::new();
         let ctx = SaverContext::default();
 
-        let query = "how do I implement a binary search tree in rust with all the standard operations";
+        let query =
+            "how do I implement a binary search tree in rust with all the standard operations";
         let sys = "You are a helpful assistant";
 
         let input = SaverInput {

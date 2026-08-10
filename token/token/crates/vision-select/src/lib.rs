@@ -107,17 +107,25 @@ impl VisionSelectSaver {
 
                         // Edge detection (simple gradient)
                         if x > 0 {
-                            let diff = (val as i64 - gray.get_pixel(x - 1, y)[0] as i64).unsigned_abs();
-                            if diff > 25 { edge_count += 1; }
+                            let diff =
+                                (val as i64 - gray.get_pixel(x - 1, y)[0] as i64).unsigned_abs();
+                            if diff > 25 {
+                                edge_count += 1;
+                            }
                         }
                         if y > 0 {
-                            let diff = (val as i64 - gray.get_pixel(x, y - 1)[0] as i64).unsigned_abs();
-                            if diff > 25 { edge_count += 1; }
+                            let diff =
+                                (val as i64 - gray.get_pixel(x, y - 1)[0] as i64).unsigned_abs();
+                            if diff > 25 {
+                                edge_count += 1;
+                            }
                         }
                     }
                 }
 
-                if pixel_count == 0 { continue; }
+                if pixel_count == 0 {
+                    continue;
+                }
                 let mean = sum as f64 / pixel_count as f64;
                 let variance = (sum_sq as f64 / pixel_count as f64) - mean * mean;
                 let edge_density = edge_count as f64 / pixel_count as f64;
@@ -138,7 +146,11 @@ impl VisionSelectSaver {
         }
 
         // Sort by score descending and take top N
-        rois.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        rois.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         rois.truncate(self.config.max_crops);
         rois
     }
@@ -167,7 +179,8 @@ impl VisionSelectSaver {
 
         for roi in &rois {
             let cropped = img.crop_imm(roi.x, roi.y, roi.width, roi.height);
-            let resized = if roi.width > self.config.crop_size || roi.height > self.config.crop_size {
+            let resized = if roi.width > self.config.crop_size || roi.height > self.config.crop_size
+            {
                 cropped.resize(
                     self.config.crop_size,
                     self.config.crop_size,
@@ -178,7 +191,8 @@ impl VisionSelectSaver {
             };
 
             let mut buf = std::io::Cursor::new(Vec::new());
-            resized.write_to(&mut buf, image::ImageFormat::Jpeg)
+            resized
+                .write_to(&mut buf, image::ImageFormat::Jpeg)
                 .map_err(|e| SaverError::Failed(format!("JPEG encode: {}", e)))?;
 
             let crop_tokens = 170 + 85; // 1 tile + base (512×512 crop)
@@ -195,11 +209,23 @@ impl VisionSelectSaver {
     }
 }
 
+impl Default for VisionSelectSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for VisionSelectSaver {
-    fn name(&self) -> &str { "vision-select" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 8 }
+    fn name(&self) -> &str {
+        "vision-select"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        8
+    }
 
     async fn process(
         &self,
@@ -213,7 +239,9 @@ impl TokenSaver for VisionSelectSaver {
         for img in &input.images {
             match self.process_image(img) {
                 Ok(images) => {
-                    if images.len() > 1 { processed_count += 1; }
+                    if images.len() > 1 {
+                        processed_count += 1;
+                    }
                     new_images.extend(images);
                 }
                 Err(_) => new_images.push(img.clone()),
@@ -222,7 +250,11 @@ impl TokenSaver for VisionSelectSaver {
 
         let tokens_after: usize = new_images.iter().map(|i| i.processed_tokens).sum();
         let tokens_saved = tokens_before.saturating_sub(tokens_after);
-        let pct = if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 };
+        let pct = if tokens_before > 0 {
+            tokens_saved as f64 / tokens_before as f64 * 100.0
+        } else {
+            0.0
+        };
 
         let report = TokenSavingsReport {
             technique: "vision-select".into(),

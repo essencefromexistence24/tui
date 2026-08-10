@@ -62,12 +62,26 @@ impl Asset3dMultiviewCompress {
     }
 }
 
+impl Default for Asset3dMultiviewCompress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl MultiModalTokenSaver for Asset3dMultiviewCompress {
-    fn name(&self) -> &str { "asset3d-multiview-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 5 }
-    fn modality(&self) -> Modality { Modality::Asset3d }
+    fn name(&self) -> &str {
+        "asset3d-multiview-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
+    fn modality(&self) -> Modality {
+        Modality::Asset3d
+    }
 
     async fn process_multimodal(
         &self,
@@ -79,12 +93,24 @@ impl MultiModalTokenSaver for Asset3dMultiviewCompress {
         if input.assets_3d.is_empty() {
             *self.report.lock().unwrap() = TokenSavingsReport {
                 technique: "asset3d-multiview-compress".into(),
-                tokens_before: 0, tokens_after: 0, tokens_saved: 0,
+                tokens_before: 0,
+                tokens_after: 0,
+                tokens_saved: 0,
                 description: "No 3D assets.".into(),
             };
             return Ok(MultiModalSaverOutput {
-                base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: input.base.images, skipped: true, cached_response: None },
-                audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos, assets_3d: input.assets_3d,
+                base: SaverOutput {
+                    messages: input.base.messages,
+                    tools: input.base.tools,
+                    images: input.base.images,
+                    skipped: true,
+                    cached_response: None,
+                },
+                audio: input.audio,
+                live_frames: input.live_frames,
+                documents: input.documents,
+                videos: input.videos,
+                assets_3d: input.assets_3d,
             });
         }
 
@@ -128,17 +154,33 @@ impl MultiModalTokenSaver for Asset3dMultiviewCompress {
             description: format!(
                 "Converted {} 3D assets to {} views each: {} → {} tokens ({:.0}% saved). \
                  Format: {:?} at {}px.",
-                input.assets_3d.len(), self.config.num_views,
-                tokens_before, tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 },
-                self.config.view_detail, self.config.view_dimension
+                input.assets_3d.len(),
+                self.config.num_views,
+                tokens_before,
+                tokens_after,
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                },
+                self.config.view_detail,
+                self.config.view_dimension
             ),
         };
         *self.report.lock().unwrap() = report;
 
         Ok(MultiModalSaverOutput {
-            base: SaverOutput { messages: input.base.messages, tools: input.base.tools, images: new_images, skipped: false, cached_response: None },
-            audio: input.audio, live_frames: input.live_frames, documents: input.documents, videos: input.videos,
+            base: SaverOutput {
+                messages: input.base.messages,
+                tools: input.base.tools,
+                images: new_images,
+                skipped: false,
+                cached_response: None,
+            },
+            audio: input.audio,
+            live_frames: input.live_frames,
+            documents: input.documents,
+            videos: input.videos,
             assets_3d: vec![], // Consumed
         })
     }
@@ -153,7 +195,12 @@ mod tests {
     use super::*;
 
     fn empty_base() -> SaverInput {
-        SaverInput { messages: vec![], tools: vec![], images: vec![], turn_number: 1 }
+        SaverInput {
+            messages: vec![],
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        }
     }
 
     #[tokio::test]
@@ -162,7 +209,10 @@ mod tests {
         let ctx = SaverContext::default();
         let input = MultiModalSaverInput {
             base: empty_base(),
-            audio: vec![], live_frames: vec![], documents: vec![], videos: vec![],
+            audio: vec![],
+            live_frames: vec![],
+            documents: vec![],
+            videos: vec![],
             assets_3d: vec![Asset3dInput {
                 data: vec![0u8; 10000],
                 format: Asset3dFormat::Glb,

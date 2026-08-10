@@ -60,11 +60,13 @@ impl EmbeddingCompress {
     /// Compute Jaccard similarity between two texts using word sets.
     /// This is a crude but zero-cost proxy for embedding similarity.
     fn jaccard_similarity(a: &str, b: &str) -> f64 {
-        let words_a: HashSet<&str> = a.split_whitespace()
+        let words_a: HashSet<&str> = a
+            .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
             .filter(|w| !w.is_empty())
             .collect();
-        let words_b: HashSet<&str> = b.split_whitespace()
+        let words_b: HashSet<&str> = b
+            .split_whitespace()
             .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
             .filter(|w| !w.is_empty())
             .collect();
@@ -79,15 +81,31 @@ impl EmbeddingCompress {
         let intersection = words_a.intersection(&words_b).count();
         let union = words_a.union(&words_b).count();
 
-        if union == 0 { 0.0 } else { intersection as f64 / union as f64 }
+        if union == 0 {
+            0.0
+        } else {
+            intersection as f64 / union as f64
+        }
+    }
+}
+
+impl Default for EmbeddingCompress {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[async_trait::async_trait]
 impl TokenSaver for EmbeddingCompress {
-    fn name(&self) -> &str { "embedding-compress" }
-    fn stage(&self) -> SaverStage { SaverStage::PrePrompt }
-    fn priority(&self) -> u32 { 20 }
+    fn name(&self) -> &str {
+        "embedding-compress"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PrePrompt
+    }
+    fn priority(&self) -> u32 {
+        20
+    }
 
     async fn process(
         &self,
@@ -97,11 +115,14 @@ impl TokenSaver for EmbeddingCompress {
         let tokens_before: usize = input.messages.iter().map(|m| m.token_count).sum();
 
         // Collect indices of eligible messages
-        let eligible_indices: Vec<usize> = input.messages.iter().enumerate()
-            .filter(|(_, m)|
-                self.config.eligible_roles.contains(&m.role) &&
-                m.token_count >= self.config.min_tokens_for_dedup
-            )
+        let eligible_indices: Vec<usize> = input
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| {
+                self.config.eligible_roles.contains(&m.role)
+                    && m.token_count >= self.config.min_tokens_for_dedup
+            })
             .map(|(i, _)| i)
             .rev() // Start from most recent
             .take(self.config.max_compare_window)
@@ -137,7 +158,8 @@ impl TokenSaver for EmbeddingCompress {
                 description: format!(
                     "No near-duplicates found among {} eligible messages (threshold: {:.0}%). \
                      NOTE: Using Jaccard word-set similarity — crude but zero-cost.",
-                    eligible_indices.len(), self.config.similarity_threshold * 100.0
+                    eligible_indices.len(),
+                    self.config.similarity_threshold * 100.0
                 ),
             };
             *self.report.lock().unwrap() = report;
@@ -184,7 +206,9 @@ impl TokenSaver for EmbeddingCompress {
                  Jaccard threshold: {:.0}%. \
                  WARNING: Word-set similarity is a crude proxy — may false-positive on content \
                  that shares vocabulary but differs in meaning.",
-                dedup_count, tokens_removed, self.config.similarity_threshold * 100.0
+                dedup_count,
+                tokens_removed,
+                self.config.similarity_threshold * 100.0
             ),
         };
         *self.report.lock().unwrap() = report;
@@ -208,7 +232,13 @@ mod tests {
     use super::*;
 
     fn msg(role: &str, content: &str, tokens: usize) -> Message {
-        Message { role: role.into(), content: content.into(), images: vec![], tool_call_id: None, token_count: tokens }
+        Message {
+            role: role.into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: tokens,
+        }
     }
 
     #[tokio::test]
@@ -218,7 +248,11 @@ mod tests {
         let input = SaverInput {
             messages: vec![
                 msg("tool", "The quick brown fox jumps over the lazy dog", 100),
-                msg("tool", "Completely different content about quantum physics", 100),
+                msg(
+                    "tool",
+                    "Completely different content about quantum physics",
+                    100,
+                ),
             ],
             tools: vec![],
             images: vec![],
@@ -243,7 +277,10 @@ mod tests {
         };
         let out = saver.process(input, &ctx).await.unwrap();
         // High overlap should trigger dedup
-        let has_removed = out.messages.iter().any(|m| m.content.contains("duplicate content removed"));
+        let has_removed = out
+            .messages
+            .iter()
+            .any(|m| m.content.contains("duplicate content removed"));
         assert!(has_removed);
     }
 }

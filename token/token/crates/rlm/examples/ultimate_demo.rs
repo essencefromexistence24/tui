@@ -18,7 +18,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load a large document
     let doc_path = "integrations/recursive-llm/massive_doc.txt";
-    
+
     println!("📄 Loading document...");
     let context = match fs::read_to_string(doc_path) {
         Ok(content) => content,
@@ -26,45 +26,62 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("⚠️  Could not find massive_doc.txt");
             println!("   Creating a demo document instead...");
             println!();
-            
+
             // Create a large synthetic document
             let mut demo_doc = String::new();
             demo_doc.push_str("# Technology Industry Report 2024\n\n");
-            
+
             demo_doc.push_str("## AI Market Analysis\n");
-            demo_doc.push_str("The global AI market reached $184 billion in 2024, growing at 37.3% annually. ");
+            demo_doc.push_str(
+                "The global AI market reached $184 billion in 2024, growing at 37.3% annually. ",
+            );
             demo_doc.push_str("Major players include OpenAI, Anthropic, Google, and Meta. ");
-            demo_doc.push_str("The enterprise AI adoption rate hit 65% in Fortune 500 companies.\n\n");
-            
+            demo_doc
+                .push_str("The enterprise AI adoption rate hit 65% in Fortune 500 companies.\n\n");
+
             demo_doc.push_str("## Space Industry Updates\n");
-            demo_doc.push_str("SpaceX completed 96 successful launches in 2024, setting a new record. ");
+            demo_doc.push_str(
+                "SpaceX completed 96 successful launches in 2024, setting a new record. ",
+            );
             demo_doc.push_str("Starship achieved its first orbital flight in March 2024. ");
             demo_doc.push_str("The commercial space market grew to $469 billion.\n\n");
-            
+
             demo_doc.push_str("## Remote Work Statistics\n");
             demo_doc.push_str("Remote work adoption stabilized at 42% for tech workers in 2024. ");
-            demo_doc.push_str("Hybrid models became the norm, with 3 days in office being most common. ");
+            demo_doc.push_str(
+                "Hybrid models became the norm, with 3 days in office being most common. ",
+            );
             demo_doc.push_str("Productivity metrics showed a 12% increase compared to 2023.\n\n");
-            
+
             demo_doc.push_str("## Cloud Computing Trends\n");
-            demo_doc.push_str("AWS maintained 32% market share, followed by Azure at 23% and GCP at 10%. ");
+            demo_doc.push_str(
+                "AWS maintained 32% market share, followed by Azure at 23% and GCP at 10%. ",
+            );
             demo_doc.push_str("Multi-cloud strategies were adopted by 76% of enterprises. ");
             demo_doc.push_str("Edge computing investments reached $87 billion globally.\n\n");
-            
+
             demo_doc.push_str("## Cybersecurity Landscape\n");
             demo_doc.push_str("Ransomware attacks increased by 18% in 2024. ");
             demo_doc.push_str("Zero-trust architecture adoption grew to 54% of enterprises. ");
-            demo_doc.push_str("AI-powered security tools became standard in 68% of organizations.\n\n");
-            
+            demo_doc
+                .push_str("AI-powered security tools became standard in 68% of organizations.\n\n");
+
             // Add more sections to make it substantial
             for i in 1..20 {
                 demo_doc.push_str(&format!("## Additional Section {}\n", i));
-                demo_doc.push_str(&format!("This section contains detailed information about topic {}. ", i));
-                demo_doc.push_str("It includes market analysis, trends, statistics, and forecasts. ");
-                demo_doc.push_str("The data is sourced from industry reports and expert analysis. ");
-                demo_doc.push_str("Key metrics show significant growth across all measured parameters.\n\n");
+                demo_doc.push_str(&format!(
+                    "This section contains detailed information about topic {}. ",
+                    i
+                ));
+                demo_doc
+                    .push_str("It includes market analysis, trends, statistics, and forecasts. ");
+                demo_doc
+                    .push_str("The data is sourced from industry reports and expert analysis. ");
+                demo_doc.push_str(
+                    "Key metrics show significant growth across all measured parameters.\n\n",
+                );
             }
-            
+
             demo_doc
         }
     };
@@ -84,7 +101,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("❌ Traditional Approach:");
     println!("   - Would send entire document in prompt");
-    println!("   - Cost: ~{} tokens (document) + ~50 tokens (query)", estimated_tokens);
+    println!(
+        "   - Cost: ~{} tokens (document) + ~50 tokens (query)",
+        estimated_tokens
+    );
     println!("   - Total: ~{} tokens per query", estimated_tokens + 50);
     println!("   - Problem: Hits context limits, expensive, slow");
     println!();
@@ -106,7 +126,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "llama-3.3-70b-versatile".to_string(), // Using fast model as primary
     )
     .with_max_iterations(20);
-    
+
     println!("✓ RLM ready with all optimizations enabled!");
     println!();
 
@@ -116,18 +136,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let query = "What is the AI market size in 2024? Use fast_find to search for 'AI market'.";
-    
+
     println!("Query: {}", query);
     println!();
     println!("Processing with RLM...");
     println!();
 
     let start = Instant::now();
-    
+
     match rlm.complete(query, &context).await {
         Ok((answer, stats)) => {
             let elapsed = start.elapsed();
-            
+
             println!("✅ SUCCESS!");
             println!();
             println!("Answer: {}", answer);
@@ -138,21 +158,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   Iterations: {}", stats.iterations);
             println!("   Cache hit rate: {:.1}%", stats.cache_hit_rate());
             println!();
-            
+
             // Calculate token savings
             let traditional_tokens = estimated_tokens + 50;
             let rlm_tokens = stats.llm_calls * 400; // Rough estimate
-            let savings = ((traditional_tokens - rlm_tokens) as f64 / traditional_tokens as f64) * 100.0;
-            
+            let savings =
+                ((traditional_tokens - rlm_tokens) as f64 / traditional_tokens as f64) * 100.0;
+
             println!("💰 Cost Analysis:");
             println!("   Traditional approach: ~{} tokens", traditional_tokens);
             println!("   RLM approach: ~{} tokens", rlm_tokens);
             println!("   Token savings: {:.1}%", savings);
             println!();
-            
+
             println!("{}", "-".repeat(80));
             println!();
-            
+
             println!("🎯 WHY RLM WINS:");
             println!();
             println!("1. Unlimited Context:");
@@ -160,20 +181,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("   ✅ Not limited by model context window");
             println!("   ✅ Scales to millions of tokens");
             println!();
-            
+
             println!("2. Cost Efficiency:");
             println!("   ✅ 95%+ token savings vs traditional");
             println!("   ✅ Only processes relevant sections");
             println!("   ✅ Smart caching reduces redundant calls");
             println!();
-            
+
             println!("3. Performance:");
             println!("   ✅ 10-20x faster than Python RLM");
             println!("   ✅ SIMD-accelerated search");
             println!("   ✅ Parallel execution support");
             println!("   ✅ Zero-copy memory efficiency");
             println!();
-            
+
             println!("4. Accuracy:");
             println!("   ✅ No context rot (degradation with long context)");
             println!("   ✅ Precise information retrieval");

@@ -125,10 +125,8 @@ impl ResponseCacheSaver {
             .unwrap_or_default()
             .as_secs();
 
-        let compressed = match zstd::encode_all(
-            response.as_bytes(),
-            self.config.compression_level,
-        ) {
+        let compressed = match zstd::encode_all(response.as_bytes(), self.config.compression_level)
+        {
             Ok(data) => data,
             Err(_) => response.as_bytes().to_vec(),
         };
@@ -137,7 +135,9 @@ impl ResponseCacheSaver {
 
         // Evict oldest if at capacity
         while cache.entries.len() >= self.config.max_entries {
-            if let Some(oldest_key) = cache.entries.iter()
+            if let Some(oldest_key) = cache
+                .entries
+                .iter()
                 .min_by_key(|(_, e)| e.created_epoch_secs)
                 .map(|(k, _)| *k)
             {
@@ -147,11 +147,14 @@ impl ResponseCacheSaver {
             }
         }
 
-        cache.entries.insert(key, CacheEntry {
-            response: compressed,
-            created_epoch_secs: now,
-            hit_count: 0,
-        });
+        cache.entries.insert(
+            key,
+            CacheEntry {
+                response: compressed,
+                created_epoch_secs: now,
+                hit_count: 0,
+            },
+        );
     }
 
     /// Get cache stats.
@@ -160,11 +163,23 @@ impl ResponseCacheSaver {
     }
 }
 
+impl Default for ResponseCacheSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for ResponseCacheSaver {
-    fn name(&self) -> &str { "response-cache" }
-    fn stage(&self) -> SaverStage { SaverStage::CallElimination }
-    fn priority(&self) -> u32 { 2 }
+    fn name(&self) -> &str {
+        "response-cache"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::CallElimination
+    }
+    fn priority(&self) -> u32 {
+        2
+    }
 
     async fn process(
         &self,
@@ -184,7 +199,8 @@ impl TokenSaver for ResponseCacheSaver {
                     description: format!(
                         "DISK CACHE HIT (blake3: {}). Skipping API call entirely. \
                          100% savings on this request. Cache size: {}.",
-                        &key.to_hex()[..16], self.size()
+                        &key.to_hex()[..16],
+                        self.size()
                     ),
                 };
                 *self.report.lock().unwrap() = report;
@@ -205,7 +221,8 @@ impl TokenSaver for ResponseCacheSaver {
                     tokens_saved: 0,
                     description: format!(
                         "DISK CACHE MISS (blake3: {}). Proceeding to API. Cache size: {}.",
-                        &key.to_hex()[..16], self.size()
+                        &key.to_hex()[..16],
+                        self.size()
                     ),
                 };
                 *self.report.lock().unwrap() = report;
@@ -231,7 +248,13 @@ mod tests {
     use super::*;
 
     fn user_msg(content: &str) -> Message {
-        Message { role: "user".into(), content: content.into(), images: vec![], tool_call_id: None, token_count: content.len() / 4 }
+        Message {
+            role: "user".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: None,
+            token_count: content.len() / 4,
+        }
     }
 
     #[tokio::test]
@@ -239,7 +262,12 @@ mod tests {
         let saver = ResponseCacheSaver::new();
         let ctx = SaverContext::default();
         let msgs = vec![user_msg("what is 2+2?")];
-        let input = SaverInput { messages: msgs.clone(), tools: vec![], images: vec![], turn_number: 1 };
+        let input = SaverInput {
+            messages: msgs.clone(),
+            tools: vec![],
+            images: vec![],
+            turn_number: 1,
+        };
 
         // Miss
         let out = saver.process(input.clone(), &ctx).await.unwrap();

@@ -84,7 +84,7 @@ impl CompactionSaver {
     }
 
     /// Strategy 1: Remove tool outputs from old turns.
-    fn remove_stale_tool_outputs(&self, messages: &mut Vec<Message>, turn: usize) {
+    fn remove_stale_tool_outputs(&self, messages: &mut [Message], turn: usize) {
         let cutoff = turn.saturating_sub(self.config.protected_recent_turns);
         // Tool messages from early turns get their content cleared
         let mut current_turn = 0usize;
@@ -93,7 +93,10 @@ impl CompactionSaver {
                 current_turn += 1;
             }
             if msg.role == "tool" && current_turn <= cutoff && msg.token_count > 50 {
-                let summary = format!("[Tool output removed — {} tokens, turn {}]", msg.token_count, current_turn);
+                let summary = format!(
+                    "[Tool output removed — {} tokens, turn {}]",
+                    msg.token_count, current_turn
+                );
                 msg.token_count = summary.len() / 4; // rough estimate
                 msg.content = summary;
             }
@@ -109,7 +112,8 @@ impl CompactionSaver {
                 && messages[i].tool_call_id.is_none()
                 && messages[i + 1].tool_call_id.is_none()
             {
-                let merged_content = format!("{}\n{}", messages[i].content, messages[i + 1].content);
+                let merged_content =
+                    format!("{}\n{}", messages[i].content, messages[i + 1].content);
                 let merged_tokens = merged_content.len() / 4;
                 messages[i].content = merged_content;
                 messages[i].token_count = merged_tokens;
@@ -121,7 +125,7 @@ impl CompactionSaver {
     }
 
     /// Strategy 3: Truncate long messages to head + tail.
-    fn truncate_long_messages(&self, messages: &mut Vec<Message>) {
+    fn truncate_long_messages(&self, messages: &mut [Message]) {
         for msg in messages.iter_mut() {
             if msg.token_count > self.config.max_single_message_tokens && msg.role != "system" {
                 let lines: Vec<&str> = msg.content.lines().collect();
@@ -165,11 +169,23 @@ impl CompactionSaver {
     }
 }
 
+impl Default for CompactionSaver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for CompactionSaver {
-    fn name(&self) -> &str { "compaction" }
-    fn stage(&self) -> SaverStage { SaverStage::InterTurn }
-    fn priority(&self) -> u32 { 30 }
+    fn name(&self) -> &str {
+        "compaction"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::InterTurn
+    }
+    fn priority(&self) -> u32 {
+        30
+    }
 
     async fn process(
         &self,
@@ -276,7 +292,10 @@ mod tests {
     #[tokio::test]
     async fn test_no_compaction_under_limit() {
         let saver = CompactionSaver::new();
-        let ctx = SaverContext { turn_number: 5, ..Default::default() };
+        let ctx = SaverContext {
+            turn_number: 5,
+            ..Default::default()
+        };
         let input = SaverInput {
             messages: vec![msg("system", "hello", 100), msg("user", "hi", 50)],
             tools: vec![],
@@ -297,7 +316,10 @@ mod tests {
             ..Default::default()
         };
         let saver = CompactionSaver::with_config(config);
-        let ctx = SaverContext { turn_number: 10, ..Default::default() };
+        let ctx = SaverContext {
+            turn_number: 10,
+            ..Default::default()
+        };
         let mut tool_msg = msg("tool", "very long tool output here", 800);
         tool_msg.tool_call_id = Some("tc_1".into());
         let input = SaverInput {

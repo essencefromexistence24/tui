@@ -53,11 +53,23 @@ impl ParallelToolMerge {
     }
 }
 
+impl Default for ParallelToolMerge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait::async_trait]
 impl TokenSaver for ParallelToolMerge {
-    fn name(&self) -> &str { "parallel-tool-merge" }
-    fn stage(&self) -> SaverStage { SaverStage::PostResponse }
-    fn priority(&self) -> u32 { 5 }
+    fn name(&self) -> &str {
+        "parallel-tool-merge"
+    }
+    fn stage(&self) -> SaverStage {
+        SaverStage::PostResponse
+    }
+    fn priority(&self) -> u32 {
+        5
+    }
 
     async fn process(
         &self,
@@ -82,7 +94,8 @@ impl TokenSaver for ParallelToolMerge {
                     let run_tokens: usize = tool_run.iter().map(|m| m.token_count).sum();
                     if run_tokens <= self.config.max_merged_tokens {
                         let mut merged_content = String::new();
-                        let tool_ids: Vec<String> = tool_run.iter()
+                        let tool_ids: Vec<String> = tool_run
+                            .iter()
                             .filter_map(|m| m.tool_call_id.clone())
                             .collect();
 
@@ -113,10 +126,10 @@ impl TokenSaver for ParallelToolMerge {
                         });
                     } else {
                         // Too large to merge, keep individual
-                        new_messages.extend(tool_run.drain(..));
+                        new_messages.append(&mut tool_run);
                     }
                 } else {
-                    new_messages.extend(tool_run.drain(..));
+                    new_messages.append(&mut tool_run);
                 }
                 tool_run.clear();
                 new_messages.push(msg);
@@ -128,7 +141,8 @@ impl TokenSaver for ParallelToolMerge {
             let run_tokens: usize = tool_run.iter().map(|m| m.token_count).sum();
             if run_tokens <= self.config.max_merged_tokens {
                 let mut merged_content = String::new();
-                let tool_ids: Vec<String> = tool_run.iter()
+                let tool_ids: Vec<String> = tool_run
+                    .iter()
                     .filter_map(|m| m.tool_call_id.clone())
                     .collect();
 
@@ -202,7 +216,13 @@ mod tests {
     use super::*;
 
     fn tool_msg(id: &str, content: &str, tokens: usize) -> Message {
-        Message { role: "tool".into(), content: content.into(), images: vec![], tool_call_id: Some(id.into()), token_count: tokens }
+        Message {
+            role: "tool".into(),
+            content: content.into(),
+            images: vec![],
+            tool_call_id: Some(id.into()),
+            token_count: tokens,
+        }
     }
 
     #[tokio::test]
@@ -211,7 +231,13 @@ mod tests {
         let ctx = SaverContext::default();
         let input = SaverInput {
             messages: vec![
-                Message { role: "assistant".into(), content: "calling tools".into(), images: vec![], tool_call_id: None, token_count: 5 },
+                Message {
+                    role: "assistant".into(),
+                    content: "calling tools".into(),
+                    images: vec![],
+                    tool_call_id: None,
+                    token_count: 5,
+                },
                 tool_msg("call_1", "result one", 50),
                 tool_msg("call_2", "result two", 50),
                 tool_msg("call_3", "result three", 50),
@@ -232,9 +258,21 @@ mod tests {
         let ctx = SaverContext::default();
         let input = SaverInput {
             messages: vec![
-                Message { role: "user".into(), content: "hi".into(), images: vec![], tool_call_id: None, token_count: 5 },
+                Message {
+                    role: "user".into(),
+                    content: "hi".into(),
+                    images: vec![],
+                    tool_call_id: None,
+                    token_count: 5,
+                },
                 tool_msg("call_1", "result", 50),
-                Message { role: "assistant".into(), content: "done".into(), images: vec![], tool_call_id: None, token_count: 5 },
+                Message {
+                    role: "assistant".into(),
+                    content: "done".into(),
+                    images: vec![],
+                    tool_call_id: None,
+                    token_count: 5,
+                },
             ],
             tools: vec![],
             images: vec![],
