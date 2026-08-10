@@ -1,0 +1,11 @@
+[package]
+name = "dx-route-rtk"
+version.workspace = true
+edition = "2024"
+license.workspace = true
+description = "RTK compression — command-aware tool output compression with declarative filters"
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+regex-lite.workspace = true

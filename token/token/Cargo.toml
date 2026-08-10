@@ -2,7 +2,7 @@
 resolver = "2"
 members = [
     "crates/dx-core",
-    "crates/serializer",
+    # "crates/serializer", # intentionally disabled: serializer is not part of the merged runtime yet
     # ── TEXT / IMAGE TOKEN SAVERS ──
     "crates/prefix-cache",
     "crates/compaction",
@@ -17,7 +17,7 @@ members = [
     "crates/retrieval-budget",
     "crates/patch-prefer",
     "crates/context-pruner",
-    "crates/rlm",
+    # "crates/rlm", # RLM is maintained and integrated separately
     "crates/batch-router",
     "crates/tool-router",
     "crates/prompt-compress",
@@ -49,6 +49,21 @@ members = [
     "crates/asset3d-mesh-summarize",
     "crates/multimodal-router",
     "crates/cross-modal-dedup",
+    # ── MERGED DX-ROUTE ENGINES ──
+    "crates/route/core",
+    "crates/route/lite",
+    "crates/route/caveman",
+    "crates/route/rtk",
+    "crates/route/ultra",
+    "crates/route/aggressive",
+    "crates/route/headroom",
+    "crates/route/dedup",
+    "crates/route/ccr",
+    "crates/route/storage",
+    "crates/route/cli",
+    "crates/route/mcp",
+    "crates/route/proxy",
+    "crates/route/benches",
 ]
 
 [workspace.package]
@@ -91,6 +106,21 @@ zstd = "0.13"
 # Error handling
 anyhow = "1"
 thiserror = "2"
+
+# DX-route workspace dependencies
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+clap = { version = "4", features = ["derive", "env"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tiktoken-rs = "0.6"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "request-id"] }
+bytes = "1"
+shellexpand = "3"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 # Internal crates
 dx-core = { path = "crates/dx-core" }

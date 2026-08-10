@@ -1,3 +1,4 @@
 /target
+/token/**/target/
 **/*.rs.bk
 .DS_Store
