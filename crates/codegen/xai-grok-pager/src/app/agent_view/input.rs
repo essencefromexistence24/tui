@@ -717,6 +717,12 @@ impl AgentView {
                             .ai_summarize_area
                             .contains((mouse.column, mouse.row).into()) =>
                     {
+                        if self.dx_ui.diff.view_mode
+                            == crate::dx::diff_view::DiffViewMode::AiSummary
+                        {
+                            self.dx_ui.diff.show_file_tree();
+                            return InputOutcome::Changed;
+                        }
                         let baseline =
                             crate::dx::diff_view::DiffState::latest_agent_message(&self.scrollback);
                         self.dx_ui.diff.begin_ai_summary(baseline);
@@ -814,6 +820,12 @@ impl AgentView {
                     ));
                 }
                 KeyCode::Char('a') => {
+                    if self.dx_ui.diff.view_mode
+                        == crate::dx::diff_view::DiffViewMode::AiSummary
+                    {
+                        self.dx_ui.diff.show_file_tree();
+                        return InputOutcome::Changed;
+                    }
                     let baseline =
                         crate::dx::diff_view::DiffState::latest_agent_message(&self.scrollback);
                     self.dx_ui.diff.begin_ai_summary(baseline);

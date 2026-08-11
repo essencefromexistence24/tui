@@ -4532,7 +4532,10 @@ impl AppView {
         };
         let zdr_blocked_for_draw = self.is_zdr_blocked();
         let has_access = self.has_access();
-        let privacy_banner = self.privacy_banner_should_show();
+        // The privacy upsell is intentionally disabled in the TUI. Keep the
+        // eligibility/settings machinery intact, but never reserve or paint
+        // its banner slot in the welcome/chat surfaces.
+        let privacy_banner = false;
         let voice_available = self.voice_available();
         let voice_on_surface = self.voice_target_on_active_surface();
         let voice_listening = voice_on_surface && self.voice_listening();
@@ -4544,11 +4547,7 @@ impl AppView {
         let dev_fps_rows = self.dev_fps_rows();
         let fps_overlay = self.fps_hud.overlay(dev_fps_rows);
         let foreign_resume_hint = self.foreign_resume_hint().cloned();
-        let privacy_banner_agent = self.privacy_banner_should_show()
-            && !crate::views::announcements::has_critical_session_announcement(
-                &self.active_announcements,
-                &self.hidden_announcement_ids,
-            );
+        let privacy_banner_agent = false;
         let agent_mouse_pos = self.last_mouse_pos;
         let Self {
             active_view,

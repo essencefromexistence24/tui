@@ -232,17 +232,22 @@ impl DiffState {
         self.open = true;
         // Every new visit starts in the ordinary file-tree view. AI Summary is
         // an explicit one-session mode and must not leak into the next visit.
+        self.show_file_tree();
+        self.refresh();
+    }
+
+    pub fn close(&mut self) {
+        self.open = false;
+    }
+
+    pub fn show_file_tree(&mut self) {
         self.view_mode = DiffViewMode::FileTree;
         self.ai_summary_pending = false;
         self.ai_summary_baseline = None;
         self.intents.clear();
         self.selected_intent = 0;
         self.intent_scroll = 0;
-        self.refresh();
-    }
-
-    pub fn close(&mut self) {
-        self.open = false;
+        self.diff_scroll = 0;
     }
 
     pub fn begin_ai_summary(&mut self, baseline: Option<String>) {
@@ -1078,7 +1083,11 @@ fn render_diff_topbar(
     buf: &mut Buffer,
 ) {
     let commit_label = "[ Commit & Push ]";
-    let summary_label = "[ Ai Summarize ]";
+    let summary_label = if state.view_mode == DiffViewMode::AiSummary {
+        "[ Diff Tree ]"
+    } else {
+        "[ Ai Summarize ]"
+    };
     let summary_width = summary_label.chars().count() as u16;
     let commit_width = commit_label.chars().count() as u16;
     let gap = 1u16;
