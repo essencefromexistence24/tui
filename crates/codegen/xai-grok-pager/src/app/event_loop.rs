@@ -1540,6 +1540,7 @@ pub(crate) async fn run(
     let mut acp_peek: Option<AcpClientMessage> = None;
     let (progress_tx, mut progress_rx) =
         tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
+    let mut channel_inbound_rx = crate::views::channel_connect::subscribe_inbound();
 
     // Voice STT pipeline is started lazily on first successful `/voice` (see
     // `VoiceState::ColdStart`), not at launch — avoids background work for users
@@ -2302,6 +2303,37 @@ pub(crate) async fn run(
                     break;
                 }
                 presenter.request(false);
+            }
+
+            Ok(message) = channel_inbound_rx.recv() => {
+                let channel_id = message
+                    .channel_alias
+                    .as_deref()
+                    .map(|alias| format!("{}.{}", message.channel, alias))
+                    .unwrap_or_else(|| message.channel.clone());
+                if let Some(agent_id) = crate::views::channel_connect::session_binding(&channel_id)
+                    && app.agents.contains_key(&agent_id)
+                {
+                    crate::views::channel_connect::bind_session_route(
+                        channel_id.clone(),
+                        message.reply_target.clone(),
+                        agent_id,
+                    );
+                    let previous_view = app.active_view;
+                    app.active_view = crate::app::app_view::ActiveView::Agent(agent_id);
+                    let prompt = format!(
+                        "[{} from {}]\n{}",
+                        channel_id, message.sender, message.content
+                    );
+                    let effects = dispatch::dispatch(Action::SendPrompt(prompt), &mut app);
+                    app.active_view = previous_view;
+                    if process_effects(effects, &mut tasks, &mut app, &progress_tx) {
+                        break;
+                    }
+                    presenter.request(false);
+                } else {
+                    tracing::debug!(channel = %channel_id, "inbound channel message has no TUI session binding");
+                }
             }
 
             // Background update check completed.

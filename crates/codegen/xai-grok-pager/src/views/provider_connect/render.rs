@@ -12,6 +12,7 @@ use crate::views::picker::{self, PickerEntry, PickerRow};
 use super::{ConnectMode, ProviderConnectState, TAB_LABELS};
 
 pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut ProviderConnectState) {
+    super::poll_oauth_job(state);
     let theme = Theme::current();
     let active_tab = state.active_tab.index();
     let cfg = ModalWindowConfig {
@@ -91,6 +92,19 @@ pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut Provide
             state,
             &theme,
         ),
+        ConnectMode::OAuth { provider_id, .. } => {
+            let text = format!(
+                "Connecting {provider_id}…\n\nComplete the verification in your browser.\nThe Agent credential will be stored automatically.\n\nEsc returns after the flow finishes."
+            );
+            Paragraph::new(text)
+                .style(Style::default().fg(theme.text_primary))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded),
+                )
+                .render(content_area, buf);
+        }
     }
 }
 
@@ -223,9 +237,12 @@ fn render_key_input(
     let pn = pvd.map(|p| p.display_name()).unwrap_or(provider_id);
     let free =
         pvd.is_some_and(|p| p.auth_type == "none" || p.auth_type == "optional" || p.free == "true");
+    let refresh_token = pvd.is_some_and(|p| p.auth_type == "oauth_refresh");
 
     let pt = if free {
         format!("{pn} requires no API key. Press Enter to enable.")
+    } else if refresh_token {
+        format!("Paste your OAuth refresh token for {pn}:")
     } else {
         let hint = pvd.map(|p| p.env_key_hint.as_str()).unwrap_or("API_KEY");
         format!("Paste your {hint} for {pn}:")
@@ -250,7 +267,11 @@ fn render_key_input(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(" API Key ")
+                .title(if refresh_token {
+                    " OAuth Refresh Token "
+                } else {
+                    " API Key "
+                })
                 .border_style(Style::default().fg(bc)),
         )
         .render(ch[1], buf);
@@ -276,13 +297,12 @@ pub(crate) fn render_embedded_key_input(
     area: Rect,
     state: &ProviderConnectState,
 ) {
-    if let ConnectMode::KeyInput {
-        provider_id,
-        input_buffer,
-        set_default,
-    } = &state.mode
-    {
-        render_key_input(
+    match &state.mode {
+        ConnectMode::KeyInput {
+            provider_id,
+            input_buffer,
+            set_default,
+        } => render_key_input(
             buf,
             area,
             provider_id,
@@ -290,6 +310,12 @@ pub(crate) fn render_embedded_key_input(
             *set_default,
             state,
             &Theme::current(),
-        );
+        ),
+        ConnectMode::OAuth { provider_id, .. } => Paragraph::new(format!(
+            "Connecting {provider_id}…\n\nComplete the OAuth flow in your browser.\nCredentials will be stored automatically."
+        ))
+        .style(Style::default().fg(Theme::current().text_primary))
+        .render(area, buf),
+        ConnectMode::Browse => {}
     }
 }

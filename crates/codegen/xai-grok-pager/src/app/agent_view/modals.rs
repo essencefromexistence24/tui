@@ -1354,6 +1354,22 @@ impl AgentView {
         &mut self,
         input_method: xai_grok_telemetry::events::ExtensionsInputMethod,
     ) -> InputOutcome {
+        if let Some((kind, alias)) = self.extensions_modal.as_ref().and_then(|state| {
+            (state.active_tab == crate::views::extensions_modal::ExtensionsTab::Connect)
+                .then(|| {
+                    state
+                        .channel_connect
+                        .entries
+                        .get(state.picker_state.selected.saturating_sub(1))
+                        .map(|entry| (entry.kind.to_string(), "default".to_string()))
+                })
+                .flatten()
+        }) {
+            self.log_extensions_modal_action("configure_channel", input_method);
+            return self.execute_modal_button_action(
+                crate::views::extensions_modal::ButtonAction::ConfigureChannel { kind, alias },
+            );
+        }
         if self
             .extensions_modal
             .as_ref()
@@ -1517,6 +1533,7 @@ impl AgentView {
                     state.picker_state.expanded.insert(sel)
                 }
             }
+            crate::views::extensions_modal::ExtensionsTab::Connect => false,
         }
     }
 
@@ -1998,6 +2015,7 @@ impl AgentView {
                             }
                         }
                         ExtensionsTab::Providers => {}
+                        ExtensionsTab::Connect => {}
                     }
                 }
                 InputOutcome::Changed
@@ -2076,6 +2094,190 @@ impl AgentView {
                 if let Some(ref mut state) = self.extensions_modal {
                     state.modal_message = None;
                     state.input = Some(ModalInput::from_specs(command_prefix, fields));
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::OpenChannelConfig => {
+                let path = crate::views::channel_connect::ChannelConnectState::config_path();
+                InputOutcome::Action(Action::SuspendForEditor {
+                    path,
+                    refresh_agents_modal: None,
+                })
+            }
+            ButtonAction::ConfigureChannel { kind, alias } => {
+                match crate::views::channel_connect::ChannelConnectState::setup_fields(
+                    &kind, &alias,
+                ) {
+                    Ok(fields) => {
+                        let paths = fields
+                            .iter()
+                            .map(|field| field.path.clone())
+                            .collect::<Vec<_>>();
+                        let specs = fields
+                            .iter()
+                            .map(|field| crate::views::extensions_modal::FieldSpec {
+                                label: field.label.clone(),
+                                required: false,
+                                placeholder: Some(if field.description.is_empty() {
+                                    format!("{}", field.path)
+                                } else {
+                                    field.description.clone()
+                                }),
+                            })
+                            .collect::<Vec<_>>();
+                        let values = fields
+                            .iter()
+                            .map(|field| field.initial_value.clone())
+                            .collect::<Vec<_>>();
+                        let command_prefix =
+                            format!("channel_config:{kind}:{alias}:{}", paths.join("|"));
+                        if let Some(ref mut state) = self.extensions_modal {
+                            state.input = Some(
+                                crate::views::extensions_modal::ModalInput::from_specs_with_values(
+                                    command_prefix,
+                                    specs,
+                                    &values,
+                                ),
+                            );
+                            state.modal_message = None;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(ref mut state) = self.extensions_modal {
+                            state.modal_message =
+                                Some(crate::views::extensions_modal::ModalMessage::Error(
+                                    error.to_string(),
+                                ));
+                        }
+                    }
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::SaveChannelConfig {
+                kind,
+                alias,
+                fields,
+            } => {
+                match crate::views::channel_connect::ChannelConnectState::save_setup(
+                    &kind, &alias, &fields,
+                ) {
+                    Ok(()) => {
+                        let supervisor = crate::views::channel_connect::start_supervisor();
+                        if let Some(ref mut state) = self.extensions_modal {
+                            state.input = None;
+                            state.channel_connect.refresh();
+                            state.result_notice =
+                                Some(crate::views::extensions_modal::ActionResultNotice {
+                                    message: if supervisor.is_ok() {
+                                        "Channel saved; supervisor started".to_string()
+                                    } else {
+                                        "Channel saved; supervisor failed to start".to_string()
+                                    },
+                                    entry_index: None,
+                                    ticks_remaining: 12,
+                                });
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(ref mut state) = self.extensions_modal {
+                            state.modal_message =
+                                Some(crate::views::extensions_modal::ModalMessage::Error(
+                                    error.to_string(),
+                                ));
+                        }
+                    }
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::StartChannelMessage => {
+                let selected = self
+                    .extensions_modal
+                    .as_ref()
+                    .and_then(|state| {
+                        let index = state.picker_state.selected.saturating_sub(1);
+                        state.channel_connect.entries.get(index)
+                    })
+                    .map(|entry| (entry.kind.to_string(), "default".to_string()));
+                if let Some((kind, alias)) = selected {
+                    if let Some(ref mut state) = self.extensions_modal {
+                        let channel_id = format!("{kind}.{alias}");
+                        state.input = Some(crate::views::extensions_modal::ModalInput::from_specs(
+                            format!("channel_message:{channel_id}"),
+                            vec![
+                                crate::views::extensions_modal::FieldSpec {
+                                    label: "Recipient".into(),
+                                    required: true,
+                                    placeholder: Some("channel/user/chat identifier".into()),
+                                },
+                                crate::views::extensions_modal::FieldSpec {
+                                    label: "Message".into(),
+                                    required: true,
+                                    placeholder: Some("message text".into()),
+                                },
+                            ],
+                        ));
+                        state.modal_message = None;
+                    }
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::BindSelectedChannel => {
+                let selected = self
+                    .extensions_modal
+                    .as_ref()
+                    .and_then(|state| {
+                        let index = state.picker_state.selected.saturating_sub(1);
+                        state.channel_connect.entries.get(index)
+                    })
+                    .map(|entry| format!("{}.default", entry.kind));
+                if let Some(channel_id) = selected {
+                    crate::views::channel_connect::bind_session(
+                        channel_id.clone(),
+                        self.session.id,
+                    );
+                    if let Some(ref mut state) = self.extensions_modal {
+                        state.modal_message =
+                            Some(crate::views::extensions_modal::ModalMessage::Info(format!(
+                                "Bound {channel_id} to this session"
+                            )));
+                    }
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::SendChannelMessage {
+                channel_id,
+                recipient,
+                message,
+            } => {
+                crate::views::channel_connect::send_message_async(channel_id, recipient, message);
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.input = None;
+                    state.channel_connect.refresh();
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::RefreshChannels => {
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.channel_connect.refresh();
+                    state.picker_state.selected = 0;
+                    state.picker_state.scroll_offset = None;
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::StartChannelSupervisor => {
+                let result = crate::views::channel_connect::start_supervisor();
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.channel_connect.refresh();
+                    state.modal_message = result.err().map(|error| {
+                        crate::views::extensions_modal::ModalMessage::Error(error.to_string())
+                    });
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::StopChannelSupervisor => {
+                crate::views::channel_connect::stop_supervisor();
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.channel_connect.refresh();
                 }
                 InputOutcome::Changed
             }

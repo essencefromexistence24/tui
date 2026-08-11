@@ -22,7 +22,7 @@
 
 use anyhow::{Context, Result};
 use chacha20poly1305::aead::{Aead, KeyInit, OsRng};
-use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Key, Nonce};
+use chacha20poly1305::{AeadCore, ChaCha20Poly1305, Nonce};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -63,8 +63,8 @@ impl SecretStore {
         }
 
         let key_bytes = self.load_or_create_key()?;
-        let key = Key::from_slice(&key_bytes);
-        let cipher = ChaCha20Poly1305::new(key);
+        let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+            .map_err(|e| anyhow::Error::msg(format!("Invalid encryption key: {e}")))?;
 
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
         let ciphertext = cipher.encrypt(&nonce, plaintext.as_bytes()).map_err(|e| {
@@ -154,13 +154,16 @@ impl SecretStore {
         );
 
         let (nonce_bytes, ciphertext) = blob.split_at(NONCE_LEN);
-        let nonce = Nonce::from_slice(nonce_bytes);
+        let nonce_bytes: [u8; NONCE_LEN] = nonce_bytes
+            .try_into()
+            .map_err(|_| anyhow::Error::msg("Invalid encrypted secret nonce"))?;
+        let nonce = Nonce::from(nonce_bytes);
         let key_bytes = self.load_or_create_key()?;
-        let key = Key::from_slice(&key_bytes);
-        let cipher = ChaCha20Poly1305::new(key);
+        let cipher = ChaCha20Poly1305::new_from_slice(&key_bytes)
+            .map_err(|e| anyhow::Error::msg(format!("Invalid encryption key: {e}")))?;
 
         let plaintext_bytes = cipher
-            .decrypt(nonce, ciphertext)
+            .decrypt(&nonce, ciphertext)
             .map_err(|e| {
                 ::zeroclaw_log::record!(ERROR, ::zeroclaw_log::Event::new(module_path!(), ::zeroclaw_log::Action::Fail).with_outcome(::zeroclaw_log::EventOutcome::Failure).with_attrs(::serde_json::json!({"key_path": self.key_path.display().to_string(), "error": format!("{e}")})), "enc2: decryption failed. `.secret_key` is missing or does not match the key used to encrypt this value. \
                      Common cause: volume wipe, container migration, or backup-restore where `.secret_key` was not preserved alongside `config.toml`. \

@@ -455,6 +455,7 @@ fn extensions_tab_slash_name(tab: crate::views::extensions_modal::ExtensionsTab)
         ExtensionsTab::Skills => "skills",
         ExtensionsTab::McpServers => "mcps",
         ExtensionsTab::Providers => "providers",
+        ExtensionsTab::Connect => "connect",
     }
 }
 

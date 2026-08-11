@@ -2962,7 +2962,11 @@ impl PromptWidget {
         let info_block = style.info_block(info.is_some());
         // Always reserve 1 row for the top divider (╭─╮) when borders are on,
         // even if vpad_top would collapse it to 0.
-        let top_h = if style.chrome && style.show_borders { 1u16.max(vpad_top) } else { vpad_top };
+        let top_h = if style.chrome && style.show_borders {
+            1u16.max(vpad_top)
+        } else {
+            vpad_top
+        };
         let chunks = Layout::vertical([
             Constraint::Length(top_h),
             Constraint::Min(1),
@@ -3441,10 +3445,7 @@ impl PromptWidget {
             ));
             left_spans.push(Span::styled(" · ", sep_style));
         }
-        left_spans.push(Span::styled(
-            info.model_name.replace('-', " "),
-            model_style,
-        ));
+        left_spans.push(Span::styled(info.model_name.replace('-', " "), model_style));
         for flag in info.flags {
             left_spans.push(Span::styled(" · ", sep_style));
             let mut style = if let Some(color) = flag.color {
@@ -3467,10 +3468,7 @@ impl PromptWidget {
             if flag.bold {
                 style = style.add_modifier(Modifier::BOLD);
             }
-            left_spans.push(Span::styled(
-                flag.text.replace('-', " "),
-                style,
-            ));
+            left_spans.push(Span::styled(flag.text.replace('-', " "), style));
         }
         // No trailing pad — the dot separator touches the model name directly
         // so both sides of '·' have the same (zero) gap.

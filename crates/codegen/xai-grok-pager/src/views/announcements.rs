@@ -666,7 +666,12 @@ fn render_promo_row(
     // used to paint here. Upgrade CTA disabled: the button and its caption are
     // suppressed (the promo row keeps its hide affordances but paints no
     // upgrade button).
-    let _ = (cta_hovered, caption_allowed, usable_cta_caption, render_cta_button);
+    let _ = (
+        cta_hovered,
+        caption_allowed,
+        usable_cta_caption,
+        render_cta_button,
+    );
 
     hits
 }
@@ -1559,8 +1564,14 @@ mod tests {
 
         let row0 = buf_row(&buf, area, 0);
         assert!(!row0.contains("hide:"), "row0={row0:?}");
-        assert!(row0.ends_with(HIDE_BUTTON) || row0.is_empty(), "row0={row0:?}");
-        assert!(!row0.starts_with("[Go]"), "upgrade CTA disabled; row0={row0:?}");
+        assert!(
+            row0.ends_with(HIDE_BUTTON) || row0.is_empty(),
+            "row0={row0:?}"
+        );
+        assert!(
+            !row0.starts_with("[Go]"),
+            "upgrade CTA disabled; row0={row0:?}"
+        );
         assert_eq!(hits.hide, Some(Rect::new(14, 0, 6, 1)));
     }
 }

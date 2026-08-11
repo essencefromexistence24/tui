@@ -483,7 +483,14 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             http_status,
             prompt_id,
-        } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        } => {
+            let succeeded = result.is_ok();
+            let effects = handle_prompt_response(app, agent_id, result, http_status, prompt_id);
+            if succeeded {
+                crate::views::channel_connect::send_latest_response_async(app, agent_id);
+            }
+            effects
+        }
         TaskResult::SendPromptNowFailed {
             agent_id,
             session_id,

@@ -561,6 +561,8 @@ impl CopilotModelProvider {
         let expires_in = response.expires_in.max(1);
         let expires_at = tokio::time::Instant::now() + Duration::from_secs(expires_in);
 
+        open_verification_uri(&response.verification_uri);
+
         eprintln!(
             "\nGitHub Copilot authentication is required.\n\
              Visit: {}\n\
@@ -606,6 +608,13 @@ impl CopilotModelProvider {
         anyhow::bail!("Timed out waiting for GitHub authorization")
     }
 
+    /// Run the Copilot device flow for interactive frontends such as the DX
+    /// provider menu. The model provider itself remains responsible for
+    /// caching and exchanging the token during normal request handling.
+    pub async fn device_code_login_for_frontend(&self) -> anyhow::Result<String> {
+        self.device_code_login().await
+    }
+
     /// Exchange a GitHub access token for a Copilot API key.
     async fn exchange_for_api_key(&self, access_token: &str) -> anyhow::Result<ApiKeyInfo> {
         let mut request = self.http_client().get(GITHUB_API_KEY_URL);
@@ -647,6 +656,23 @@ impl CopilotModelProvider {
         if let Ok(json) = serde_json::to_string_pretty(info) {
             write_file_secure(&path, &json).await;
         }
+    }
+}
+
+fn open_verification_uri(url: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }
 

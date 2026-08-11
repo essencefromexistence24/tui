@@ -145,6 +145,14 @@ members = [
     "crates/common/xai-tool-runtime",
     "crates/common/xai-tool-types",
     "crates/common/xai-tracing",
+    "crates/common/agent/aardvark-sys",
+    "crates/common/agent/zeroclaw-api",
+    "crates/common/agent/zeroclaw-config",
+    "crates/common/agent/zeroclaw-channels",
+    "crates/common/agent/zeroclaw-log",
+    "crates/common/agent/zeroclaw-macros",
+    "crates/common/agent/zeroclaw-providers",
+    "crates/common/agent/zeroclaw-spawn",
     "prod/mc/cli-chat-proxy-types",
     "third_party/dagre_rust",
     "third_party/graphlib_rust",
@@ -164,6 +172,27 @@ homepage = "https://github.com/xai-org/grok-cli"
 rust-version = "1.85"
 
 [workspace.dependencies]
+zeroclaw-api = { path = "crates/common/agent/zeroclaw-api", version = "1.0.0" }
+zeroclaw-infra = { path = "crates/common/agent/zeroclaw-infra", version = "1.0.0" }
+zeroclaw-config = { path = "crates/common/agent/zeroclaw-config", version = "1.0.0", default-features = false }
+zeroclaw-channels = { path = "crates/common/agent/zeroclaw-channels", version = "1.0.0", default-features = false }
+zeroclaw-log = { path = "crates/common/agent/zeroclaw-log", version = "1.0.0" }
+zeroclaw-spawn = { path = "crates/common/agent/zeroclaw-spawn", version = "1.0.0" }
+zeroclaw-commands = { path = "crates/common/agent/zeroclaw-commands", version = "1.0.0" }
+zeroclaw-providers = { path = "crates/common/agent/zeroclaw-providers", version = "1.0.0" }
+zeroclaw-memory = { path = "crates/common/agent/zeroclaw-memory", version = "1.0.0" }
+zeroclaw-tools = { path = "crates/common/agent/zeroclaw-tools", version = "1.0.0" }
+zeroclaw-sop-graph = { path = "crates/common/agent/zeroclaw-sop-graph", version = "1.0.0", default-features = false }
+zeroclaw-runtime = { path = "crates/common/agent/zeroclaw-runtime", version = "1.0.0", default-features = false }
+zeroclaw-eval = { path = "crates/common/agent/zeroclaw-eval", version = "1.0.0" }
+zeroclaw-plugins = { path = "crates/common/agent/zeroclaw-plugins", version = "1.0.0" }
+zeroclaw-gateway = { path = "crates/common/agent/zeroclaw-gateway", version = "1.0.0" }
+zeroclaw-hardware = { path = "crates/common/agent/zeroclaw-hardware", version = "1.0.0" }
+zeroclaw-tool-call-parser = { path = "crates/common/agent/zeroclaw-tool-call-parser", version = "1.0.0" }
+zeroclaw-macros = { path = "crates/common/agent/zeroclaw-macros", version = "1.0.0" }
+zeroclaw-robot-kit = { path = "crates/common/agent/robot-kit", version = "0.1.0" }
+aardvark-sys = { path = "crates/common/agent/aardvark-sys", version = "0.1.0" }
+sys-locale = "0.3"
 dx-core = { package = "dx-token-core", path = "crates/common/token/core" }
 dx-route-core = { path = "crates/common/token/route/core" }
 dx-route-lite = { path = "crates/common/token/route/lite" }
@@ -193,7 +222,7 @@ hashbrown = { version = "0.16.1", features = ["serde"] }
 lru = "0.16.3"
 memchr = "2.7"
 mlua = { version = "0.11.6", features = ["lua54", "serialize", "macros", "async", "anyhow"] }
-objc2 = "0.6.4"
+objc2 = "0.6.3"
 ordered-float = { version = "5.1.0", features = ["serde"] }
 paste = "1.0"
 percent-encoding = "2.3"
@@ -204,7 +233,7 @@ twox-hash = "2.0"
 typed-path = "0.12.3"
 uzers = "0.12"
 vergen-gitcl = { version = "9.1.0", default-features = false, features = ["build", "cargo"] }
-rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 anstyle-lossy = "1.1.4"
 anstyle-parse = "0.2"
 anstyle-syntect = "1.0.4"

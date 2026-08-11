@@ -493,6 +493,7 @@ pub enum ExtensionsTab {
     Skills,
     McpServers,
     Providers,
+    Connect,
 }
 
 impl ExtensionsTab {
@@ -504,6 +505,7 @@ impl ExtensionsTab {
         Self::Skills,
         Self::McpServers,
         Self::Providers,
+        Self::Connect,
     ];
 
     /// Display label for the tab bar.
@@ -515,6 +517,7 @@ impl ExtensionsTab {
             Self::Skills => "Skills",
             Self::McpServers => "MCP Servers",
             Self::Providers => "Providers",
+            Self::Connect => "Connect",
         }
     }
 
@@ -526,18 +529,20 @@ impl ExtensionsTab {
             Self::Marketplace => Self::Skills,
             Self::Skills => Self::McpServers,
             Self::McpServers => Self::Providers,
-            Self::Providers => Self::Hooks,
+            Self::Providers => Self::Connect,
+            Self::Connect => Self::Hooks,
         }
     }
     /// Previous tab (wraps around).
     pub fn prev(self) -> Self {
         match self {
-            Self::Hooks => Self::Providers,
+            Self::Hooks => Self::Connect,
             Self::Plugins => Self::Hooks,
             Self::Marketplace => Self::Plugins,
             Self::Skills => Self::Marketplace,
             Self::McpServers => Self::Skills,
             Self::Providers => Self::McpServers,
+            Self::Connect => Self::Providers,
         }
     }
 
@@ -550,6 +555,7 @@ impl ExtensionsTab {
             Self::Skills => ExtensionsModalTab::Skills,
             Self::McpServers => ExtensionsModalTab::McpServers,
             Self::Providers => ExtensionsModalTab::Providers,
+            Self::Connect => ExtensionsModalTab::Providers,
         }
     }
 }
@@ -647,6 +653,34 @@ pub enum ButtonAction {
     ToggleExpand,
     /// Cycle the status filter (All → Enabled → Disabled → All).
     CycleFilter,
+    /// Open the ZeroClaw channel configuration in the user's editor.
+    OpenChannelConfig,
+    /// Open the schema-driven setup form for one channel type.
+    ConfigureChannel {
+        kind: String,
+        alias: String,
+    },
+    /// Persist a schema-driven channel setup form.
+    SaveChannelConfig {
+        kind: String,
+        alias: String,
+        fields: Vec<(String, String)>,
+    },
+    SendChannelMessage {
+        channel_id: String,
+        recipient: String,
+        message: String,
+    },
+    /// Open the outbound message form for the selected channel.
+    StartChannelMessage,
+    /// Bind the selected channel to the current TUI session.
+    BindSelectedChannel,
+    /// Reload the canonical ZeroClaw channel registry and configuration state.
+    RefreshChannels,
+    /// Start the cancellable ZeroClaw channel supervisor.
+    StartChannelSupervisor,
+    /// Stop the cancellable ZeroClaw channel supervisor.
+    StopChannelSupervisor,
     /// Enter input mode: show an inline form so the user can type arguments,
     /// then submit the full command on Enter.
     StartInput {
@@ -756,6 +790,22 @@ impl ModalInput {
             focused: 0,
             error: None,
         }
+    }
+
+    /// Build a form and prefill only non-secret values from the typed config
+    /// schema. Secret fields are intentionally passed as empty values.
+    pub fn from_specs_with_values(
+        command_prefix: String,
+        specs: Vec<FieldSpec>,
+        values: &[String],
+    ) -> Self {
+        let mut input = Self::from_specs(command_prefix, specs);
+        for (field, value) in input.fields.iter_mut().zip(values) {
+            if !value.is_empty() {
+                field.set_text(value.clone());
+            }
+        }
+        input
     }
 
     pub fn fields(&self) -> &[ModalInputField] {
@@ -1037,6 +1087,7 @@ pub enum ConfirmationAction {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModalMessage {
     Error(String),
+    Info(String),
     Confirmation {
         message: String,
         action: ConfirmationAction,
@@ -1135,6 +1186,14 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
         ExtensionsTab::Skills => vec![(' ', "toggle"), ('f', "filter"), ('r', "reload")],
         ExtensionsTab::McpServers => MCP_SERVERS_ACTION_KEYS.to_vec(),
         ExtensionsTab::Providers => vec![('f', "category")],
+        ExtensionsTab::Connect => vec![
+            ('r', "reload"),
+            ('e', "edit config"),
+            ('s', "start"),
+            ('x', "stop"),
+            ('m', "message"),
+            ('b', "bind session"),
+        ],
     }
 }
 
@@ -1269,6 +1328,7 @@ fn selected_item_enabled_at(
         },
         ExtensionsTab::Marketplace => None,
         ExtensionsTab::Providers => None,
+        ExtensionsTab::Connect => Some(true),
     }
 }
 
@@ -1386,6 +1446,12 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::Plugins, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::McpServers, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::Providers, 'f') => Some(ButtonAction::CycleFilter),
+        (ExtensionsTab::Connect, 'r') => Some(ButtonAction::RefreshChannels),
+        (ExtensionsTab::Connect, 'e') => Some(ButtonAction::OpenChannelConfig),
+        (ExtensionsTab::Connect, 's') => Some(ButtonAction::StartChannelSupervisor),
+        (ExtensionsTab::Connect, 'x') => Some(ButtonAction::StopChannelSupervisor),
+        (ExtensionsTab::Connect, 'm') => Some(ButtonAction::StartChannelMessage),
+        (ExtensionsTab::Connect, 'b') => Some(ButtonAction::BindSelectedChannel),
         _ => None,
     }
 }
@@ -1533,6 +1599,35 @@ pub fn build_action_from_input(
     use xai_hooks_plugins_types::{HooksAction, PluginsAction};
 
     let first = field_texts.first().map(|s| s.trim()).unwrap_or("");
+
+    if let Some(rest) = command_prefix.strip_prefix("channel_config:") {
+        let mut parts = rest.splitn(3, ':');
+        let kind = parts.next()?;
+        let alias = parts.next()?;
+        let paths = parts.next()?.split('|');
+        let fields = paths
+            .zip(field_texts.iter())
+            .map(|(path, value)| (path.to_string(), value.to_string()))
+            .collect::<Vec<_>>();
+        return Some(ButtonAction::SaveChannelConfig {
+            kind: kind.to_string(),
+            alias: alias.to_string(),
+            fields,
+        });
+    }
+
+    if let Some(channel_id) = command_prefix.strip_prefix("channel_message:") {
+        let recipient = field_texts.get(0)?.trim();
+        let message = field_texts.get(1)?.trim();
+        if recipient.is_empty() || message.is_empty() {
+            return None;
+        }
+        return Some(ButtonAction::SendChannelMessage {
+            channel_id: channel_id.to_string(),
+            recipient: recipient.to_string(),
+            message: message.to_string(),
+        });
+    }
 
     match command_prefix {
         "plugins_install" => Some(ButtonAction::PluginsAction(PluginsAction::Install {
@@ -1761,6 +1856,8 @@ pub struct ExtensionsModalState {
     pub mcps_section_collapse_initialized: bool,
     /// Provider catalog and credential form reused from `/connect`.
     pub provider_connect: crate::views::provider_connect::ProviderConnectState,
+    /// ZeroClaw's real messaging-channel inventory and readiness state.
+    pub channel_connect: crate::views::channel_connect::ChannelConnectState,
     /// Maps visible row offset to skill index (for mouse click).
     pub skills_visible_map: Vec<Option<usize>>,
     pub hooks_collapsed_groups: std::collections::HashSet<String>,
@@ -1853,6 +1950,7 @@ impl ExtensionsModalState {
             mcps_collapsed_sections: std::collections::HashSet::new(),
             mcps_section_collapse_initialized: false,
             provider_connect: crate::views::provider_connect::ProviderConnectState::new(),
+            channel_connect: crate::views::channel_connect::ChannelConnectState::new(),
             skills_visible_map: Vec::new(),
             skills_expanded: std::collections::HashSet::new(),
             skills_collapsed_groups: std::collections::HashSet::new(),
@@ -1903,6 +2001,9 @@ impl ExtensionsModalState {
             self.provider_connect.error_message = None;
         }
         self.active_tab = tab;
+        if self.active_tab == ExtensionsTab::Connect {
+            self.channel_connect.refresh();
+        }
         // Clear modal flow state from the previous tab.
         self.input = None;
         self.mcp_setup = None;
@@ -2008,6 +2109,7 @@ impl ExtensionsModalState {
                 }
             }
             ExtensionsTab::Providers => self.picker_state.expanded.contains(&sel),
+            ExtensionsTab::Connect => false,
         }
     }
 
@@ -2596,6 +2698,10 @@ pub fn render_extensions_modal(
 ) {
     let theme = Theme::current();
 
+    if state.active_tab == ExtensionsTab::Connect {
+        state.channel_connect.supervisor = crate::views::channel_connect::supervisor_status();
+    }
+
     // Guard: if terminal is too small, bail.
     if full_area.width < 40 || full_area.height < 12 {
         state.button_areas.clear();
@@ -2644,6 +2750,7 @@ pub fn render_extensions_modal(
         ExtensionsTab::Skills => matches!(state.skills_data, TabDataState::Loading),
         ExtensionsTab::McpServers => matches!(state.mcps_data, TabDataState::Loading),
         ExtensionsTab::Providers => false,
+        ExtensionsTab::Connect => false,
     };
 
     // Input mode hides the entry list (form overlay owns the content area).
@@ -2651,6 +2758,7 @@ pub fn render_extensions_modal(
         && matches!(
             state.provider_connect.mode,
             crate::views::provider_connect::ConnectMode::KeyInput { .. }
+                | crate::views::provider_connect::ConnectMode::OAuth { .. }
         );
     let in_input_mode = state.input.is_some() || state.mcp_setup.is_some() || provider_input_mode;
 
@@ -2697,6 +2805,84 @@ pub fn render_extensions_modal(
                     entry_group_keys.push(None);
                     entry_badge_text.push(data.badges[i].to_string());
                     entry_badge_color.push(data.badge_colors[i]);
+                }
+            }
+            ExtensionsTab::Connect => {
+                let supervisor = &state.channel_connect.supervisor;
+                let supervisor_label = match supervisor.phase {
+                    crate::views::channel_connect::SupervisorPhase::Stopped => "Stopped",
+                    crate::views::channel_connect::SupervisorPhase::Starting => "Starting",
+                    crate::views::channel_connect::SupervisorPhase::Running => "Running",
+                    crate::views::channel_connect::SupervisorPhase::Failed => "Failed",
+                };
+                entry_labels.push("Channel supervisor".to_string());
+                entry_right_labels.push(supervisor_label.to_string());
+                entry_desc_lines.push(vec![
+                    supervisor
+                        .message
+                        .as_deref()
+                        .unwrap_or(if supervisor.qr_payload.is_some() {
+                            "QR pairing is ready below"
+                        } else {
+                            "Manages all configured ZeroClaw messaging channels"
+                        })
+                        .to_string(),
+                ]);
+                let mut supervisor_summary = vec!["s start · x stop · r reload".to_string()];
+                if let Some(payload) = supervisor.qr_payload.as_deref() {
+                    supervisor_summary.push(format!(
+                        "QR {}: {}",
+                        supervisor.qr_channel.as_deref().unwrap_or("channel"),
+                        payload
+                    ));
+                }
+                if let Some(outbound) = state.channel_connect.outbound_status.as_deref() {
+                    supervisor_summary.push(outbound.to_string());
+                }
+                entry_summary_lines.push(supervisor_summary);
+                entry_fields.push(Vec::new());
+                entry_is_header.push(true);
+                entry_dimmed.push(false);
+                entry_indent.push(0);
+                entry_data_indices.push(None);
+                entry_group_keys.push(None);
+                entry_badge_text.push(String::new());
+                entry_badge_color.push(None);
+                for (idx, channel) in state.channel_connect.entries.iter().enumerate() {
+                    entry_labels.push(channel.name.to_string());
+                    entry_right_labels.push(if channel.configured {
+                        "Configured".to_string()
+                    } else {
+                        "Not configured".to_string()
+                    });
+                    entry_desc_lines.push(vec![channel.description.to_string()]);
+                    entry_summary_lines.push(vec![format!("type: {}", channel.kind)]);
+                    entry_fields.push(Vec::new());
+                    entry_is_header.push(false);
+                    entry_dimmed.push(!channel.configured);
+                    entry_indent.push(0);
+                    entry_data_indices.push(Some(idx));
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(if channel.configured {
+                        "Ready".to_string()
+                    } else {
+                        "Setup".to_string()
+                    });
+                    entry_badge_color.push(None);
+                }
+                if let Some(error) = &state.channel_connect.error {
+                    entry_labels.push("Channel registry error".to_string());
+                    entry_right_labels.push(String::new());
+                    entry_desc_lines.push(vec![error.clone()]);
+                    entry_summary_lines.push(Vec::new());
+                    entry_fields.push(Vec::new());
+                    entry_is_header.push(true);
+                    entry_dimmed.push(true);
+                    entry_indent.push(0);
+                    entry_data_indices.push(None);
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(String::new());
+                    entry_badge_color.push(None);
                 }
             }
             ExtensionsTab::Skills => {
@@ -3450,7 +3636,7 @@ pub fn render_extensions_modal(
     // would not split correctly through the default Shortcut renderer.
     // The overlay above is shortened to leave the footer line visible.
     let modal_msg_kind = state.modal_message.as_ref().map(|m| match m {
-        ModalMessage::Error(_) => ModalMsgKind::Error,
+        ModalMessage::Error(_) | ModalMessage::Info(_) => ModalMsgKind::Error,
         ModalMessage::Confirmation { .. } => ModalMsgKind::Confirm,
     });
     let mut shortcuts: Vec<Shortcut<'_>> = Vec::new();
@@ -3850,6 +4036,7 @@ pub fn render_extensions_modal(
     if let Some(ref msg) = state.modal_message {
         let (text, fg) = match msg {
             ModalMessage::Error(e) => (e.as_str(), theme.accent_error),
+            ModalMessage::Info(e) => (e.as_str(), theme.accent_success),
             ModalMessage::Confirmation { message, .. } => (message.as_str(), theme.accent_tool),
         };
         if let Some(popup_rect) = state.window.popup_area {
@@ -4321,6 +4508,15 @@ mod tests {
                 ],
             ),
             (ExtensionsTab::Providers, &[('f', "category")]),
+            (
+                ExtensionsTab::Connect,
+                &[
+                    ('r', "reload"),
+                    ('e', "edit_config"),
+                    ('s', "start"),
+                    ('x', "stop"),
+                ],
+            ),
         ];
         assert_eq!(expected.len(), ExtensionsTab::ALL.len());
         for &(tab, pairs) in expected {
@@ -5263,12 +5459,14 @@ mod tests {
         assert_eq!(ExtensionsTab::Marketplace.next(), ExtensionsTab::Skills);
         assert_eq!(ExtensionsTab::Skills.next(), ExtensionsTab::McpServers);
         assert_eq!(ExtensionsTab::McpServers.next(), ExtensionsTab::Providers);
-        assert_eq!(ExtensionsTab::Providers.next(), ExtensionsTab::Hooks);
+        assert_eq!(ExtensionsTab::Providers.next(), ExtensionsTab::Connect);
+        assert_eq!(ExtensionsTab::Connect.next(), ExtensionsTab::Hooks);
     }
 
     #[test]
     fn tab_prev_wraps_around() {
-        assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::Providers);
+        assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::Connect);
+        assert_eq!(ExtensionsTab::Connect.prev(), ExtensionsTab::Providers);
         assert_eq!(ExtensionsTab::Providers.prev(), ExtensionsTab::McpServers);
         assert_eq!(ExtensionsTab::McpServers.prev(), ExtensionsTab::Skills);
         assert_eq!(ExtensionsTab::Skills.prev(), ExtensionsTab::Marketplace);
@@ -5278,7 +5476,7 @@ mod tests {
 
     #[test]
     fn tab_all_contains_six_tabs() {
-        assert_eq!(ExtensionsTab::ALL.len(), 6);
+        assert_eq!(ExtensionsTab::ALL.len(), 7);
     }
 
     // ── Modal state init ────────────────────────────────────────────

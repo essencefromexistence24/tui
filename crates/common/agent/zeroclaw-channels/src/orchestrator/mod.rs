@@ -7467,10 +7467,20 @@ fn resolve_effective_debounce_window(
     std::time::Duration::from_millis(per_channel_ms.unwrap_or(global_ms))
 }
 
+#[cfg(test)]
 async fn run_message_dispatch_loop(
+    rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
+    router: AgentRouter,
+    max_in_flight_messages: usize,
+) {
+    run_message_dispatch_loop_with_ingress(rx, router, max_in_flight_messages, None).await;
+}
+
+async fn run_message_dispatch_loop_with_ingress(
     mut rx: tokio::sync::mpsc::Receiver<zeroclaw_api::channel::ChannelMessage>,
     router: AgentRouter,
     max_in_flight_messages: usize,
+    ingress: Option<Arc<dyn Fn(zeroclaw_api::channel::ChannelMessage) + Send + Sync>>,
 ) {
     let semaphore = Arc::new(tokio::sync::Semaphore::new(max_in_flight_messages));
     let mut workers = tokio::task::JoinSet::new();
@@ -7481,6 +7491,10 @@ async fn run_message_dispatch_loop(
     let task_sequence = Arc::new(AtomicU64::new(1));
 
     while let Some(msg) = rx.recv().await {
+        if let Some(ingress) = ingress.as_ref() {
+            ingress(msg);
+            continue;
+        }
         // Gate answers (button-click markers / `approve <ref>` text replies)
         // resolve a PARKED run and must never start one, so they are consumed
         // BEFORE agent ownership lookup. A configured approval route may be
@@ -11103,6 +11117,20 @@ pub async fn start_channels(
     sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
     sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
 ) -> Result<()> {
+    start_channels_with_ingress(config, canvas_store, cancel, sop_engine, sop_audit, None).await
+}
+
+/// Start configured listeners and hand inbound messages to an embedding host.
+/// The host owns the agent session and provider/tool lifecycle.
+#[allow(clippy::too_many_lines)]
+pub async fn start_channels_with_ingress(
+    config: Config,
+    canvas_store: Option<zeroclaw_runtime::tools::CanvasStore>,
+    cancel: tokio_util::sync::CancellationToken,
+    sop_engine: Option<Arc<std::sync::Mutex<zeroclaw_runtime::sop::SopEngine>>>,
+    sop_audit: Option<Arc<zeroclaw_runtime::sop::SopAuditLogger>>,
+    ingress: Option<Arc<dyn Fn(zeroclaw_api::channel::ChannelMessage) + Send + Sync>>,
+) -> Result<()> {
     let config_arc = Arc::new(RwLock::new(config));
     let config: Config = config_arc.read().clone();
     let any_agent_provider_resolves = config
@@ -11860,7 +11888,7 @@ pub async fn start_channels(
     let rx = rx_holder.expect("rx initialized by first agent's channel setup");
     let max_in_flight =
         max_in_flight_messages.expect("max_in_flight initialized by first agent's channel setup");
-    run_message_dispatch_loop(rx, router, max_in_flight).await;
+    run_message_dispatch_loop_with_ingress(rx, router, max_in_flight, ingress).await;
 
     for h in listener_handles {
         let _ = h.await;

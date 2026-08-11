@@ -85,7 +85,10 @@ zeroclaw-macros.workspace = true
 prometheus = { version = "0.14", default-features = false, optional = true }
 opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics"], optional = true }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics"], optional = true }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client", "reqwest-rustls-webpki-roots"], optional = true }
+# reqwest 0.13 removed the old `webpki-roots` feature name. The blocking
+# client is sufficient for OTLP HTTP here; gRPC TLS roots remain provided by
+# the separate tonic TLS feature below.
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client"], optional = true }
 # Optional deps for specific features
 
 [target.'cfg(target_os = "linux")'.dependencies]

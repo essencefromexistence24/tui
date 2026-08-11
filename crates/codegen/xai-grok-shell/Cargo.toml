@@ -49,10 +49,10 @@ regex = { workspace = true }
 xai-grok-mcp = { workspace = true }
 reqwest = { workspace = true, features = ["stream", "blocking"] }
 reqwest-middleware = { workspace = true }
-# rusqlite 0.37 + bundled = self-contained SQLite (>= 3.50.2) with FTS5.
+# Workspace rusqlite + bundled = self-contained SQLite with FTS5.
 # Bumped from 0.32 to resolve CVE-2025-29087, CVE-2025-3277, CVE-2025-6965.
 # sqlite-vec is C ABI, not Rust-version dependent — any rusqlite with `bundled` works.
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 serde_ignored = "0.1"
 serde_json = { workspace = true, features = ["preserve_order"] }

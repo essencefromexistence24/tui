@@ -21,6 +21,7 @@ pub fn handle_provider_connect_key(
     state: &mut ProviderConnectState,
     key: KeyEvent,
 ) -> ConnectOutcome {
+    super::poll_oauth_job(state);
     match &state.mode.clone() {
         ConnectMode::Browse => handle_browse_key(state, key),
         ConnectMode::KeyInput {
@@ -29,6 +30,7 @@ pub fn handle_provider_connect_key(
             set_default,
             ..
         } => handle_key_input(state, key, provider_id, input_buffer, *set_default),
+        ConnectMode::OAuth { .. } => ConnectOutcome::Unchanged,
     }
 }
 
@@ -140,6 +142,19 @@ pub(crate) fn handle_selection(
     cat.sort_by(|a, b| a.display_name().cmp(b.display_name()));
 
     if let Some(p) = cat.get(prov_n) {
+        if p.auth_type == "oauth" {
+            if let Some(job) = super::start_oauth_job(&p.id) {
+                state.mode = ConnectMode::OAuth {
+                    provider_id: p.id.clone(),
+                    job,
+                };
+                state.status_message = Some(format!("Starting {} OAuth…", p.display_name()));
+                state.error_message = None;
+            } else {
+                state.error_message = Some("OAuth flow is unavailable for this provider.".into());
+            }
+            return ConnectOutcome::Unchanged;
+        }
         state.mode = ConnectMode::KeyInput {
             provider_id: p.id.clone(),
             input_buffer: String::new(),

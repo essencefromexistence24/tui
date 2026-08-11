@@ -6,6 +6,7 @@ pub mod announcements;
 pub mod block_viewer;
 pub mod bottom_chrome;
 pub mod btw_overlay;
+pub mod channel_connect;
 pub mod completion_dropdown;
 pub mod context_bar;
 pub mod credit_bar;

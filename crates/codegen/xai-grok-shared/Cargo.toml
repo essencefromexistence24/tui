@@ -36,7 +36,7 @@ libc = { workspace = true }
 # load it — preserving the no-AppKit-link rule in clipboard.rs. Version
 # matches the workspace lock.
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6.3"
+objc2 = { workspace = true }
 
 # arboard for clipboard on non-macOS platforms. On macOS we use pbcopy/pbpaste
 # subprocesses to avoid linking AppKit, which causes ~2 GB IOAccelerator GPU
