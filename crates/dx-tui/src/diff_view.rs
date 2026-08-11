@@ -96,6 +96,16 @@ pub struct DiffIntent {
     pub title: String,
     pub summary: String,
     pub file_indices: Vec<usize>,
+    /// Exact changed sections represented by this intent. Keeping section
+    /// identity prevents unrelated hunks in the same file from being shown
+    /// under every intent.
+    pub sections: Vec<DiffIntentSection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffIntentSection {
+    pub file_index: usize,
+    pub section_index: usize,
 }
 
 /// Tree node for the left file browser.
@@ -202,7 +212,7 @@ impl DiffState {
                 self.files = files;
                 self.tree = build_tree(&self.files);
                 if self.view_mode == DiffViewMode::AiSummary {
-                    self.intents = build_local_intents(&self.files);
+                    self.intents = build_diff_intents(&self.files);
                     self.selected_intent =
                         self.selected_intent.min(self.intents.len().saturating_sub(1));
                 }
@@ -254,7 +264,7 @@ impl DiffState {
         self.view_mode = DiffViewMode::AiSummary;
         self.ai_summary_pending = true;
         self.ai_summary_baseline = baseline;
-        self.intents = build_local_intents(&self.files);
+        self.intents = build_diff_intents(&self.files);
         self.selected_intent = 0;
         self.intent_scroll = 0;
         self.diff_scroll = 0;
@@ -293,7 +303,14 @@ impl DiffState {
         if intents.is_empty() {
             return;
         }
-        self.intents = intents;
+        self.intents = if intents.len() == 1 && total_diff_sections(&self.files) > 1 {
+            // A single broad model block is not useful as an intent view when
+            // the diff contains multiple independent hunks. Use the actual
+            // changed sections as content-based intents in that case.
+            build_diff_intents(&self.files)
+        } else {
+            attach_intent_sections(intents, &self.files)
+        };
         self.ai_summary_pending = false;
         self.ai_summary_baseline = Some(text);
         self.selected_intent = self.selected_intent.min(self.intents.len().saturating_sub(1));
@@ -485,12 +502,30 @@ impl DiffState {
     }
 
     fn selected_intent_rows(&self) -> Vec<(usize, Vec<DiffDisplayRow>)> {
-        self.selected_intent_files()
+        let Some(intent) = self.intents.get(self.selected_intent) else {
+            return Vec::new();
+        };
+        if intent.sections.is_empty() {
+            return intent
+                .file_indices
+                .iter()
+                .filter_map(|&file_index| {
+                    self.files
+                        .get(file_index)
+                        .map(|file| (file_index, change_section_rows(&file.patch, 3)))
+                })
+                .collect();
+        }
+        intent
+            .sections
             .iter()
-            .filter_map(|&file_index| {
-                self.files
-                    .get(file_index)
-                    .map(|file| (file_index, change_section_rows(&file.patch, 3)))
+            .filter_map(|section| {
+                self.files.get(section.file_index).and_then(|file| {
+                    change_section_groups(&file.patch, 3)
+                        .into_iter()
+                        .nth(section.section_index)
+                        .map(|rows| (section.file_index, rows))
+                })
             })
             .collect()
     }
@@ -919,7 +954,7 @@ pub fn render_diff_view(state: &mut DiffState, theme: &ChatTheme, area: Rect, bu
     Paragraph::new(Span::styled(footer, Style::default().fg(theme.border))).render(chunks[2], buf);
 }
 
-fn change_section_rows(patch: &str, context: usize) -> Vec<DiffDisplayRow> {
+fn change_section_groups(patch: &str, context: usize) -> Vec<Vec<DiffDisplayRow>> {
     let mut sections: Vec<Vec<DiffDisplayRow>> = Vec::new();
     let mut current = Vec::new();
     let mut changed = Vec::new();
@@ -996,41 +1031,84 @@ fn change_section_rows(patch: &str, context: usize) -> Vec<DiffDisplayRow> {
         current.push(DiffDisplayRow { kind, line_no, text });
     }
     finish(&mut sections, &mut current, &mut changed);
-    sections.into_iter().flatten().collect()
+    sections
 }
 
-fn build_local_intents(files: &[DiffFile]) -> Vec<DiffIntent> {
-    let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
-        std::collections::BTreeMap::new();
-    for (index, file) in files.iter().enumerate() {
-        let area = Path::new(&file.path)
-            .components()
-            .next()
-            .and_then(|component| component.as_os_str().to_str())
-            .filter(|component| !component.is_empty())
-            .unwrap_or("root")
-            .to_string();
-        groups.entry(area).or_default().push(index);
+fn change_section_rows(patch: &str, context: usize) -> Vec<DiffDisplayRow> {
+    change_section_groups(patch, context).into_iter().flatten().collect()
+}
+
+fn intent_title(path: &str, rows: &[DiffDisplayRow]) -> String {
+    let file = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path);
+    let content = rows
+        .iter()
+        .filter(|row| matches!(row.kind, DiffRowKind::Add | DiffRowKind::Del))
+        .map(|row| row.text.trim())
+        .find(|text| !text.is_empty())
+        .unwrap_or("changed code");
+    let snippet: String = content.chars().take(42).collect();
+    if snippet.len() < content.len() {
+        format!("{}: {}…", file, snippet)
+    } else {
+        format!("{}: {}", file, snippet)
     }
-    groups
-        .into_iter()
-        .map(|(area, file_indices)| {
-            let additions: usize = file_indices.iter().map(|&i| files[i].additions).sum();
-            let deletions: usize = file_indices.iter().map(|&i| files[i].deletions).sum();
-            DiffIntent {
-                title: if area == "root" {
-                    "Root changes".into()
-                } else {
-                    format!("Update {area}")
-                },
-                summary: format!(
-                    "{} file(s) changed (+{additions}, -{deletions})",
-                    file_indices.len()
-                ),
-                file_indices,
-            }
-        })
-        .collect()
+}
+
+/// Build a lossless local fallback from actual diff sections. This gives the
+/// UI useful content-based intents immediately, even before the model returns
+/// its structured grouping.
+fn build_diff_intents(files: &[DiffFile]) -> Vec<DiffIntent> {
+    let mut intents = Vec::new();
+    for (file_index, file) in files.iter().enumerate() {
+        let groups = change_section_groups(&file.patch, 3);
+        for (section_index, rows) in groups.into_iter().enumerate() {
+            let additions = rows.iter().filter(|row| row.kind == DiffRowKind::Add).count();
+            let deletions = rows.iter().filter(|row| row.kind == DiffRowKind::Del).count();
+            intents.push(DiffIntent {
+                title: intent_title(&file.path, &rows),
+                summary: format!("{} changed section (+{additions}, -{deletions})", file.path),
+                file_indices: vec![file_index],
+                sections: vec![DiffIntentSection { file_index, section_index }],
+            });
+        }
+    }
+    if intents.is_empty() {
+        for (file_index, file) in files.iter().enumerate() {
+            intents.push(DiffIntent {
+                title: file.path.clone(),
+                summary: "Changed file without textual hunks".into(),
+                file_indices: vec![file_index],
+                sections: Vec::new(),
+            });
+        }
+    }
+    intents
+}
+
+fn total_diff_sections(files: &[DiffFile]) -> usize {
+    files
+        .iter()
+        .map(|file| change_section_groups(&file.patch, 3).len())
+        .sum()
+}
+
+fn attach_intent_sections(mut intents: Vec<DiffIntent>, files: &[DiffFile]) -> Vec<DiffIntent> {
+    for intent in &mut intents {
+        intent.sections = intent
+            .file_indices
+            .iter()
+            .flat_map(|&file_index| {
+                change_section_groups(&files[file_index].patch, 3)
+                    .into_iter()
+                    .enumerate()
+                    .map(move |(section_index, _)| DiffIntentSection { file_index, section_index })
+            })
+            .collect();
+    }
+    intents
 }
 
 fn parse_ai_intents(text: &str, files: &[DiffFile]) -> Option<Vec<DiffIntent>> {
@@ -1067,6 +1145,7 @@ fn parse_ai_intents(text: &str, files: &[DiffFile]) -> Option<Vec<DiffIntent>> {
                 title: title_value,
                 summary: summary.take().unwrap_or_else(|| "Changes completed in this area".into()),
                 file_indices,
+                sections: Vec::new(),
             });
         } else {
             summary.take();
@@ -1102,6 +1181,7 @@ fn parse_ai_intents(text: &str, files: &[DiffFile]) -> Option<Vec<DiffIntent>> {
             title: "Other changed files".into(),
             summary: "Changed files not assigned to a named intent".into(),
             file_indices: missing,
+            sections: Vec::new(),
         });
     }
     parsed.retain(|intent| !intent.file_indices.is_empty());

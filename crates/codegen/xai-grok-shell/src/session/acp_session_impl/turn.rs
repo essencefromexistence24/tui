@@ -2155,23 +2155,32 @@ impl SessionActor {
                     parameters: schema,
                 });
             }
-            if loop_index == 0
+            // `loop_index` is incremented immediately after `LoopStarted`, so
+            // the first sampling pass is index 1. Checking for zero made the
+            // diagnostic dump unreachable and silently left users without the
+            // real first-turn tool payload.
+            if loop_index == 1
                 && let Ok(path) = std::env::var("DX_DUMP_TOOL_DEFINITIONS")
                 && !path.trim().is_empty()
             {
-                if let Some(parent) = std::path::Path::new(&path).parent() {
-                    let _ = std::fs::create_dir_all(parent);
+                let path = std::path::Path::new(&path);
+                if let Some(parent) = path.parent()
+                    && let Err(error) = std::fs::create_dir_all(parent)
+                {
+                    tracing::warn!(?error, path = ?path, "failed to create tool-definition dump directory");
                 }
                 if let Ok(json) = serde_json::to_string_pretty(&effective_tools) {
-                    if let Err(error) = std::fs::write(&path, format!("{json}\n")) {
-                        tracing::warn!(?error, path, "failed to dump first-turn tool definitions");
+                    if let Err(error) = std::fs::write(path, format!("{json}\n")) {
+                        tracing::warn!(?error, path = ?path, "failed to dump first-turn tool definitions");
                     } else {
                         tracing::info!(
-                            path,
+                            path = ?path,
                             count = effective_tools.len(),
                             "dumped first-turn tool definitions"
                         );
                     }
+                } else {
+                    tracing::warn!(path = ?path, "failed to serialize first-turn tool definitions");
                 }
             }
             let build_req_start = std::time::Instant::now();
@@ -2220,6 +2229,95 @@ impl SessionActor {
                 .tool_context
                 .clamp_task_model_request(request.max_output_tokens)
                 .map_err(|message| acp::Error::internal_error().data(message))?;
+
+            // Opt-in diagnostic dump of the complete first request context.
+            // This deliberately remains runtime-gated so normal sessions never
+            // write prompts, conversation contents, or tool schemas to disk.
+            if loop_index == 1
+                && let Ok(flag) = std::env::var("DX_DUMP_FIRST_PROMPT")
+                && !flag.trim().is_empty()
+                && !matches!(flag.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off")
+            {
+                let dump_path = if matches!(
+                    flag.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "on"
+                ) {
+                    std::path::PathBuf::from(r"G:\Temp\first-prompt.md")
+                } else {
+                    std::path::PathBuf::from(flag.trim())
+                };
+                let system_prompt = self.agent.borrow().system_prompt().to_owned();
+                let prompt_context = self.agent.borrow().prompt_context().clone();
+                let section_stats = |value: &str| {
+                    format!("{} bytes / {} chars", value.len(), value.chars().count())
+                };
+                let prompt_context_json = serde_json::to_string_pretty(&prompt_context)
+                    .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+                let items_json = serde_json::to_string_pretty(&request.items)
+                    .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+                let tools_json = serde_json::to_string_pretty(&request.tools)
+                    .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+                let envelope_json = serde_json::json!({
+                    "model": request.model.clone(),
+                    "temperature": request.temperature,
+                    "max_output_tokens": request.max_output_tokens,
+                    "top_p": request.top_p,
+                    "tool_choice": format!("{:?}", request.tool_choice),
+                    "hosted_tools": format!("{:?}", request.hosted_tools),
+                    "x_grok_conv_id": request.x_grok_conv_id.clone(),
+                    "x_grok_req_id": request.x_grok_req_id.clone(),
+                    "x_grok_session_id": request.x_grok_session_id.clone(),
+                    "x_grok_turn_idx": request.x_grok_turn_idx.clone(),
+                    "x_grok_agent_id": request.x_grok_agent_id.clone(),
+                    "x_grok_deployment_id": request.x_grok_deployment_id.clone(),
+                    "json_schema": request.json_schema.clone(),
+                    "prompt_cache_key": request.prompt_cache_key.clone(),
+                });
+                let envelope_json = serde_json::to_string_pretty(&envelope_json)
+                    .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+                let markdown = format!(
+                    "# First Prompt Diagnostic\n\n\
+> Generated only because `DX_DUMP_FIRST_PROMPT` was enabled. This file can contain\n\
+> workspace context, conversation text, tool schemas, and request identifiers.\n\n\
+## Measured sections\n\n\
+| Section | Size |\n|---|---:|\n\
+| System prompt | {} |\n\
+| Prompt context JSON | {} |\n\
+| Conversation items JSON | {} |\n\
+| Tool definitions JSON | {} |\n\
+| Request envelope JSON | {} |\n\n\
+## System prompt\n\n\
+```text\n{}\n```\n\n\
+## Prompt context\n\n\
+```json\n{}\n```\n\n\
+## Conversation items\n\n\
+```json\n{}\n```\n\n\
+## Tool definitions\n\n\
+```json\n{}\n```\n\n\
+## Request envelope\n\n\
+```json\n{}\n```\n",
+                    section_stats(&system_prompt),
+                    section_stats(&prompt_context_json),
+                    section_stats(&items_json),
+                    section_stats(&tools_json),
+                    section_stats(&envelope_json),
+                    system_prompt,
+                    prompt_context_json,
+                    items_json,
+                    tools_json,
+                    envelope_json,
+                );
+                if let Some(parent) = dump_path.parent()
+                    && let Err(error) = std::fs::create_dir_all(parent)
+                {
+                    tracing::warn!(?error, path = ?dump_path, "failed to create prompt dump directory");
+                }
+                if let Err(error) = std::fs::write(&dump_path, markdown) {
+                    tracing::warn!(?error, path = ?dump_path, "failed to write first prompt diagnostic");
+                } else {
+                    tracing::info!(path = ?dump_path, "dumped first prompt diagnostic");
+                }
+            }
             self.emit_event(crate::session::events::Event::PhaseChanged {
                 phase: crate::session::events::Phase::WaitingForModel,
             });
