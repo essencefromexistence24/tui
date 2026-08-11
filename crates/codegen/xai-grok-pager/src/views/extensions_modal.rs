@@ -2783,15 +2783,17 @@ pub fn render_extensions_modal(
 
     // A successful empty registry is different from a request that is still
     // loading or failed. Keep the modal useful in the empty case by showing a
-    // clear, non-selectable row with the action that can populate the tab.
+    // clear, non-selectable row. Render it as a plain row rather than a
+    // picker header: headers intentionally draw a horizontal rule, which is
+    // distracting when there is no content in the tab.
     macro_rules! push_empty_state {
-        ($label:expr, $description:expr $(,)?) => {
+        ($label:expr $(,)?) => {
             entry_labels.push($label.to_string());
             entry_right_labels.push(String::new());
-            entry_desc_lines.push(vec![$description.to_string()]);
+            entry_desc_lines.push(Vec::new());
             entry_summary_lines.push(Vec::new());
             entry_fields.push(Vec::new());
-            entry_is_header.push(true);
+            entry_is_header.push(false);
             entry_dimmed.push(true);
             entry_indent.push(0);
             entry_data_indices.push(None);
@@ -3563,31 +3565,25 @@ pub fn render_extensions_modal(
                     if matches!(
                         state.hooks_data,
                         TabDataState::Loaded(ref response) if response.hooks.is_empty()
-                ) => {
-                    push_empty_state!(
-                        "No hooks configured",
-                        "Press a to add a hook or r to reload the session registry.",
-                    );
+                    ) =>
+                {
+                    push_empty_state!("No hooks configured");
                 }
                 ExtensionsTab::Plugins
                     if matches!(
                         state.plugins_data,
                         TabDataState::Loaded(ref response) if response.plugins.is_empty()
-                ) => {
-                    push_empty_state!(
-                        "No plugins installed",
-                        "Press a to add a plugin or r to reload the session registry.",
-                    );
+                    ) =>
+                {
+                    push_empty_state!("No plugins installed");
                 }
                 ExtensionsTab::Marketplace
                     if matches!(
                         state.marketplace_data,
                         TabDataState::Loaded(ref response) if response.sources.is_empty()
-                ) => {
-                    push_empty_state!(
-                        "No marketplace sources configured",
-                        "Press a to add a marketplace source or r to reload.",
-                    );
+                    ) =>
+                {
+                    push_empty_state!("No marketplace sources configured");
                 }
                 ExtensionsTab::Skills
                     if matches!(
@@ -3596,21 +3592,17 @@ pub fn render_extensions_modal(
                             TabDataState::Loaded(skills),
                             TabDataState::Loaded(workflows)
                         ) if skills.is_empty() && workflows.is_empty()
-                ) => {
-                    push_empty_state!(
-                        "No skills or workflows discovered",
-                        "Add a SKILL.md under the session workspace, then press r to reload.",
-                    );
+                    ) =>
+                {
+                    push_empty_state!("No skills or workflows discovered");
                 }
                 ExtensionsTab::McpServers
                     if matches!(
                         state.mcps_data,
                         TabDataState::Loaded(ref servers) if servers.is_empty()
-                ) => {
-                    push_empty_state!(
-                        "No MCP servers configured",
-                        "Press a to add a server or configure one in the session settings.",
-                    );
+                    ) =>
+                {
+                    push_empty_state!("No MCP servers configured");
                 }
                 _ => {}
             }
@@ -3664,7 +3656,15 @@ pub fn render_extensions_modal(
         .collect();
 
     // Build non_selectable mask (MCP section labels are not focusable rows).
-    let non_selectable = build_entry_non_selectable(&entry_is_header, &entry_group_keys);
+    let mut non_selectable = build_entry_non_selectable(&entry_is_header, &entry_group_keys);
+    // Empty-state rows have no backing item and must remain informational,
+    // even though they are rendered as plain rows to avoid header dividers.
+    for (is_non_selectable, data_index) in non_selectable.iter_mut().zip(entry_data_indices.iter())
+    {
+        if data_index.is_none() {
+            *is_non_selectable = true;
+        }
+    }
     let non_selectable_clickable = build_entry_non_selectable_clickable(&entry_group_keys);
 
     // Min-clamp and skip rows marked non-selectable for this frame's footer +
