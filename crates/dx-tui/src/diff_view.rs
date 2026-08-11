@@ -284,11 +284,16 @@ impl DiffState {
         if self.ai_summary_baseline.as_deref() == Some(text.as_str()) {
             return;
         }
-        if let Some(intents) = parse_ai_intents(&text, &self.files)
-            && !intents.is_empty()
-        {
-            self.intents = intents;
+        let Some(intents) = parse_ai_intents(&text, &self.files) else {
+            // The response is still streaming or did not follow the
+            // structured contract yet. Keep the local fallback visible and
+            // continue polling so later FILES lines can add every file.
+            return;
+        };
+        if intents.is_empty() {
+            return;
         }
+        self.intents = intents;
         self.ai_summary_pending = false;
         self.ai_summary_baseline = Some(text);
         self.selected_intent = self.selected_intent.min(self.intents.len().saturating_sub(1));
@@ -301,7 +306,7 @@ impl DiffState {
     }
 
     pub fn ai_summary_prompt() -> &'static str {
-        "Review the current working-tree changes using git status and git diff. Do not edit, stage, commit, or push anything. Return only repeated blocks in this exact shape: INTENT: <short title>\nSUMMARY: <one sentence describing what was completed>\nFILES: <comma-separated repository paths>\nEND INTENT. Group related files by completed intent and include every changed file in exactly one group."
+        "Review the current working-tree changes using git status and git diff. Do not edit, stage, commit, or push anything. Return only repeated blocks in this exact shape: INTENT: <short title>\nSUMMARY: <one sentence describing what was completed>\nFILES: <comma-separated repository paths; include every file belonging to this intent>\nEND INTENT. Group related files by completed intent, and do not omit any changed file."
     }
 
     pub fn summary_label(&self) -> String {
@@ -1045,8 +1050,16 @@ fn parse_ai_intents(text: &str, files: &[DiffFile]) -> Option<Vec<DiffIntent>> {
         let file_indices = paths
             .drain(..)
             .filter_map(|path| {
-                let normalized = path.trim().trim_matches('`').trim_start_matches("./");
-                files.iter().position(|file| file.path == normalized)
+                let normalized = path
+                    .trim()
+                    .trim_start_matches(['-', '*', ' '])
+                    .trim_matches(['`', '"', '\''])
+                    .trim_start_matches("./")
+                    .trim_start_matches("a/")
+                    .trim_start_matches("b/");
+                files
+                    .iter()
+                    .position(|file| file.path == normalized || file.path.ends_with(normalized))
             })
             .collect::<Vec<_>>();
         if !file_indices.is_empty() {
@@ -1072,6 +1085,26 @@ fn parse_ai_intents(text: &str, files: &[DiffFile]) -> Option<Vec<DiffIntent>> {
         }
     }
     flush(&mut parsed, &mut title, &mut summary, &mut paths);
+    if parsed.is_empty() {
+        return None;
+    }
+
+    // A model may accidentally omit a path or repeat one across groups. Keep
+    // the intent view lossless: each changed file appears at least once, and
+    // duplicate assignments are kept with the first intent that named them.
+    let mut assigned = std::collections::HashSet::new();
+    for intent in &mut parsed {
+        intent.file_indices.retain(|index| assigned.insert(*index));
+    }
+    let missing: Vec<usize> = (0..files.len()).filter(|index| !assigned.contains(index)).collect();
+    if !missing.is_empty() {
+        parsed.push(DiffIntent {
+            title: "Other changed files".into(),
+            summary: "Changed files not assigned to a named intent".into(),
+            file_indices: missing,
+        });
+    }
+    parsed.retain(|intent| !intent.file_indices.is_empty());
     (!parsed.is_empty()).then_some(parsed)
 }
 
@@ -1660,5 +1693,18 @@ mod tests {
         assert_eq!(intents.len(), 2);
         assert_eq!(intents[0].file_indices, vec![0]);
         assert_eq!(intents[1].file_indices, vec![1]);
+    }
+
+    #[test]
+    fn ai_intent_keeps_all_files_and_rehomes_omissions() {
+        let files = vec![
+            DiffFile { path: "src/main.rs".into(), additions: 1, deletions: 0, patch: String::new() },
+            DiffFile { path: "src/lib.rs".into(), additions: 1, deletions: 0, patch: String::new() },
+            DiffFile { path: "README.md".into(), additions: 1, deletions: 0, patch: String::new() },
+        ];
+        let response = "INTENT: Runtime\nSUMMARY: Update runtime\nFILES: src/main.rs, src/lib.rs\nEND INTENT";
+        let intents = parse_ai_intents(response, &files).expect("structured intents");
+        assert_eq!(intents[0].file_indices, vec![0, 1]);
+        assert_eq!(intents[1].file_indices, vec![2]);
     }
 }

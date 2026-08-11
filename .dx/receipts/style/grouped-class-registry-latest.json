@@ -1,0 +1,14 @@
+{
+  "schema": "dx.style.grouped-class-registry-receipt",
+  "schema_version": 1,
+  "scope": "trusted source-owned group alias registry for Zed Style Web Preview",
+  "source_digest_algorithm": "fnv1a64",
+  "source_digest": "fnv1a64:cbf29ce484222325",
+  "entry_count": 0,
+  "entries": [],
+  "trust": {
+    "registry_entries_verified": true,
+    "source_digest_verified": true,
+    "source_owned": true
+  }
+}

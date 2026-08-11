@@ -1,0 +1,18 @@
+{
+  "schema": "dx.style.grouped-class-reverse-css-map",
+  "schema_version": 1,
+  "scope": "source-owned reverse map from generated grouped CSS selectors to atomic utilities",
+  "source_digest_algorithm": "fnv1a64",
+  "source_digest": "fnv1a64:cbf29ce484222325",
+  "entry_count": 0,
+  "reviewable_entry_count": 0,
+  "entries": [],
+  "trust": {
+    "source_owned": true,
+    "generated_css_owned": true,
+    "source_declarations_owned": true,
+    "source_digest_verified": true,
+    "source_mutation_enabled": false,
+    "editor_write_bridge_required": true
+  }
+}
