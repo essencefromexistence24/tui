@@ -355,6 +355,9 @@ pub enum Action {
         tab: crate::views::extensions_modal::ExtensionsTab,
         trigger: xai_grok_telemetry::events::ExtensionsModalTrigger,
     },
+    /// Refresh the original Grok Build extension registries while the modal
+    /// is open. Provider and ZeroClaw channel tabs use their own data paths.
+    RefreshExtensions,
     /// Open the agents modal (listing all agent definitions).
     /// Optionally opens directly on a specific tab.
     OpenConfigAgentsModal(Option<crate::views::agents_modal::AgentsTab>),

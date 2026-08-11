@@ -742,6 +742,13 @@ impl AgentView {
                     // new tab opens in a clean browse view.
                     state.switch_tab(tab);
                     state.window.tabs_focused = state.picker_state.tabs_focused;
+                    if !matches!(
+                        tab,
+                        crate::views::extensions_modal::ExtensionsTab::Providers
+                            | crate::views::extensions_modal::ExtensionsTab::Connect
+                    ) {
+                        return InputOutcome::Action(Action::RefreshExtensions);
+                    }
                 }
                 InputOutcome::Changed
             }
@@ -971,6 +978,13 @@ impl AgentView {
                         // show the focused highlight and keep arrow nav on tabs.
                         state.picker_state.tabs_focused = true;
                         state.window.tabs_focused = true;
+                        if !matches!(
+                            tab,
+                            crate::views::extensions_modal::ExtensionsTab::Providers
+                                | crate::views::extensions_modal::ExtensionsTab::Connect
+                        ) {
+                            return InputOutcome::Action(Action::RefreshExtensions);
+                        }
                     }
                     return InputOutcome::Changed;
                 }

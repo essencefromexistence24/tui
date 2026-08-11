@@ -2781,6 +2781,26 @@ pub fn render_extensions_modal(
     // Maps picker entry index → original data index (for action dispatch).
     let mut entry_data_indices: Vec<Option<usize>> = Vec::new();
 
+    // A successful empty registry is different from a request that is still
+    // loading or failed. Keep the modal useful in the empty case by showing a
+    // clear, non-selectable row with the action that can populate the tab.
+    macro_rules! push_empty_state {
+        ($label:expr, $description:expr $(,)?) => {
+            entry_labels.push($label.to_string());
+            entry_right_labels.push(String::new());
+            entry_desc_lines.push(vec![$description.to_string()]);
+            entry_summary_lines.push(Vec::new());
+            entry_fields.push(Vec::new());
+            entry_is_header.push(true);
+            entry_dimmed.push(true);
+            entry_indent.push(0);
+            entry_data_indices.push(None);
+            entry_group_keys.push(None);
+            entry_badge_text.push(String::new());
+            entry_badge_color.push(None);
+        };
+    }
+
     // Skip building entries when in input mode (render_input_form handles that).
     if !in_input_mode && !loading {
         match state.active_tab {
@@ -3531,6 +3551,68 @@ pub fn render_extensions_modal(
                     entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
                 }
+            }
+        }
+
+        // Do not let an empty but valid ACP response look like a disconnected
+        // tab. Search results retain the picker-level "No matches" message;
+        // these rows are only for an unfiltered, successfully loaded catalog.
+        if state.picker_state.query().is_empty() {
+            match state.active_tab {
+                ExtensionsTab::Hooks
+                    if matches!(
+                        state.hooks_data,
+                        TabDataState::Loaded(ref response) if response.hooks.is_empty()
+                ) => {
+                    push_empty_state!(
+                        "No hooks configured",
+                        "Press a to add a hook or r to reload the session registry.",
+                    );
+                }
+                ExtensionsTab::Plugins
+                    if matches!(
+                        state.plugins_data,
+                        TabDataState::Loaded(ref response) if response.plugins.is_empty()
+                ) => {
+                    push_empty_state!(
+                        "No plugins installed",
+                        "Press a to add a plugin or r to reload the session registry.",
+                    );
+                }
+                ExtensionsTab::Marketplace
+                    if matches!(
+                        state.marketplace_data,
+                        TabDataState::Loaded(ref response) if response.sources.is_empty()
+                ) => {
+                    push_empty_state!(
+                        "No marketplace sources configured",
+                        "Press a to add a marketplace source or r to reload.",
+                    );
+                }
+                ExtensionsTab::Skills
+                    if matches!(
+                        (&state.skills_data, &state.workflows_data),
+                        (
+                            TabDataState::Loaded(skills),
+                            TabDataState::Loaded(workflows)
+                        ) if skills.is_empty() && workflows.is_empty()
+                ) => {
+                    push_empty_state!(
+                        "No skills or workflows discovered",
+                        "Add a SKILL.md under the session workspace, then press r to reload.",
+                    );
+                }
+                ExtensionsTab::McpServers
+                    if matches!(
+                        state.mcps_data,
+                        TabDataState::Loaded(ref servers) if servers.is_empty()
+                ) => {
+                    push_empty_state!(
+                        "No MCP servers configured",
+                        "Press a to add a server or configure one in the session settings.",
+                    );
+                }
+                _ => {}
             }
         }
     }

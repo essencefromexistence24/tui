@@ -88,6 +88,13 @@ pub(crate) struct SkillsToggleRequest {
 pub struct SkillsListRequest {
     /// Working directory for skill discovery context.
     pub cwd: String,
+    /// Optional ACP session whose working directory is authoritative.
+    ///
+    /// The pager supplies both fields so project/worktree skills are listed
+    /// from the same directory as the active session rather than from the
+    /// shell process directory. Older clients may omit this field.
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -410,7 +417,16 @@ pub async fn handle(
 
         "x.ai/skills/list" => {
             let req: SkillsListRequest = serde_json::from_str(args.params.get())?;
-            let skills = reload_skills(&req.cwd, plugin_registry, compat).await;
+            let cwd = req
+                .session_id
+                .as_deref()
+                .and_then(|session_id| {
+                    agent
+                        .get_session_cwd(&acp::SessionId::new(session_id.to_owned()))
+                })
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or(req.cwd);
+            let skills = reload_skills(&cwd, plugin_registry, compat).await;
             super::to_ext_response(Ok(SkillsListResponse { skills }))
         }
 

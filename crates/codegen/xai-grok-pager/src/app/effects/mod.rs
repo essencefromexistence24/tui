@@ -2542,12 +2542,13 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSkillsList { agent_id, session_id: _ } => {
+        Effect::FetchSkillsList { agent_id, session_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
-                    "cwd": "."
+                    "cwd": ".",
+                    "sessionId": session_id.0.to_string(),
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/list",

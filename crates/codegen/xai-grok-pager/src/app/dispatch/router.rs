@@ -105,7 +105,7 @@ use super::transcript::{
     dispatch_copy_assistant_message, dispatch_copy_block_content, dispatch_copy_block_meta,
     dispatch_dump_input_log, dispatch_export_conversation, dispatch_open_block_viewer,
     dispatch_open_config_agents_modal, dispatch_open_extensions_modal,
-    dispatch_open_transcript_pager,
+    dispatch_open_transcript_pager, extensions_modal_tab_fetches,
 };
 use super::turn::{
     dispatch_cancel_scheduled_task, dispatch_cancel_turn, dispatch_cancel_turn_choice,
@@ -676,6 +676,31 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                 return vec![];
             }
             dispatch_open_extensions_modal(app, tab, trigger)
+        }
+        Action::RefreshExtensions => {
+            let ActiveView::Agent(id) = app.active_view else {
+                return vec![];
+            };
+            let Some(agent) = app.agents.get_mut(&id) else {
+                return vec![];
+            };
+            let Some(session_id) = agent.session.session_id.clone() else {
+                agent.pending_extensions_fetch = true;
+                return vec![];
+            };
+            let Some(modal) = agent.extensions_modal.as_mut() else {
+                return vec![];
+            };
+            use crate::views::extensions_modal::TabDataState;
+            modal.hooks_data = TabDataState::Loading;
+            modal.plugins_data = TabDataState::Loading;
+            modal.marketplace_data = TabDataState::Loading;
+            modal.skills_data = TabDataState::Loading;
+            modal.workflows_data = TabDataState::Loading;
+            modal.mcps_data = TabDataState::Loading;
+            modal.marketplace_fetch_inflight = false;
+            modal.marketplace_refetch_queued = false;
+            extensions_modal_tab_fetches(modal, id, session_id)
         }
         Action::OpenConfigAgentsModal(tab) => dispatch_open_config_agents_modal(app, tab),
         Action::McpAuthTrigger { server_name } => {
