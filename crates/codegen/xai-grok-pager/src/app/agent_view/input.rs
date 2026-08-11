@@ -631,9 +631,8 @@ impl AgentView {
             self.dx_ui.intro_seen = true;
             self.dx_ui.animation.restart();
             self.prompt.prompt_suggestion.dismiss();
-            self.dx_ui.intro_deadline = Some(
-                std::time::Instant::now() + std::time::Duration::from_secs(2),
-            );
+            self.dx_ui.intro_deadline =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
             let sound = self.dx_ui.animation.current().sound();
             self.dx_ui.sound.start_animation_loop(sound);
             self.dx_ui.view = crate::dx::DxView::Animation;
@@ -704,6 +703,31 @@ impl AgentView {
                         if self
                             .dx_ui
                             .diff
+                            .commit_push_area
+                            .contains((mouse.column, mouse.row).into()) =>
+                    {
+                        return InputOutcome::Action(Action::SendPrompt(
+                            crate::dx::diff_view::DiffState::commit_push_prompt().into(),
+                        ));
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self
+                            .dx_ui
+                            .diff
+                            .ai_summarize_area
+                            .contains((mouse.column, mouse.row).into()) =>
+                    {
+                        let baseline =
+                            crate::dx::diff_view::DiffState::latest_agent_message(&self.scrollback);
+                        self.dx_ui.diff.begin_ai_summary(baseline);
+                        return InputOutcome::Action(Action::SendPrompt(
+                            crate::dx::diff_view::DiffState::ai_summary_prompt().into(),
+                        ));
+                    }
+                    MouseEventKind::Down(MouseButton::Left)
+                        if self
+                            .dx_ui
+                            .diff
                             .begin_scrollbar_drag(mouse.column, mouse.row) => {}
                     MouseEventKind::Drag(MouseButton::Left) | MouseEventKind::Moved
                         if self.dx_ui.diff.drag_scrollbar(mouse.row) => {}
@@ -712,7 +736,14 @@ impl AgentView {
                     MouseEventKind::Down(MouseButton::Left)
                         if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) =>
                     {
-                        if let Some(row) = self.dx_ui.diff.tree_row_at_y(mouse.row) {
+                        if self.dx_ui.diff.view_mode
+                            == crate::dx::diff_view::DiffViewMode::AiSummary
+                        {
+                            if let Some(row) = self.dx_ui.diff.intent_row_at_y(mouse.row) {
+                                self.dx_ui.diff.selected_intent = row;
+                                self.dx_ui.diff.diff_scroll = 0;
+                            }
+                        } else if let Some(row) = self.dx_ui.diff.tree_row_at_y(mouse.row) {
                             self.dx_ui.diff.tree_cursor = row;
                             self.dx_ui.diff.activate_tree_cursor();
                         }
@@ -720,7 +751,13 @@ impl AgentView {
                     MouseEventKind::ScrollUp => {
                         let page = self.dx_ui.diff.patch_inner.height.max(1) as usize;
                         if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) {
-                            self.dx_ui.diff.move_tree_cursor(-3);
+                            if self.dx_ui.diff.view_mode
+                                == crate::dx::diff_view::DiffViewMode::AiSummary
+                            {
+                                self.dx_ui.diff.move_intent_cursor(-3);
+                            } else {
+                                self.dx_ui.diff.move_tree_cursor(-3);
+                            }
                         } else {
                             self.dx_ui.diff.scroll_diff_by(-3, page);
                         }
@@ -728,12 +765,28 @@ impl AgentView {
                     MouseEventKind::ScrollDown => {
                         let page = self.dx_ui.diff.patch_inner.height.max(1) as usize;
                         if self.dx_ui.diff.point_in_tree(mouse.column, mouse.row) {
-                            self.dx_ui.diff.move_tree_cursor(3);
+                            if self.dx_ui.diff.view_mode
+                                == crate::dx::diff_view::DiffViewMode::AiSummary
+                            {
+                                self.dx_ui.diff.move_intent_cursor(3);
+                            } else {
+                                self.dx_ui.diff.move_tree_cursor(3);
+                            }
                         } else {
                             self.dx_ui.diff.scroll_diff_by(3, page);
                         }
                     }
                     MouseEventKind::Moved => {
+                        self.dx_ui.diff.commit_push_hovered = self
+                            .dx_ui
+                            .diff
+                            .commit_push_area
+                            .contains((mouse.column, mouse.row).into());
+                        self.dx_ui.diff.ai_summarize_hovered = self
+                            .dx_ui
+                            .diff
+                            .ai_summarize_area
+                            .contains((mouse.column, mouse.row).into());
                         self.dx_ui.diff.tree_scrollbar_hovered =
                             self.dx_ui.diff.point_in_tree(mouse.column, mouse.row);
                         self.dx_ui.diff.patch_scrollbar_hovered =
@@ -755,17 +808,40 @@ impl AgentView {
                     self.dx_ui.diff.close();
                     self.dx_ui.view = crate::dx::DxView::Chat;
                 }
+                KeyCode::Char('c') => {
+                    return InputOutcome::Action(Action::SendPrompt(
+                        crate::dx::diff_view::DiffState::commit_push_prompt().into(),
+                    ));
+                }
+                KeyCode::Char('a') => {
+                    let baseline =
+                        crate::dx::diff_view::DiffState::latest_agent_message(&self.scrollback);
+                    self.dx_ui.diff.begin_ai_summary(baseline);
+                    return InputOutcome::Action(Action::SendPrompt(
+                        crate::dx::diff_view::DiffState::ai_summary_prompt().into(),
+                    ));
+                }
                 KeyCode::Tab => {
                     self.dx_ui.diff.focus_tree = !self.dx_ui.diff.focus_tree;
                 }
                 KeyCode::Up | KeyCode::Char('k') if self.dx_ui.diff.focus_tree => {
-                    self.dx_ui.diff.move_tree_cursor(-1);
+                    if self.dx_ui.diff.view_mode == crate::dx::diff_view::DiffViewMode::AiSummary {
+                        self.dx_ui.diff.move_intent_cursor(-1);
+                    } else {
+                        self.dx_ui.diff.move_tree_cursor(-1);
+                    }
                 }
                 KeyCode::Down | KeyCode::Char('j') if self.dx_ui.diff.focus_tree => {
-                    self.dx_ui.diff.move_tree_cursor(1);
+                    if self.dx_ui.diff.view_mode == crate::dx::diff_view::DiffViewMode::AiSummary {
+                        self.dx_ui.diff.move_intent_cursor(1);
+                    } else {
+                        self.dx_ui.diff.move_tree_cursor(1);
+                    }
                 }
                 KeyCode::Enter if self.dx_ui.diff.focus_tree => {
-                    self.dx_ui.diff.activate_tree_cursor();
+                    if self.dx_ui.diff.view_mode != crate::dx::diff_view::DiffViewMode::AiSummary {
+                        self.dx_ui.diff.activate_tree_cursor();
+                    }
                 }
                 KeyCode::Left | KeyCode::Right if self.dx_ui.diff.focus_tree => {
                     self.dx_ui.diff.toggle_tree_at_cursor();

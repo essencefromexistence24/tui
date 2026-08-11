@@ -1097,6 +1097,7 @@ impl AgentView {
             self.prompt.prompt_suggestion.dismiss();
         }
         if self.dx_ui.view == crate::dx::DxView::Diff {
+            self.dx_ui.diff.poll_ai_summary(&self.scrollback);
             let dx_theme = crate::theme::ChatTheme::from(&theme);
             crate::dx::diff_view::render_diff_view(&mut self.dx_ui.diff, &dx_theme, full_area, buf);
             return (None, None);
@@ -4739,8 +4740,7 @@ impl AgentView {
                     .iter()
                     .take(12)
                     .map(|(sid, info)| {
-                        let (label, desc) =
-                            crate::app::subagent::format_subagent_label(info);
+                        let (label, desc) = crate::app::subagent::format_subagent_label(info);
                         let name = if desc.is_empty() {
                             label
                         } else {
@@ -4765,13 +4765,13 @@ impl AgentView {
         // right panel shows Tasks, Workflows, Subagents (top) and Notes (bottom).
         let _ = &prompts;
         let bodies: [Vec<String>; 8] = [
-            tasks,                       // 0: Tasks
-            workflows,                   // 1: Workflows
-            Vec::new(),                  // 2: Prompts (hidden)
-            subagents,                    // 3: Subagents
-            Vec::new(),                  // 4: LSP (hidden)
-            Vec::new(),                  // 5: Plugins (hidden)
-            Vec::new(),                  // 6: MCP (hidden)
+            tasks,                              // 0: Tasks
+            workflows,                          // 1: Workflows
+            Vec::new(),                         // 2: Prompts (hidden)
+            subagents,                          // 3: Subagents
+            Vec::new(),                         // 4: LSP (hidden)
+            Vec::new(),                         // 5: Plugins (hidden)
+            Vec::new(),                         // 6: MCP (hidden)
             sidebar_notes_lines(&self.session), // 7: Notes (bottom)
         ];
         let sections = std::array::from_fn(|i| SidebarSection {

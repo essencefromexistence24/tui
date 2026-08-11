@@ -1372,9 +1372,8 @@ impl AgentView {
             (state.active_tab == crate::views::extensions_modal::ExtensionsTab::Connect)
                 .then(|| {
                     state
-                        .channel_connect
-                        .entries
-                        .get(state.picker_state.selected.saturating_sub(1))
+                        .selected_data_index()
+                        .and_then(|index| state.channel_connect.entries.get(index))
                         .map(|entry| (entry.kind.to_string(), "default".to_string()))
                 })
                 .flatten()
@@ -2208,8 +2207,9 @@ impl AgentView {
                     .extensions_modal
                     .as_ref()
                     .and_then(|state| {
-                        let index = state.picker_state.selected.saturating_sub(1);
-                        state.channel_connect.entries.get(index)
+                        state
+                            .selected_data_index()
+                            .and_then(|index| state.channel_connect.entries.get(index))
                     })
                     .map(|entry| (entry.kind.to_string(), "default".to_string()));
                 if let Some((kind, alias)) = selected {
@@ -2240,8 +2240,9 @@ impl AgentView {
                     .extensions_modal
                     .as_ref()
                     .and_then(|state| {
-                        let index = state.picker_state.selected.saturating_sub(1);
-                        state.channel_connect.entries.get(index)
+                        state
+                            .selected_data_index()
+                            .and_then(|index| state.channel_connect.entries.get(index))
                     })
                     .map(|entry| format!("{}.default", entry.kind));
                 if let Some(channel_id) = selected {

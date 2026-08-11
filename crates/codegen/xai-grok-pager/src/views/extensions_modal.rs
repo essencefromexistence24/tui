@@ -1865,15 +1865,18 @@ pub struct ExtensionsModalState {
     pub plugins_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_plugin_groups_once`].
     pub plugins_groups_seeded: bool,
-    /// Collapsed marketplace sources (by source index). Default collapsed.
+    /// Collapsed marketplace sources (by source index). Sources are expanded
+    /// by default and are added here only after an explicit user collapse.
     pub marketplace_collapsed_sources: std::collections::HashSet<usize>,
     /// Collapsed skill source groups (by [`SkillGroup::label`] / Workflows key).
+    /// Groups are expanded by default and are added here only after an
+    /// explicit user collapse.
     pub skills_collapsed_groups: std::collections::HashSet<String>,
     /// See [`Self::seed_skills_groups_once`].
     pub skills_groups_seeded: bool,
     /// See [`Self::seed_workflows_group_once`].
     pub workflows_group_seeded: bool,
-    /// Expanded skill entries (by skill index). Skills start collapsed.
+    /// Expanded skill entries (by skill index).
     pub skills_expanded: std::collections::HashSet<usize>,
     /// Status filter for the plugins tab.
     pub plugins_filter: StatusFilter,
@@ -2035,29 +2038,24 @@ impl ExtensionsModalState {
         self.plugins_groups_seeded = true;
     }
 
-    /// Seed default-collapsed skill source groups exactly once.
+    /// Initialize skill source-group state exactly once.
     ///
-    /// Unions [`SkillGroup::label`] keys into `skills_collapsed_groups` so a
-    /// prior Workflows expand/collapse (seeded independently) is preserved.
-    /// Later reloads leave the set alone.
+    /// Groups are expanded on first load. The one-shot marker is retained so
+    /// reloads do not overwrite an explicit user collapse.
     pub fn seed_skills_groups_once(&mut self, skills: &[SkillInfo]) {
         if self.skills_groups_seeded {
             return;
         }
-        for skill in skills {
-            self.skills_collapsed_groups
-                .insert(skill_group(skill).label);
-        }
+        let _ = skills;
         self.skills_groups_seeded = true;
     }
 
-    /// Seed default-collapsed Workflows header once (independent of skills load).
+    /// Initialize the Workflows group once (independent of skills load).
+    /// Workflows are expanded by default.
     pub fn seed_workflows_group_once(&mut self) {
         if self.workflows_group_seeded {
             return;
         }
-        self.skills_collapsed_groups
-            .insert(SKILLS_WORKFLOWS_GROUP_KEY.to_string());
         self.workflows_group_seeded = true;
     }
 
@@ -2863,7 +2861,10 @@ pub fn render_extensions_modal(
                 }
                 entry_summary_lines.push(supervisor_summary);
                 entry_fields.push(Vec::new());
-                entry_is_header.push(true);
+                // This is an informational row, not a section header. Header
+                // rendering draws a horizontal rule across the pane, which is
+                // especially noisy at the top of Connect.
+                entry_is_header.push(false);
                 entry_dimmed.push(false);
                 entry_indent.push(0);
                 entry_data_indices.push(None);
@@ -2878,7 +2879,9 @@ pub fn render_extensions_modal(
                         "Not configured".to_string()
                     });
                     entry_desc_lines.push(vec![channel.description.to_string()]);
-                    entry_summary_lines.push(vec![format!("type: {}", channel.kind)]);
+                    // The channel kind is used by actions/configuration and
+                    // does not need to appear as a second accordion line.
+                    entry_summary_lines.push(Vec::new());
                     entry_fields.push(Vec::new());
                     entry_is_header.push(false);
                     entry_dimmed.push(!channel.configured);
@@ -3659,9 +3662,10 @@ pub fn render_extensions_modal(
     let mut non_selectable = build_entry_non_selectable(&entry_is_header, &entry_group_keys);
     // Empty-state rows have no backing item and must remain informational,
     // even though they are rendered as plain rows to avoid header dividers.
-    for (is_non_selectable, data_index) in non_selectable.iter_mut().zip(entry_data_indices.iter())
-    {
-        if data_index.is_none() {
+    // Other rows without a data index are real, selectable accordion headers
+    // (Skills, Marketplace, Hooks, Plugins, and MCP sections).
+    for (is_non_selectable, label) in non_selectable.iter_mut().zip(entry_labels.iter()) {
+        if label.starts_with("No ") {
             *is_non_selectable = true;
         }
     }
@@ -6749,10 +6753,11 @@ mod tests {
         let mut source = superpowers_source();
         source.plugins[0].components = Some(sample_components());
         let mut state = marketplace_modal_state(source);
+        state.marketplace_collapsed_sources.insert(0);
         let buf = render_marketplace_into_buffer(&mut state, 100, 40);
         assert!(
-            state.picker_state.expanded.is_empty(),
-            "rows must be collapsed by default for this test to pin anything"
+            state.marketplace_collapsed_sources.contains(&0),
+            "the test explicitly collapses the marketplace source"
         );
         assert_eq!(
             buffer_count(&buf, "2 skills \u{b7} 1 command \u{b7} 1 hook"),
@@ -6767,6 +6772,7 @@ mod tests {
         source.plugins.truncate(1);
         let mut state = marketplace_modal_state(source);
         let legacy_needle = "14 skills";
+        state.marketplace_collapsed_sources.insert(0);
 
         let collapsed_buf = render_marketplace_into_buffer(&mut state, 100, 40);
         assert_eq!(
@@ -6796,6 +6802,7 @@ mod tests {
         source.plugins[0].components = Some(sample_components());
         let mut state = marketplace_modal_state(source);
         let summary = "2 skills \u{b7} 1 command \u{b7} 1 hook";
+        state.marketplace_collapsed_sources.insert(0);
 
         let collapsed_buf = render_marketplace_into_buffer(&mut state, 100, 40);
         assert_eq!(
@@ -7243,7 +7250,7 @@ mod tests {
     }
 
     #[test]
-    fn skills_groups_default_collapsed_and_selectable() {
+    fn skills_groups_default_expanded_and_selectable() {
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
         let skills = vec![make_skill("alpha", "a"), make_skill("beta", "b")];
         state.seed_skills_groups_once(&skills);
@@ -7262,14 +7269,9 @@ mod tests {
             !state.entry_non_selectable.first().copied().unwrap_or(true),
             "group headers are selectable"
         );
-        assert_eq!(
-            state
-                .entry_data_indices
-                .iter()
-                .filter(|d| d.is_some())
-                .count(),
-            0,
-            "children hidden while collapsed"
+        assert!(
+            state.entry_data_indices.iter().any(|d| d.is_some()),
+            "children visible while expanded by default"
         );
         assert!(
             state
@@ -7278,17 +7280,20 @@ mod tests {
                 .any(|l| l.starts_with("User (")),
             "collapsed header still visible"
         );
-        // Expand User and re-render.
-        state.skills_collapsed_groups.remove("User");
+        // Collapse and re-expand User to pin the interaction path.
+        state.skills_collapsed_groups.insert("User".into());
         render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
         assert!(
-            state.entry_data_indices.iter().any(|d| d.is_some()),
-            "children visible after expand"
+            !state.entry_data_indices.iter().any(|d| d.is_some()),
+            "children hidden after explicit collapse"
         );
+        state.skills_collapsed_groups.remove("User");
+        render_extensions_modal(&mut buf, area, &mut state, None, false, 0);
+        assert!(state.entry_data_indices.iter().any(|d| d.is_some()));
     }
 
     #[test]
-    fn workflows_default_collapsed_when_skills_loading_or_error() {
+    fn workflows_default_expanded_when_skills_loading_or_error() {
         let mk_wf = || WorkflowInfo {
             name: "fix-ci".into(),
             description: "Fix CI".into(),
@@ -7296,20 +7301,20 @@ mod tests {
             source: "builtin".into(),
             path: None,
         };
-        // Skills still loading: tab is a spinner (no list), but seed must still
-        // mark Workflows collapsed so the first paint after skills fails is collapsed.
+        // Skills still loading: tab is a spinner (no list), but the workflow
+        // group remains expanded when the first usable list arrives.
         let mut state = ExtensionsModalState::new(ExtensionsTab::Skills);
         state.seed_workflows_group_once();
         state.skills_data = TabDataState::Loading;
         state.workflows_data = TabDataState::Loaded(vec![mk_wf()]);
         assert!(
-            state
+            !state
                 .skills_collapsed_groups
                 .contains(SKILLS_WORKFLOWS_GROUP_KEY),
-            "workflows seed independent of skills load"
+            "workflows are expanded by default"
         );
 
-        // Skills failed: list paints; workflows children stay hidden.
+        // Skills failed: list paints; workflows children remain visible.
         let mut state_err = ExtensionsModalState::new(ExtensionsTab::Skills);
         state_err.seed_workflows_group_once();
         state_err.skills_data = TabDataState::Error("boom".into());
@@ -7325,8 +7330,8 @@ mod tests {
             "workflows header visible when skills Error"
         );
         assert!(
-            !state_err.entry_labels_cache.iter().any(|l| l == "fix-ci"),
-            "workflows children hidden while collapsed (skills Error)"
+            state_err.entry_labels_cache.iter().any(|l| l == "fix-ci"),
+            "workflows children visible while expanded (skills Error)"
         );
     }
 
@@ -7347,8 +7352,8 @@ mod tests {
             "skills seed must not re-collapse a user-expanded Workflows group"
         );
         assert!(
-            state.skills_collapsed_groups.contains("User"),
-            "skills seed still collapses skill source groups"
+            !state.skills_collapsed_groups.contains("User"),
+            "skills seed leaves source groups expanded"
         );
     }
 
@@ -7568,4 +7573,5 @@ mod tests {
             ["on:Notification", "on:Pre-Tool Use /Bash", "on:Stop"]
         );
     }
+
 }

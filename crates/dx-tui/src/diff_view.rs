@@ -18,7 +18,7 @@ use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
 
 use crate::theme::ChatTheme;
 
-fn render_scrollbar_track_hover(
+fn render_scrollbar_thumb_hover(
     area: Rect,
     buf: &mut Buffer,
     content_len: usize,
@@ -35,23 +35,10 @@ fn render_scrollbar_track_hover(
     let max_scroll = content_len.saturating_sub(viewport).max(1);
     let max_offset = viewport.saturating_sub(thumb_height);
     let thumb_offset = scroll.min(max_scroll) * max_offset / max_scroll;
-    for y in 0..viewport {
+    for y in thumb_offset..thumb_offset + thumb_height {
         let cell = &mut buf[(x, area.y + y as u16)];
-        cell.set_char(
-            if y >= thumb_offset && y < thumb_offset + thumb_height {
-                "┃"
-            } else {
-                "│"
-            }
-            .chars()
-            .next()
-            .unwrap(),
-        );
-        cell.set_fg(if hovered {
-            Color::White
-        } else {
-            Color::DarkGray
-        });
+        cell.set_char('┃');
+        cell.set_fg(if hovered { Color::White } else { Color::DarkGray });
     }
 }
 
@@ -68,13 +55,7 @@ pub(crate) fn syntect_engine() -> &'static (SyntaxSet, syntect::highlighting::Th
             .or_else(|| ts.themes.get("InspiredGitHub"))
             .or_else(|| ts.themes.values().next())
             .cloned()
-            .unwrap_or_else(|| {
-                ThemeSet::load_defaults()
-                    .themes
-                    .into_values()
-                    .next()
-                    .unwrap()
-            });
+            .unwrap_or_else(|| ThemeSet::load_defaults().themes.into_values().next().unwrap());
         (ss, theme)
     })
 }
@@ -101,6 +82,20 @@ pub enum DiffRowKind {
     Add,
     Del,
     Context,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DiffViewMode {
+    #[default]
+    FileTree,
+    AiSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffIntent {
+    pub title: String,
+    pub summary: String,
+    pub file_indices: Vec<usize>,
 }
 
 /// Tree node for the left file browser.
@@ -152,14 +147,25 @@ pub struct DiffState {
     pub patch_scrollbar_area: Rect,
     pub tree_scrollbar_dragging: bool,
     pub patch_scrollbar_dragging: bool,
+    /// Default is the file tree. AI Summary switches the left pane to intent
+    /// groups and the right pane to hunk excerpts for the selected intent.
+    pub view_mode: DiffViewMode,
+    pub intents: Vec<DiffIntent>,
+    pub selected_intent: usize,
+    pub intent_scroll: usize,
+    /// Topbar hit areas. The actions are dispatched through the existing
+    /// agent prompt path so normal ACP permission gates still apply.
+    pub commit_push_area: Rect,
+    pub ai_summarize_area: Rect,
+    pub commit_push_hovered: bool,
+    pub ai_summarize_hovered: bool,
+    pub ai_summary_pending: bool,
+    ai_summary_baseline: Option<String>,
 }
 
 impl DiffState {
     pub fn empty() -> Self {
-        Self {
-            focus_tree: true,
-            ..Self::default()
-        }
+        Self { focus_tree: true, ..Self::default() }
     }
 
     /// Refresh from `git diff` (unstaged + staged). Creates empty structure if clean.
@@ -195,6 +201,11 @@ impl DiffState {
                 self.total_deletions = files.iter().map(|f| f.deletions).sum();
                 self.files = files;
                 self.tree = build_tree(&self.files);
+                if self.view_mode == DiffViewMode::AiSummary {
+                    self.intents = build_local_intents(&self.files);
+                    self.selected_intent =
+                        self.selected_intent.min(self.intents.len().saturating_sub(1));
+                }
                 if self.selected_file >= self.files.len() {
                     self.selected_file = 0;
                 }
@@ -219,11 +230,73 @@ impl DiffState {
 
     pub fn open_and_refresh(&mut self) {
         self.open = true;
+        // Every new visit starts in the ordinary file-tree view. AI Summary is
+        // an explicit one-session mode and must not leak into the next visit.
+        self.view_mode = DiffViewMode::FileTree;
+        self.ai_summary_pending = false;
+        self.ai_summary_baseline = None;
+        self.intents.clear();
+        self.selected_intent = 0;
+        self.intent_scroll = 0;
         self.refresh();
     }
 
     pub fn close(&mut self) {
         self.open = false;
+    }
+
+    pub fn begin_ai_summary(&mut self, baseline: Option<String>) {
+        self.view_mode = DiffViewMode::AiSummary;
+        self.ai_summary_pending = true;
+        self.ai_summary_baseline = baseline;
+        self.intents = build_local_intents(&self.files);
+        self.selected_intent = 0;
+        self.intent_scroll = 0;
+        self.diff_scroll = 0;
+    }
+
+    pub fn latest_agent_message(scrollback: &crate::scrollback::ScrollbackState) -> Option<String> {
+        scrollback.iter_entries().fold(None, |latest, (_, entry)| {
+            if let crate::scrollback::RenderBlock::AgentMessage(message) = &entry.block {
+                let text = message.text();
+                (!text.trim().is_empty()).then_some(text).or(latest)
+            } else {
+                latest
+            }
+        })
+    }
+
+    /// Pick up the latest streamed model response. The local grouping is
+    /// available immediately; a structured model response replaces it once
+    /// the agent emits one.
+    pub fn poll_ai_summary(&mut self, scrollback: &crate::scrollback::ScrollbackState) {
+        if !self.ai_summary_pending {
+            return;
+        }
+        let Some(text) = Self::latest_agent_message(scrollback) else {
+            return;
+        };
+        if self.ai_summary_baseline.as_deref() == Some(text.as_str()) {
+            return;
+        }
+        if let Some(intents) = parse_ai_intents(&text, &self.files)
+            && !intents.is_empty()
+        {
+            self.intents = intents;
+        }
+        self.ai_summary_pending = false;
+        self.ai_summary_baseline = Some(text);
+        self.selected_intent = self.selected_intent.min(self.intents.len().saturating_sub(1));
+        self.intent_scroll = 0;
+        self.diff_scroll = 0;
+    }
+
+    pub fn commit_push_prompt() -> &'static str {
+        "Review the current working-tree changes with git status and git diff. Then prepare a concise conventional commit message, stage only the intended current changes, commit them, and push the current branch to its configured upstream. Do not reset, checkout, discard, or overwrite any changes, and stop with a clear explanation if the tree is conflicted, there is no upstream, authentication fails, or confirmation is required. Use the normal permission gates for git operations."
+    }
+
+    pub fn ai_summary_prompt() -> &'static str {
+        "Review the current working-tree changes using git status and git diff. Do not edit, stage, commit, or push anything. Return only repeated blocks in this exact shape: INTENT: <short title>\nSUMMARY: <one sentence describing what was completed>\nFILES: <comma-separated repository paths>\nEND INTENT. Group related files by completed intent and include every changed file in exactly one group."
     }
 
     pub fn summary_label(&self) -> String {
@@ -238,10 +311,7 @@ impl DiffState {
     pub fn selected_stats_label(&self) -> String {
         if let Some(f) = self.files.get(self.selected_file) {
             let line_n = f.additions + f.deletions;
-            format!(
-                "{line_n} Line, {} Addition, {} Deletion",
-                f.additions, f.deletions
-            )
+            format!("{line_n} Line, {} Addition, {} Deletion", f.additions, f.deletions)
         } else {
             self.summary_label()
         }
@@ -337,11 +407,7 @@ impl DiffState {
                 } else {
                     line.clone()
                 };
-                rows.push(DiffDisplayRow {
-                    kind: DiffRowKind::Context,
-                    line_no: cur_add,
-                    text,
-                });
+                rows.push(DiffDisplayRow { kind: DiffRowKind::Context, line_no: cur_add, text });
                 cur_add = cur_add.saturating_add(1);
                 cur_del = cur_del.saturating_add(1);
             }
@@ -350,6 +416,9 @@ impl DiffState {
     }
 
     pub fn max_diff_scroll(&self, viewport: usize) -> usize {
+        if self.view_mode == DiffViewMode::AiSummary {
+            return self.max_intent_diff_scroll(viewport);
+        }
         let lines = self.selected_display_rows().len();
         lines.saturating_sub(viewport.max(1))
     }
@@ -379,17 +448,68 @@ impl DiffState {
         }
     }
 
+    pub fn move_intent_cursor(&mut self, delta: i32) {
+        if self.intents.is_empty() {
+            return;
+        }
+        if delta < 0 {
+            self.selected_intent = self.selected_intent.saturating_sub((-delta) as usize);
+        } else {
+            self.selected_intent =
+                (self.selected_intent + delta as usize).min(self.intents.len().saturating_sub(1));
+        }
+        let viewport = self.tree_inner.height.max(1) as usize;
+        if self.selected_intent < self.intent_scroll {
+            self.intent_scroll = self.selected_intent;
+        } else if self.selected_intent >= self.intent_scroll + viewport {
+            self.intent_scroll = self.selected_intent.saturating_sub(viewport - 1);
+        }
+        self.diff_scroll = 0;
+    }
+
+    fn selected_intent_files(&self) -> &[usize] {
+        self.intents
+            .get(self.selected_intent)
+            .map(|intent| intent.file_indices.as_slice())
+            .unwrap_or(&[])
+    }
+
+    fn selected_intent_rows(&self) -> Vec<(usize, Vec<DiffDisplayRow>)> {
+        self.selected_intent_files()
+            .iter()
+            .filter_map(|&file_index| {
+                self.files
+                    .get(file_index)
+                    .map(|file| (file_index, change_section_rows(&file.patch, 3)))
+            })
+            .collect()
+    }
+
+    fn max_intent_diff_scroll(&self, viewport: usize) -> usize {
+        self.selected_intent_rows()
+            .iter()
+            .map(|(_, rows)| rows.len() + 1)
+            .sum::<usize>()
+            .saturating_sub(viewport.max(1))
+    }
+
+    fn selected_intent_diff_rows(&self) -> Vec<(usize, DiffDisplayRow)> {
+        let mut output = Vec::new();
+        for (file_index, rows) in self.selected_intent_rows() {
+            for row in rows {
+                output.push((file_index, row));
+            }
+        }
+        output
+    }
+
     /// Flatten visible tree rows for navigation / hit testing.
     pub fn visible_tree_rows(&self) -> Vec<TreeRow> {
         let mut rows = Vec::new();
         fn walk(nodes: &[TreeNode], depth: usize, rows: &mut Vec<TreeRow>) {
             for node in nodes {
                 match node {
-                    TreeNode::Dir {
-                        name,
-                        children,
-                        expanded,
-                    } => {
+                    TreeNode::Dir { name, children, expanded } => {
                         rows.push(TreeRow {
                             depth,
                             label: name.clone(),
@@ -511,13 +631,25 @@ impl DiffState {
     }
 
     fn apply_patch_scrollbar(&mut self, y: u16) {
-        let rows = self.selected_display_rows().len();
+        let rows = if self.view_mode == DiffViewMode::AiSummary {
+            self.selected_intent_diff_rows().len() + self.selected_intent_files().len()
+        } else {
+            self.selected_display_rows().len()
+        };
         self.diff_scroll = scrollbar_offset_for_row(
             self.patch_scrollbar_area,
             y,
             rows,
             self.patch_inner.height as usize,
         );
+    }
+
+    pub fn intent_row_at_y(&self, y: u16) -> Option<usize> {
+        if self.tree_inner.height == 0 || y < self.tree_inner.y || y >= self.tree_inner.bottom() {
+            return None;
+        }
+        let row = self.intent_scroll + (y - self.tree_inner.y) as usize;
+        (row < self.intents.len()).then_some(row)
     }
 }
 
@@ -532,12 +664,7 @@ pub struct TreeRow {
 
 fn toggle_dir_named(nodes: &mut [TreeNode], name: &str, target_depth: usize, depth: usize) -> bool {
     for node in nodes.iter_mut() {
-        if let TreeNode::Dir {
-            name: n,
-            children,
-            expanded,
-        } = node
-        {
+        if let TreeNode::Dir { name: n, children, expanded } = node {
             if depth == target_depth && n == name {
                 *expanded = !*expanded;
                 return true;
@@ -569,11 +696,7 @@ fn collect_git_diff() -> Result<Vec<DiffFile>, String> {
         }
         // XY PATH or XY ORIG -> PATH
         let rest = line[2..].trim();
-        let path = if let Some((_, right)) = rest.split_once(" -> ") {
-            right.trim()
-        } else {
-            rest
-        };
+        let path = if let Some((_, right)) = rest.split_once(" -> ") { right.trim() } else { rest };
         if !path.is_empty() {
             paths.insert(path.to_string());
         }
@@ -630,12 +753,7 @@ fn collect_git_diff() -> Result<Vec<DiffFile>, String> {
         }
 
         let (additions, deletions) = count_diff_stats(&patch);
-        files.push(DiffFile {
-            path,
-            additions,
-            deletions,
-            patch,
-        });
+        files.push(DiffFile { path, additions, deletions, patch });
     }
 
     Ok(files)
@@ -655,10 +773,7 @@ fn count_diff_stats(patch: &str) -> (usize, usize) {
 }
 
 fn run_git(args: &[&str]) -> Result<String, String> {
-    let output = Command::new("git")
-        .args(args)
-        .output()
-        .map_err(|e| format!("git failed: {e}"))?;
+    let output = Command::new("git").args(args).output().map_err(|e| format!("git failed: {e}"))?;
     if !output.status.success() {
         let err = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git {}: {}", args.join(" "), err.trim()));
@@ -679,10 +794,7 @@ fn build_tree(files: &[DiffFile]) -> Vec<TreeNode> {
                 [] => {}
                 [name] => self.files.push(((*name).to_string(), file_index)),
                 [dir, rest @ ..] => {
-                    self.dirs
-                        .entry((*dir).to_string())
-                        .or_default()
-                        .insert(rest, file_index);
+                    self.dirs.entry((*dir).to_string()).or_default().insert(rest, file_index);
                 }
             }
         }
@@ -690,11 +802,7 @@ fn build_tree(files: &[DiffFile]) -> Vec<TreeNode> {
         fn into_nodes(self) -> Vec<TreeNode> {
             let mut nodes = Vec::new();
             for (name, child) in self.dirs {
-                nodes.push(TreeNode::Dir {
-                    name,
-                    children: child.into_nodes(),
-                    expanded: true,
-                });
+                nodes.push(TreeNode::Dir { name, children: child.into_nodes(), expanded: true });
             }
             for (name, file_index) in self.files {
                 nodes.push(TreeNode::File { name, file_index });
@@ -736,9 +844,7 @@ fn scrollbar_offset_for_row(area: Rect, y: u16, total: usize, viewport: usize) -
         return 0;
     }
     let max_scroll = total.saturating_sub(viewport);
-    let cell = y
-        .saturating_sub(area.y)
-        .min(area.height.saturating_sub(1)) as usize;
+    let cell = y.saturating_sub(area.y).min(area.height.saturating_sub(1)) as usize;
     if cell == 0 {
         0
     } else if cell + 1 >= area.height as usize {
@@ -754,6 +860,8 @@ pub fn render_diff_view(state: &mut DiffState, theme: &ChatTheme, area: Rect, bu
     state.poll_refresh();
     state.tree_scrollbar_area = Rect::default();
     state.patch_scrollbar_area = Rect::default();
+    state.commit_push_area = Rect::default();
+    state.ai_summarize_area = Rect::default();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
             buf[(x, y)].reset();
@@ -763,26 +871,12 @@ pub fn render_diff_view(state: &mut DiffState, theme: &ChatTheme, area: Rect, bu
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Length(1), Constraint::Min(3), Constraint::Length(1)])
         .split(area);
 
-    // Global top bar: file count + aggregate Line / Addition / Deletion
-    let title = format!(
-        "Diffs  ·  {} files  ·  {}",
-        state.files.len(),
-        state.summary_label()
-    );
-    Paragraph::new(Span::styled(
-        title,
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
-    ))
-    .render(chunks[0], buf);
+    // Global top bar: file count + aggregate Line / Addition / Deletion.
+    let title = format!("Diffs  ·  {} files  ·  {}", state.files.len(), state.summary_label());
+    render_diff_topbar(state, theme, chunks[0], &title, buf);
 
     // Body: tree | diff
     let body = Layout::default()
@@ -793,8 +887,13 @@ pub fn render_diff_view(state: &mut DiffState, theme: &ChatTheme, area: Rect, bu
     state.tree_area = body[0];
     state.patch_area = body[1];
 
-    render_tree_pane(state, theme, body[0], buf);
-    render_diff_pane(state, theme, body[1], buf);
+    if state.view_mode == DiffViewMode::AiSummary {
+        render_intent_pane(state, theme, body[0], buf);
+        render_intent_diff_pane(state, theme, body[1], buf);
+    } else {
+        render_tree_pane(state, theme, body[0], buf);
+        render_diff_pane(state, theme, body[1], buf);
+    }
 
     // Footer: path + key hints
     let footer = if let Some(err) = &state.error {
@@ -804,14 +903,255 @@ pub fn render_diff_view(state: &mut DiffState, theme: &ChatTheme, area: Rect, bu
     } else if state.files.is_empty() {
         "Working tree clean  ·  Esc close  ·  r refresh".to_string()
     } else {
-        let path = state
-            .files
-            .get(state.selected_file)
-            .map(|f| f.path.as_str())
-            .unwrap_or("");
+        let path = state.files.get(state.selected_file).map(|f| f.path.as_str()).unwrap_or("");
         format!("{path}  ·  ←/→ panels  ·  Enter open  ·  Esc close  ·  r refresh")
     };
     Paragraph::new(Span::styled(footer, Style::default().fg(theme.border))).render(chunks[2], buf);
+}
+
+fn change_section_rows(patch: &str, context: usize) -> Vec<DiffDisplayRow> {
+    let mut sections: Vec<Vec<DiffDisplayRow>> = Vec::new();
+    let mut current = Vec::new();
+    let mut changed = Vec::new();
+    let mut cur_add = 1usize;
+    let mut cur_del = 1usize;
+
+    let finish = |sections: &mut Vec<Vec<DiffDisplayRow>>,
+                  current: &mut Vec<DiffDisplayRow>,
+                  changed: &mut Vec<usize>| {
+        if current.is_empty() {
+            changed.clear();
+            return;
+        }
+        if changed.is_empty() {
+            current.clear();
+            return;
+        }
+        let first = changed.iter().copied().min().unwrap_or(0).saturating_sub(context);
+        let last = changed
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+            .saturating_add(context)
+            .min(current.len().saturating_sub(1));
+        sections.push(current[first..=last].to_vec());
+        current.clear();
+        changed.clear();
+    };
+
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            finish(&mut sections, &mut current, &mut changed);
+            apply_hunk_line_counters(line, &mut cur_add, &mut cur_del);
+            continue;
+        }
+        if line.starts_with("diff ")
+            || line.starts_with("index ")
+            || line.starts_with("---")
+            || line.starts_with("+++")
+        {
+            continue;
+        }
+        let (kind, line_no, text) = if line.starts_with('+') {
+            let row = DiffDisplayRow {
+                kind: DiffRowKind::Add,
+                line_no: cur_add,
+                text: line.chars().skip(1).collect(),
+            };
+            cur_add = cur_add.saturating_add(1);
+            (row.kind, row.line_no, row.text)
+        } else if line.starts_with('-') {
+            let row = DiffDisplayRow {
+                kind: DiffRowKind::Del,
+                line_no: cur_del,
+                text: line.chars().skip(1).collect(),
+            };
+            cur_del = cur_del.saturating_add(1);
+            (row.kind, row.line_no, row.text)
+        } else {
+            let text = if line.starts_with(' ') {
+                line.chars().skip(1).collect()
+            } else {
+                line.to_string()
+            };
+            let row = DiffDisplayRow { kind: DiffRowKind::Context, line_no: cur_add, text };
+            cur_add = cur_add.saturating_add(1);
+            cur_del = cur_del.saturating_add(1);
+            (row.kind, row.line_no, row.text)
+        };
+        if matches!(kind, DiffRowKind::Add | DiffRowKind::Del) {
+            changed.push(current.len());
+        }
+        current.push(DiffDisplayRow { kind, line_no, text });
+    }
+    finish(&mut sections, &mut current, &mut changed);
+    sections.into_iter().flatten().collect()
+}
+
+fn build_local_intents(files: &[DiffFile]) -> Vec<DiffIntent> {
+    let mut groups: std::collections::BTreeMap<String, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (index, file) in files.iter().enumerate() {
+        let area = Path::new(&file.path)
+            .components()
+            .next()
+            .and_then(|component| component.as_os_str().to_str())
+            .filter(|component| !component.is_empty())
+            .unwrap_or("root")
+            .to_string();
+        groups.entry(area).or_default().push(index);
+    }
+    groups
+        .into_iter()
+        .map(|(area, file_indices)| {
+            let additions: usize = file_indices.iter().map(|&i| files[i].additions).sum();
+            let deletions: usize = file_indices.iter().map(|&i| files[i].deletions).sum();
+            DiffIntent {
+                title: if area == "root" {
+                    "Root changes".into()
+                } else {
+                    format!("Update {area}")
+                },
+                summary: format!(
+                    "{} file(s) changed (+{additions}, -{deletions})",
+                    file_indices.len()
+                ),
+                file_indices,
+            }
+        })
+        .collect()
+}
+
+fn parse_ai_intents(text: &str, files: &[DiffFile]) -> Option<Vec<DiffIntent>> {
+    let mut parsed = Vec::new();
+    let mut title = None;
+    let mut summary = None;
+    let mut paths: Vec<String> = Vec::new();
+    let flush = |parsed: &mut Vec<DiffIntent>,
+                 title: &mut Option<String>,
+                 summary: &mut Option<String>,
+                 paths: &mut Vec<String>| {
+        let Some(title_value) = title.take() else {
+            paths.clear();
+            summary.take();
+            return;
+        };
+        let file_indices = paths
+            .drain(..)
+            .filter_map(|path| {
+                let normalized = path.trim().trim_matches('`').trim_start_matches("./");
+                files.iter().position(|file| file.path == normalized)
+            })
+            .collect::<Vec<_>>();
+        if !file_indices.is_empty() {
+            parsed.push(DiffIntent {
+                title: title_value,
+                summary: summary.take().unwrap_or_else(|| "Changes completed in this area".into()),
+                file_indices,
+            });
+        } else {
+            summary.take();
+        }
+    };
+    for line in text.lines() {
+        if let Some(value) = line.strip_prefix("INTENT:") {
+            flush(&mut parsed, &mut title, &mut summary, &mut paths);
+            title = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("SUMMARY:") {
+            summary = Some(value.trim().to_string());
+        } else if let Some(value) = line.strip_prefix("FILES:") {
+            paths.extend(value.split(',').map(|path| path.trim().to_string()));
+        } else if line.trim() == "END INTENT" {
+            flush(&mut parsed, &mut title, &mut summary, &mut paths);
+        }
+    }
+    flush(&mut parsed, &mut title, &mut summary, &mut paths);
+    (!parsed.is_empty()).then_some(parsed)
+}
+
+fn render_diff_topbar(
+    state: &mut DiffState,
+    theme: &ChatTheme,
+    area: Rect,
+    title: &str,
+    buf: &mut Buffer,
+) {
+    let commit_label = "[ Commit & Push ]";
+    let summary_label = "[ Ai Summarize ]";
+    let summary_width = summary_label.chars().count() as u16;
+    let commit_width = commit_label.chars().count() as u16;
+    let gap = 1u16;
+    let summary_x = area.right().saturating_sub(summary_width);
+    let commit_x = summary_x.saturating_sub(gap + commit_width);
+    let title_width = commit_x.saturating_sub(area.x).saturating_sub(gap);
+
+    Paragraph::new(Span::styled(
+        title,
+        Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+    ))
+    .render(Rect { x: area.x, y: area.y, width: title_width, height: area.height }, buf);
+
+    state.commit_push_area = Rect::new(commit_x, area.y, commit_width, area.height);
+    state.ai_summarize_area = Rect::new(summary_x, area.y, summary_width, area.height);
+    render_diff_button(buf, state.commit_push_area, commit_label, theme, state.commit_push_hovered);
+    render_diff_button(
+        buf,
+        state.ai_summarize_area,
+        summary_label,
+        theme,
+        state.ai_summarize_hovered,
+    );
+}
+
+fn render_diff_button(buf: &mut Buffer, area: Rect, label: &str, theme: &ChatTheme, hovered: bool) {
+    let style = if hovered {
+        Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme.accent)
+    };
+    Paragraph::new(Span::styled(label, style)).render(area, buf);
+}
+
+fn render_intent_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &mut Buffer) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(if state.focus_tree {
+            theme.accent
+        } else {
+            theme.border
+        }))
+        .title(Span::styled(" Intents ", Style::default().fg(theme.fg)));
+    let inner = block.inner(area);
+    state.tree_inner = inner;
+    state.tree_area = area;
+    block.render(area, buf);
+
+    let viewport = inner.height as usize;
+    for (row, intent) in state.intents.iter().skip(state.intent_scroll).take(viewport).enumerate() {
+        let y = inner.y + row as u16;
+        let absolute = state.intent_scroll + row;
+        let selected = absolute == state.selected_intent;
+        let marker = if selected { "● " } else { "  " };
+        let label = format!(
+            "{marker}{} — {} ({})",
+            intent.title,
+            intent.summary,
+            intent.file_indices.len()
+        );
+        let style = if selected {
+            Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        for x in inner.x..inner.right() {
+            buf[(x, y)].reset();
+            buf[(x, y)].set_bg(if selected { theme.accent } else { theme.bg });
+        }
+        Paragraph::new(Span::styled(label, style))
+            .render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
+    }
 }
 
 fn render_tree_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &mut Buffer) {
@@ -860,22 +1200,14 @@ fn render_tree_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
         let raw = format!("{indent}{glyph}{}{stats}", row.label);
         let max_w = inner.width as usize;
         let label: String = if raw.chars().count() > max_w {
-            raw.chars()
-                .take(max_w.saturating_sub(1))
-                .collect::<String>()
-                + "…"
+            raw.chars().take(max_w.saturating_sub(1)).collect::<String>() + "…"
         } else {
             raw
         };
         let style = if selected {
-            Style::default()
-                .fg(theme.bg)
-                .bg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.bg).bg(theme.accent).add_modifier(Modifier::BOLD)
         } else if is_active_file {
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD)
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD)
         } else if row.is_dir {
             Style::default().fg(theme.fg).add_modifier(Modifier::BOLD)
         } else {
@@ -891,21 +1223,14 @@ fn render_tree_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
                 buf[(x, y)].set_bg(theme.bg);
             }
         }
-        Paragraph::new(Span::styled(label, style)).render(
-            Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            },
-            buf,
-        );
+        Paragraph::new(Span::styled(label, style))
+            .render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
     }
 
     if max_scroll > 0 {
         state.tree_scrollbar_area =
             Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        render_scrollbar_track_hover(
+        render_scrollbar_thumb_hover(
             inner,
             buf,
             rows.len(),
@@ -938,10 +1263,7 @@ fn render_diff_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
         } else {
             theme.border
         }))
-        .title(Span::styled(
-            format!(" {file_title} "),
-            Style::default().fg(theme.fg),
-        ));
+        .title(Span::styled(format!(" {file_title} "), Style::default().fg(theme.fg)));
     let inner = block.inner(area);
     block.render(area, buf);
     state.patch_inner = inner;
@@ -950,9 +1272,7 @@ fn render_diff_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
     if rows.is_empty() {
         Paragraph::new(Span::styled(
             "No diff for this file.",
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::ITALIC),
+            Style::default().fg(theme.border).add_modifier(Modifier::ITALIC),
         ))
         .render(inner, buf);
         return;
@@ -967,11 +1287,7 @@ fn render_diff_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
     let add_fg = Color::Rgb(0x4a, 0xe5, 0x8a);
     let del_fg = Color::Rgb(0xff, 0x5c, 0x5c);
 
-    let file_path = state
-        .files
-        .get(state.selected_file)
-        .map(|f| f.path.as_str())
-        .unwrap_or("");
+    let file_path = state.files.get(state.selected_file).map(|f| f.path.as_str()).unwrap_or("");
     let (syntax_set, syn_theme) = syntect_engine();
     let syntax = syntax_for_path(syntax_set, file_path);
     let mut highlighter = HighlightLines::new(syntax, syn_theme);
@@ -1005,40 +1321,111 @@ fn render_diff_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &
 
         let num = format!("{:>4}", row.line_no);
         let mut spans = vec![
-            Span::styled(
-                num,
-                Style::default()
-                    .fg(num_fg)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(num, Style::default().fg(num_fg).bg(bg).add_modifier(Modifier::BOLD)),
             Span::styled(marker.to_string(), Style::default().fg(fg).bg(bg)),
         ];
-        spans.extend(highlight_with_syntect(
-            &mut highlighter,
-            syntax_set,
-            &row.text,
-            fg,
-            Some(bg),
-        ));
-        Paragraph::new(Line::from(spans)).render(
-            Rect {
-                x: inner.x,
-                y,
-                width: inner.width,
-                height: 1,
-            },
-            buf,
-        );
+        spans.extend(highlight_with_syntect(&mut highlighter, syntax_set, &row.text, fg, Some(bg)));
+        Paragraph::new(Line::from(spans))
+            .render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
     }
 
     if max_scroll > 0 {
         state.patch_scrollbar_area =
             Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
-        render_scrollbar_track_hover(
+        render_scrollbar_thumb_hover(
             inner,
             buf,
             rows.len(),
+            scroll,
+            state.patch_scrollbar_hovered,
+            1,
+        );
+    }
+}
+
+fn render_intent_diff_pane(state: &mut DiffState, theme: &ChatTheme, area: Rect, buf: &mut Buffer) {
+    let title = state
+        .intents
+        .get(state.selected_intent)
+        .map(|intent| format!(" {} ", intent.title))
+        .unwrap_or_else(|| " AI Summary ".into());
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
+        .border_style(Style::default().fg(if !state.focus_tree {
+            theme.accent
+        } else {
+            theme.border
+        }))
+        .title(Span::styled(title, Style::default().fg(theme.fg)));
+    let inner = block.inner(area);
+    block.render(area, buf);
+    state.patch_inner = inner;
+
+    let mut display: Vec<(Option<String>, Option<DiffDisplayRow>)> = Vec::new();
+    for (file_index, rows) in state.selected_intent_rows() {
+        if let Some(file) = state.files.get(file_index) {
+            display.push((Some(file.path.clone()), None));
+        }
+        display.extend(rows.into_iter().map(|row| (None, Some(row))));
+    }
+    if display.is_empty() {
+        Paragraph::new(Span::styled(
+            "No changed sections in this intent.",
+            Style::default().fg(theme.border).add_modifier(Modifier::ITALIC),
+        ))
+        .render(inner, buf);
+        return;
+    }
+
+    let viewport = inner.height as usize;
+    let max_scroll = display.len().saturating_sub(viewport.max(1));
+    let scroll = state.diff_scroll.min(max_scroll);
+    for (display_row, (file_header, row)) in display.iter().skip(scroll).take(viewport).enumerate()
+    {
+        let y = inner.y + display_row as u16;
+        if y >= inner.bottom() {
+            break;
+        }
+        for x in inner.x..inner.right() {
+            buf[(x, y)].reset();
+            buf[(x, y)].set_bg(theme.bg);
+        }
+        if let Some(path) = file_header {
+            Paragraph::new(Span::styled(
+                format!("── {path}"),
+                Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            ))
+            .render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
+            continue;
+        }
+        let Some(row) = row else { continue };
+        let (fg, bg, marker) = match row.kind {
+            DiffRowKind::Add => (Color::Rgb(0x4a, 0xe5, 0x8a), Color::Rgb(0x0d, 0x2a, 0x0d), "+"),
+            DiffRowKind::Del => (Color::Rgb(0xff, 0x5c, 0x5c), Color::Rgb(0x2a, 0x0d, 0x0d), "-"),
+            DiffRowKind::Context => (theme.fg, theme.bg, " "),
+        };
+        for x in inner.x..inner.right() {
+            buf[(x, y)].reset();
+            buf[(x, y)].set_bg(bg);
+        }
+        let line = Line::from(vec![
+            Span::styled(
+                format!("{:>4}", row.line_no),
+                Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(marker.to_string(), Style::default().fg(fg).bg(bg)),
+            Span::styled(row.text.clone(), Style::default().fg(fg).bg(bg)),
+        ]);
+        Paragraph::new(line).render(Rect { x: inner.x, y, width: inner.width, height: 1 }, buf);
+    }
+    if max_scroll > 0 {
+        state.patch_scrollbar_area =
+            Rect::new(inner.right().saturating_sub(1), inner.y, 1, inner.height);
+        render_scrollbar_thumb_hover(
+            inner,
+            buf,
+            display.len(),
             scroll,
             state.patch_scrollbar_hovered,
             1,
@@ -1128,11 +1515,7 @@ pub(crate) fn highlight_with_syntect(
     bg: Option<Color>,
 ) -> Vec<Span<'static>> {
     // syntect expects a trailing newline for correct state
-    let input = if line.ends_with('\n') {
-        line.to_string()
-    } else {
-        format!("{line}\n")
-    };
+    let input = if line.ends_with('\n') { line.to_string() } else { format!("{line}\n") };
     let Ok(regions) = highlighter.highlight_line(&input, syntax_set) else {
         let mut style = Style::default().fg(fallback_fg);
         if let Some(c) = bg {
@@ -1157,22 +1540,13 @@ pub(crate) fn highlight_with_syntect(
         } else {
             s = s.fg(fallback_fg);
         }
-        if style
-            .font_style
-            .contains(syntect::highlighting::FontStyle::BOLD)
-        {
+        if style.font_style.contains(syntect::highlighting::FontStyle::BOLD) {
             s = s.add_modifier(Modifier::BOLD);
         }
-        if style
-            .font_style
-            .contains(syntect::highlighting::FontStyle::ITALIC)
-        {
+        if style.font_style.contains(syntect::highlighting::FontStyle::ITALIC) {
             s = s.add_modifier(Modifier::ITALIC);
         }
-        if style
-            .font_style
-            .contains(syntect::highlighting::FontStyle::UNDERLINE)
-        {
+        if style.font_style.contains(syntect::highlighting::FontStyle::UNDERLINE) {
             s = s.add_modifier(Modifier::UNDERLINED);
         }
         spans.push(Span::styled(text.to_string(), s));
@@ -1191,10 +1565,7 @@ pub(crate) fn highlight_with_syntect(
 pub fn quick_diff_stats() -> (usize, usize) {
     let mut add = 0usize;
     let mut del = 0usize;
-    for args in [
-        &["diff", "--numstat"][..],
-        &["diff", "--cached", "--numstat"][..],
-    ] {
+    for args in [&["diff", "--numstat"][..], &["diff", "--cached", "--numstat"][..]] {
         if let Ok(out) = run_git(args) {
             for line in out.lines() {
                 let parts: Vec<_> = line.split('\t').collect();
@@ -1226,12 +1597,7 @@ mod tests {
     #[test]
     fn build_tree_nests_paths() {
         let files = vec![
-            DiffFile {
-                path: "src/a.rs".into(),
-                additions: 1,
-                deletions: 0,
-                patch: "+x\n".into(),
-            },
+            DiffFile { path: "src/a.rs".into(), additions: 1, deletions: 0, patch: "+x\n".into() },
             DiffFile {
                 path: "src/b/c.rs".into(),
                 additions: 2,
@@ -1262,5 +1628,28 @@ mod tests {
         assert_eq!(scrollbar_offset_for_row(area, 5, 100, 10), 0);
         assert_eq!(scrollbar_offset_for_row(area, 14, 100, 10), 90);
         assert_eq!(scrollbar_offset_for_row(area, 99, 100, 10), 90);
+    }
+
+    #[test]
+    fn change_sections_keep_only_hunk_context_around_edits() {
+        let patch = "@@ -10,5 +10,5 @@\n context before\n-old\n+new\n context after\n";
+        let rows = change_section_rows(patch, 1);
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().any(|row| row.kind == DiffRowKind::Del));
+        assert!(rows.iter().any(|row| row.kind == DiffRowKind::Add));
+        assert!(rows.iter().all(|row| row.text != "unrelated"));
+    }
+
+    #[test]
+    fn ai_intents_resolve_exact_repository_paths() {
+        let files = vec![
+            DiffFile { path: "src/main.rs".into(), additions: 2, deletions: 1, patch: String::new() },
+            DiffFile { path: "README.md".into(), additions: 1, deletions: 0, patch: String::new() },
+        ];
+        let response = "INTENT: Runtime\nSUMMARY: Connect the runtime path\nFILES: src/main.rs\nEND INTENT\nINTENT: Docs\nSUMMARY: Update documentation\nFILES: README.md\nEND INTENT";
+        let intents = parse_ai_intents(response, &files).expect("structured intents");
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[0].file_indices, vec![0]);
+        assert_eq!(intents[1].file_indices, vec![1]);
     }
 }

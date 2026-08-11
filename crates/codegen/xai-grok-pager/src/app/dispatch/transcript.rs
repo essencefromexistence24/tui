@@ -799,14 +799,9 @@ pub(super) fn handle_marketplace_list_loaded(
         modal.marketplace_data = match result {
             Ok(mut response) => {
                 response.sanitize();
-                // Only default to collapsed on first load (when state is Loading).
-                // On reloads (after install/uninstall/refresh), preserve the user's
-                // expand/collapse choices.
-                let is_first_load = matches!(modal.marketplace_data, TabDataState::Loading);
-                if is_first_load {
-                    // All sources start collapsed.
-                    modal.marketplace_collapsed_sources = (0..response.sources.len()).collect();
-                }
+                // Marketplace sources are expanded on first load. A source is
+                // added to `marketplace_collapsed_sources` only by an explicit
+                // user toggle, and reloads preserve that choice.
                 TabDataState::Loaded(response)
             }
             Err(e) => TabDataState::Error(e),
