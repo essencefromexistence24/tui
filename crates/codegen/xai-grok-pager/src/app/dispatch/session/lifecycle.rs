@@ -457,6 +457,7 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
     let chat_kind = consume_chat_kind(app);
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.chat_kind = chat_kind;
+        agent.conversation_entry = chat_kind;
         #[cfg(feature = "local-workspace")]
         {
             let local_intent = match &app.welcome_session_local_workspace {
@@ -968,6 +969,7 @@ pub(in crate::app::dispatch) fn dispatch_new_worktree_session(
             &app.tier_restricted_commands,
         );
         agent.chat_kind = chat_kind;
+        agent.conversation_entry = chat_kind;
         #[cfg(feature = "local-workspace")]
         {
             let local_intent = match &app.welcome_session_local_workspace {
