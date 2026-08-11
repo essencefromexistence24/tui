@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use chrono::Timelike;
 use xai_grok_workspace::session::git::VcsKind;
 
 // Re-export from xai-chat-state — canonical definition lives there.
@@ -46,20 +47,32 @@ pub(crate) fn construct_user_message_minimal(
             )
         }
     };
-    let today = chrono::Local::now().format("%Y-%m-%d");
+    let now = chrono::Local::now();
+    let hour = now.hour();
+    let hour_12 = match hour % 12 {
+        0 => 12,
+        hour => hour,
+    };
+    let meridiem = if hour < 12 { "AM" } else { "PM" };
+    let local_time = format!(
+        "{}, {}:{:02} {meridiem}",
+        now.format("%Y-%m-%d"),
+        hour_12,
+        now.minute(),
+    );
     format!(
         r#"<user_info>
 OS Version: {os}
 Shell: {shell}
 Workspace Path: {cwd}
-{USER_INFO_DATE_MARKER} {today}
+{USER_INFO_DATE_MARKER} {local_time}
 Note: Prefer using relative paths over absolute paths as tool call args when possible.
 </user_info>"#,
     )
 }
 
-/// Date label in the `<user_info>` prefix; `spawn::resumed_prefix_carries_fallback_date` scans for it.
-pub(crate) const USER_INFO_DATE_MARKER: &str = "Today's date:";
+/// Time label in the `<user_info>` prefix; `spawn::resumed_prefix_carries_fallback_date` scans for it.
+pub(crate) const USER_INFO_DATE_MARKER: &str = "Time:";
 
 /// Resolve a display string for the user's shell.
 ///
@@ -81,22 +94,16 @@ fn resolve_shell_display() -> String {
 }
 
 pub(crate) fn format_vcs_status_block(status: &str, vcs_kind: VcsKind) -> String {
-    let (tag, description) = if vcs_kind.is_jj() {
-        (
-            "jj_status",
-            "This is the Jujutsu (jj) status at the start of the conversation. This is a \
+    if vcs_kind.is_jj() {
+        format!(
+            "\n\n<jj_status>\nThis is the Jujutsu (jj) status at the start of the conversation. This is a \
              jj-managed repository \u{2014} use `jj` commands instead of `git`. There is no staging \
              area; all changes are part of the working-copy commit (@). Use `jj describe` to \
-             set commit messages and `jj new` to finalize changes.",
+             set commit messages and `jj new` to finalize changes.\n{status}\n</jj_status>\n"
         )
     } else {
-        (
-            "git_status",
-            "This is the git status at the start of the conversation. Note that this status \
-             is a snapshot in time, and will not update during the conversation.",
-        )
-    };
-    format!("\n\n<{tag}>\n{description}\n{status}\n</{tag}>\n")
+        format!("\n\n<git_status>\n{status}\n</git_status>\n")
+    }
 }
 
 /// Compute the VCS status block (without the `<user_info>` wrapper).

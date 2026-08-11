@@ -90,12 +90,12 @@ pub fn build_server_reminder(
         return None;
     }
 
-    let mut text = format!("Connected MCP servers:\n",);
-    for server in servers {
-        text.push_str(&format_server_line(server));
-    }
-
-    Some(text)
+    let servers = servers
+        .iter()
+        .map(|server| format!("{}({})", server.name, server.tool_count))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!("MCP: {servers}."))
 }
 
 /// Build a delta system-reminder noting only what changed.
@@ -526,10 +526,10 @@ mod tests {
         }];
         let text = build_server_reminder(&servers).unwrap();
         assert!(
-            text.contains("- linear (12 tools): Project management\n"),
+            text.contains("MCP: linear(12)."),
             "got: {text}"
         );
-        assert!(text.contains("Connected MCP servers:"));
+        assert!(!text.contains("Project management"));
         assert!(
             !text.contains("Tools:"),
             "tool names must not be listed in the MCP prompt: {text}"
@@ -545,7 +545,7 @@ mod tests {
             tool_names: vec![],
         }];
         let text = build_server_reminder(&servers).unwrap();
-        assert!(text.contains("- slack (8 tools)\n"), "got: {text}");
+        assert_eq!(text, "MCP: slack(8).");
     }
 
     #[test]
@@ -557,10 +557,7 @@ mod tests {
             tool_names: vec![],
         }];
         let text = build_server_reminder(&servers).unwrap();
-        assert!(
-            text.contains("- verbose (3 tools): Line one Line two Line three\n"),
-            "got: {text}"
-        );
+        assert_eq!(text, "MCP: verbose(3).");
     }
 
     #[test]
@@ -572,8 +569,7 @@ mod tests {
             tool_names: vec![],
         }];
         let text = build_server_reminder(&servers).unwrap();
-        assert!(text.contains("- empty (5 tools)\n"), "got: {text}");
-        assert!(!text.contains(": \n"));
+        assert_eq!(text, "MCP: empty(5).");
     }
 
     #[test]
@@ -585,8 +581,7 @@ mod tests {
             tool_names: vec![],
         }];
         let text = build_server_reminder(&servers).unwrap();
-        assert!(text.contains("- single (1 tool)\n"), "got: {text}");
-        assert!(!text.contains("1 tools"));
+        assert_eq!(text, "MCP: single(1).");
     }
 
     #[test]
@@ -599,7 +594,7 @@ mod tests {
             tool_names: vec![],
         }];
         let text = build_server_reminder(&servers).unwrap();
-        assert!(text.contains(TRUNCATION_SUFFIX), "got: {text}");
+        assert_eq!(text, "MCP: grafana(28).");
     }
 
     // -- delta reminder tests --
