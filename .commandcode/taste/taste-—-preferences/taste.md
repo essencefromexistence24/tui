@@ -1,0 +1,16 @@
+# Taste — preferences
+- Prefers a "just check and don't do anything" phase before changes: investigate/plan first, then implement separately — don't jump straight into modifying code when asked to check. Confidence: 0.9
+- When asked to investigate a problem without making changes, expects a standalone analysis-only `PROBLEM.md` documenting it in detail: symptom vs reality, affected/unaffected, root causes with file references, evidence, impact, reproduction steps, required fix, verification checklist, and files to watch — not just an oral summary. Confidence: 0.9
+- When asking "just answer", wants a fast, direct answer without long digressions, caveats, or extra suggestions. Confidence: 0.8
+- Wants data rendered visibly in the response (file contents, token counts, tables) so he can verify himself; expects tables for comparisons (providers, channels, token breakdowns). Confidence: 0.9
+- Verifies claims empirically with the project's own tooling (e.g., `dx token` to count tokens) rather than estimates or assumptions. Confidence: 0.9
+- Demands "100 out of 100 production-ready and professional" code: no warnings/errors/failures, linted, tested, documented, no loose ends. Confidence: 0.9
+- Hates "AI slop": no placeholder copies, shallow integrations, feature-gating, or unimplemented code paths — everything must be fully wired and actually functional. Confidence: 0.9
+- Wants brutal honesty about real status: report actual gaps and unconnected features instead of sugarcoating ("brutal truths", "honest truths"). Confidence: 0.9
+- Don't cut corners or trim implementation to save space — do it fully and correctly ("there is space, so do it correctly"); token efficiency applies to prompts/payloads, not code completeness. Confidence: 0.8
+- Prefers merging/integrating components into the main codebase rather than keeping separate copies; when told to merge, do it instead of advising against it. Confidence: 0.9
+- Prefers adding to existing features over replacing them (e.g., add new providers/channels into existing menus/flows, never swap out working grok-build features). Confidence: 0.8
+- When code already exists, expects it to be connected/wired rather than being told it "can't be done" — implement it properly. Confidence: 0.8
+- When merging upstream (e.g., xai grok-build), preserve all local changes; create timestamped backup files (no extension) next to any file that upstream could overwrite before modifying it. Confidence: 0.8
+- Token efficiency matters in prompts/payloads: minimize filler words and track token budgets precisely. Confidence: 0.9
+- Uses exact proper names for formats/projects (e.g., "Dx Serializer Compact", not abbreviations) and wants professional, deliberate names for files/folders. Confidence: 0.7

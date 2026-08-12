@@ -191,6 +191,18 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
     let mut out: Vec<ChatRequestMessage> = Vec::with_capacity(items.len());
     let mut pending_reasoning: Vec<String> = Vec::new();
+    let mut pending_user: Option<UserItem> = None;
+
+    // Some harnesses build the first turn from several adjacent synthetic
+    // user items (workspace context, skills, MCP reminders, then the query).
+    // Chat Completions providers consistently expect that logical prompt as a
+    // single user message. Coalesce only adjacent users at the wire boundary;
+    // persisted conversation state remains lossless and unchanged.
+    let flush_user = |pending: &mut Option<UserItem>, messages: &mut Vec<ChatRequestMessage>| {
+        if let Some(user) = pending.take() {
+            messages.push(conversation_item_to_chat_message(ConversationItem::User(user)));
+        }
+    };
 
     for item in items {
         match item {
@@ -201,6 +213,7 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
                 }
             }
             ConversationItem::Assistant(_) => {
+                flush_user(&mut pending_user, &mut out);
                 let mut msg = conversation_item_to_chat_message(item);
                 if !pending_reasoning.is_empty() {
                     msg.reasoning_content = Some(pending_reasoning.join("\n"));
@@ -209,16 +222,31 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
                 out.push(msg);
             }
             ConversationItem::BackendToolCall(_) => {
+                flush_user(&mut pending_user, &mut out);
                 // Keep `pending_reasoning` so it still folds onto the
                 // following assistant, as the Responses path does.
                 out.push(conversation_item_to_chat_message(item));
             }
+            ConversationItem::User(user) => {
+                pending_reasoning.clear();
+                if let Some(pending) = pending_user.as_mut() {
+                    pending.content.extend(user.content);
+                    pending.synthetic_reason = None;
+                    pending.cwd_generation = user.cwd_generation;
+                    pending.prior_turn_interrupt = user.prior_turn_interrupt;
+                    pending.prompt_index = user.prompt_index;
+                } else {
+                    pending_user = Some(user);
+                }
+            }
             other => {
+                flush_user(&mut pending_user, &mut out);
                 pending_reasoning.clear();
                 out.push(conversation_item_to_chat_message(other));
             }
         }
     }
+    flush_user(&mut pending_user, &mut out);
 
     out
 }

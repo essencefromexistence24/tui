@@ -210,17 +210,21 @@ impl SessionActor {
     }
     pub(super) async fn prepare_tool_definitions_inner(&self) -> Vec<ToolDefinition> {
         let token_optimization = self.agent.borrow().definition().token_optimization.clone();
-        let local_model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
+        let sampling_config = self.chat_state_handle.get_sampling_config().await;
+        let local_model = sampling_config
+            .as_ref()
             .is_some_and(|config| crate::agent::local_model::is_local_base_url(&config.base_url));
+        // Dx Serializer Compact remains a prompt-level description, but the
+        // provider request must always carry real JSON Schema definitions.
+        // This is required for every hosted adapter, including xAI-compatible
+        // proxies, because providers validate and generate tool calls from the
+        // native `parameters` object—not from the compact prompt catalog.
         let mut defs = if local_model {
             let bridge = self.agent.borrow().tool_bridge().clone();
             bridge.tool_definitions_builtins_only().await
         } else {
             let definitions = self.agent.borrow().tool_definitions().await;
-            xai_grok_agent::native_tool_presentation::compact_native_definitions(definitions)
+            definitions
         };
         if local_model {
             let original_count = defs.len();
@@ -236,9 +240,9 @@ impl SessionActor {
             );
         }
         if !local_model && token_optimization.optimize_tool_schemas {
-            tracing::info!(
+            tracing::debug!(
                 tool_count = defs.len(),
-                "prepared token-bounded native JSON tool definitions"
+                "sending full native JSON tool schemas to hosted provider"
             );
         }
         let plan_active = self.plan_mode.lock().is_active();

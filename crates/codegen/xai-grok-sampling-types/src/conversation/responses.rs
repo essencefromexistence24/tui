@@ -381,3 +381,29 @@ pub fn extra_tool_entries(hosted_tools: &[HostedTool]) -> Vec<serde_json::Value>
     }
     entries
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn responses_tools_preserve_native_json_schema() {
+        let request = ConversationRequest::from_items(vec![ConversationItem::user("test")])
+            .with_tools(vec![ToolSpec {
+                name: "read_file".to_string(),
+                description: Some("Read a file".to_string()),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"]
+                }),
+            }]);
+
+        let body = serde_json::to_value(rs::CreateResponse::from(&request)).unwrap();
+        let tool = &body["tools"][0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["name"], "read_file");
+        assert_eq!(tool["parameters"]["properties"]["path"]["type"], "string");
+        assert_eq!(tool["parameters"]["required"][0], "path");
+    }
+}

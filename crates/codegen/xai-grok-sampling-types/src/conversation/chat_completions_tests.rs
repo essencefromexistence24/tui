@@ -55,6 +55,24 @@ fn test_conversation_request_to_chat_completion() {
 }
 
 #[test]
+fn adjacent_user_items_are_one_wire_prompt() {
+    let req = ConversationRequest::from_items(vec![
+        ConversationItem::system("System prompt"),
+        ConversationItem::user("workspace context"),
+        ConversationItem::user("skills reminder"),
+        ConversationItem::user("actual query"),
+    ]);
+
+    let chat_req: ChatCompletionRequest = req.into();
+    assert_eq!(chat_req.messages.len(), 2);
+    assert_eq!(chat_req.messages[0].text_content(), "System prompt");
+    assert_eq!(
+        chat_req.messages[1].text_content(),
+        "workspace context\nskills reminder\nactual query"
+    );
+}
+
+#[test]
 fn test_user_with_image() {
     let mut user = ConversationItem::user("Check this image");
     user.add_image("https://example.com/image.png");
@@ -272,6 +290,11 @@ fn test_conversation_request_with_tools_to_chat_completion() {
     assert_eq!(tools.len(), 2);
     assert_eq!(tools[0].function.name, "read_file");
     assert_eq!(tools[1].function.name, "bash");
+    assert_eq!(
+        tools[0].function.parameters["properties"]["path"]["type"],
+        "string"
+    );
+    assert_eq!(tools[0].function.parameters["required"][0], "path");
 }
 
 #[test]
