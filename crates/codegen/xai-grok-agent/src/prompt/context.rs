@@ -208,7 +208,7 @@ impl PromptContext {
     /// - Subagents and primary sessions both get the full block, so a child
     ///   verifier sees the same project instructions as the main agent.
     pub fn agents_md_user_reminder(&self) -> Option<String> {
-        self.format_agents_md_section()
+        agents_md::format_agents_md_index(&self.agents_md_files)
     }
     /// Personas content for injection as a prepended user message.
     ///
@@ -574,8 +574,8 @@ mod tests {
         let section = ctx
             .agents_md_user_reminder()
             .expect("default template must include AGENTS.md user reminder when files exist");
-        assert!(section.contains("<system-reminder>"));
-        assert!(section.contains("XYZZY_AGENTS_MD_MARKER"));
+        assert!(section.contains("rules=\"AGENTS.md\""));
+        assert!(!section.contains("XYZZY_AGENTS_MD_MARKER"));
     }
     #[test]
     fn personas_user_reminder_always_none() {
@@ -648,7 +648,7 @@ mod tests {
         );
     }
     #[test]
-    fn child_prompt_delivers_full_agents_md() {
+    fn child_prompt_indexes_agents_md_without_copying_body() {
         use crate::prompt::agents_md::AgentConfigFile;
         let mut ctx = child_general_purpose_context();
         ctx.agents_md_files = vec![AgentConfigFile {
@@ -658,14 +658,8 @@ mod tests {
         }];
         assert_eq!(ctx.audience, super::PromptAudience::Subagent);
         let reminder = ctx.agents_md_user_reminder().unwrap();
-        assert!(
-            reminder.contains(&"X".repeat(5000)),
-            "child must receive full AGENTS.md content"
-        );
-        assert!(
-            !reminder.contains("truncated"),
-            "child AGENTS.md must not be truncated"
-        );
+        assert!(reminder.contains("rules=\"AGENTS.md\""));
+        assert!(!reminder.contains(&"X".repeat(5000)));
     }
     #[test]
     fn child_prompt_uses_extend_mode() {

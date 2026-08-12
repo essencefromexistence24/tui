@@ -16,7 +16,7 @@ static LOCALE: OnceLock<String> = OnceLock::new();
 /// `locales/list` handler) get a long-lived reference with no runtime file I/O.
 static AVAILABLE_LOCALES: OnceLock<Vec<LocaleOption>> = OnceLock::new();
 
-const LOCALES_TOML: &str = include_str!("../../../../../zeroclaw/locales.toml");
+const LOCALES_TOML: &str = include_str!("../locales.toml");
 
 /// One selectable locale: its `code` (e.g. `ja`) and display `label`
 /// (e.g. `日本語`).

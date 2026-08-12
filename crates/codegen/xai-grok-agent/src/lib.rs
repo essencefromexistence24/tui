@@ -11,6 +11,7 @@ pub mod compaction;
 pub mod config;
 pub mod discovery;
 pub mod error;
+pub mod native_tool_presentation;
 pub mod plugins;
 pub mod prompt;
 pub mod repo;

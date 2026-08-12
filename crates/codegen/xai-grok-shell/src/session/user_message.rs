@@ -61,13 +61,7 @@ pub(crate) fn construct_user_message_minimal(
         now.minute(),
     );
     format!(
-        r#"<user_info>
-OS Version: {os}
-Shell: {shell}
-Workspace Path: {cwd}
-{USER_INFO_DATE_MARKER} {local_time}
-Note: Prefer using relative paths over absolute paths as tool call args when possible.
-</user_info>"#,
+        "<context os=\"{os}\" shell=\"{shell}\" cwd=\"{cwd}\" {USER_INFO_DATE_MARKER}\"{local_time}\" />"
     )
 }
 
@@ -102,7 +96,7 @@ pub(crate) fn format_vcs_status_block(status: &str, vcs_kind: VcsKind) -> String
              set commit messages and `jj new` to finalize changes.\n{status}\n</jj_status>\n"
         )
     } else {
-        format!("\n\n<git_status>\n{status}\n</git_status>\n")
+        format!("\n<context git=\"{status}\" />")
     }
 }
 

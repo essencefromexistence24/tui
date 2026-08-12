@@ -25,7 +25,7 @@ pub const USER_MESSAGE_DATE_FORMAT: &str = "%A %b %-d, %Y";
 /// `<git_status>` block has no token budget -- this character cap is the only
 /// size control, and it is applied per repo at render, never at gather, so
 /// other consumers of the raw status are unaffected.
-pub const GIT_STATUS_CHARACTER_LIMIT: usize = 10_000;
+pub const GIT_STATUS_CHARACTER_LIMIT: usize = 512;
 /// Trim, drop-if-empty, and cap a VCS status string for the
 /// `<git_status>` block.
 ///
@@ -38,20 +38,37 @@ pub fn normalize_git_status(status: &str) -> Option<String> {
     if status.is_empty() {
         return None;
     }
-    if status.len() <= GIT_STATUS_CHARACTER_LIMIT {
-        return Some(status.to_string());
+    let mut lines = status.lines();
+    let branch = lines.next().unwrap_or_default().trim();
+    let mut modified = 0usize;
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+    let mut renamed = 0usize;
+    let mut untracked = 0usize;
+    let mut other = 0usize;
+    for line in lines {
+        let code = line.get(..2).unwrap_or(line).trim();
+        if code.contains('?') {
+            untracked += 1;
+        } else if code.contains('R') {
+            renamed += 1;
+        } else if code.contains('D') {
+            deleted += 1;
+        } else if code.contains('A') {
+            added += 1;
+        } else if code.contains('M') {
+            modified += 1;
+        } else if !code.is_empty() {
+            other += 1;
+        }
     }
-    let mut end = GIT_STATUS_CHARACTER_LIMIT;
-    while !status.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut truncated = &status[..end];
-    if let Some(nl) = truncated.rfind('\n')
-        && nl > 0
-    {
-        truncated = &truncated[..nl];
-    }
-    Some(format!("{truncated}\n\n... (git status truncated)"))
+    let changed = modified + added + deleted + renamed + untracked + other;
+    let summary = if changed == 0 {
+        branch.to_owned()
+    } else {
+        format!("{branch}; files={changed} M{modified} A{added} D{deleted} R{renamed} ?{untracked}")
+    };
+    Some(summary.chars().take(GIT_STATUS_CHARACTER_LIMIT).collect())
 }
 /// Selects the first-user-message rendering strategy for an agent.
 ///
@@ -374,12 +391,14 @@ mod tests {
             assert_eq!(original, loaded);
         }
     }
-    /// A status under the cap passes through unchanged (trim is a no-op for
-    /// real `git status --short --branch` output, which starts with `##`).
+    /// Paths are replaced by bounded aggregate counts.
     #[test]
-    fn normalize_git_status_passthrough_under_limit() {
+    fn normalize_git_status_summarizes_paths() {
         let status = "## main...origin/main\n M src/app.rs";
-        assert_eq!(normalize_git_status(status).as_deref(), Some(status));
+        assert_eq!(
+            normalize_git_status(status).as_deref(),
+            Some("## main...origin/main; files=1 M1 A0 D0 R0 ?0")
+        );
     }
     /// Empty / whitespace-only status -> `None` so the section is dropped and
     /// no empty fence is emitted.
@@ -388,29 +407,18 @@ mod tests {
         assert_eq!(normalize_git_status(""), None);
         assert_eq!(normalize_git_status("   \n\t  "), None);
     }
-    /// A status over the cap is truncated at the last newline before the limit
-    /// and carries the spec's truncation marker.
+    /// Large worktrees remain bounded because paths are never rendered.
     #[test]
-    fn normalize_git_status_truncates_over_limit() {
+    fn normalize_git_status_large_worktree_is_bounded() {
         let mut status = String::from("## main...origin/main\n");
         while status.len() <= GIT_STATUS_CHARACTER_LIMIT {
             status.push_str(" M src/some/long/path/to/file.rs\n");
         }
         assert!(status.len() > GIT_STATUS_CHARACTER_LIMIT);
         let out = normalize_git_status(&status).expect("non-empty status");
-        assert!(
-            out.ends_with("\n\n... (git status truncated)"),
-            "missing truncation marker: {out}"
-        );
-        let body = out
-            .strip_suffix("\n\n... (git status truncated)")
-            .expect("marker suffix");
-        assert!(
-            body.len() <= GIT_STATUS_CHARACTER_LIMIT,
-            "body {} exceeds cap {GIT_STATUS_CHARACTER_LIMIT}",
-            body.len()
-        );
-        assert!(status.starts_with(body), "body is not a clean prefix");
+        assert!(out.len() <= GIT_STATUS_CHARACTER_LIMIT);
+        assert!(out.contains("files="));
+        assert!(!out.contains("src/"));
         assert!(!body.ends_with('\n'), "body should be snapped to last line");
     }
 }

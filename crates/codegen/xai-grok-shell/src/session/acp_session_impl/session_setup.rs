@@ -32,24 +32,9 @@ impl SessionActor {
         map_sampling_err_to_acp(err)
     }
     /// Set up `[system, skill_reminder?]` — prefix is deferred to background.
-    pub(super) async fn initialize(&self, mut system_prompt: String) {
+    pub(super) async fn initialize(&self, system_prompt: String) {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
-        let local_model = self
-            .chat_state_handle
-            .get_sampling_config()
-            .await
-            .is_some_and(|config| crate::agent::local_model::is_local_base_url(&config.base_url));
-        let compact_tools_enabled = !local_model && {
-            let agent = self.agent.borrow();
-            let config = &agent.definition().token_optimization;
-            config.effective_mode() != xai_grok_token_optimization::OptimizationMode::Off
-                && config.dx_serializer_compact_tools
-        };
-        if compact_tools_enabled && !system_prompt.contains("format=\"Dx Serializer Compact\"") {
-            system_prompt.push_str("\n\n");
-            system_prompt.push_str(xai_grok_agent::prompt::dx_serializer_compact::CATALOG);
-        }
         save_system_prompt(&self.session_info, &system_prompt);
         let system_message = ConversationItem::system(system_prompt);
         let mut messages = vec![system_message];

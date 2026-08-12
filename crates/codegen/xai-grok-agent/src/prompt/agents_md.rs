@@ -312,6 +312,27 @@ pub fn format_agents_md_section(configs: &[AgentConfigFile]) -> Option<String> {
     render_agents_md(configs)
 }
 
+/// Render a bounded first-turn index instead of duplicating rule-file bodies.
+/// The model can load the applicable files with the native read tool before
+/// changing code; deeper files continue to take precedence.
+pub fn format_agents_md_index(configs: &[AgentConfigFile]) -> Option<String> {
+    if configs.is_empty() {
+        return None;
+    }
+    let preview = configs
+        .iter()
+        .take(3)
+        .map(|config| config.file_name.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let remaining = configs.len().saturating_sub(3);
+    let suffix = (remaining > 0).then(|| format!(",+{remaining}"));
+    Some(format!(
+        "<context rules=\"{preview}{}\">Read applicable rule files before edits; deeper wins.</context>",
+        suffix.as_deref().unwrap_or_default()
+    ))
+}
+
 /// Verbatim leading bytes [`render_agents_md`] emits for every reminder block.
 /// Used by `xai-grok-shell` to structurally detect legacy untagged AGENTS.md
 /// copies (pre-`SyntheticReason::ProjectInstructions`) on resumed sessions.

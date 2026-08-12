@@ -2169,7 +2169,9 @@ impl SessionActor {
                 {
                     tracing::warn!(?error, path = ?path, "failed to create tool-definition dump directory");
                 }
-                if let Ok(json) = serde_json::to_string_pretty(&effective_tools) {
+                // Dump the compact wire representation so `dx token` measures
+                // the payload actually sent, not pretty-print whitespace.
+                if let Ok(json) = serde_json::to_string(&effective_tools) {
                     if let Err(error) = std::fs::write(path, format!("{json}\n")) {
                         tracing::warn!(?error, path = ?path, "failed to dump first-turn tool definitions");
                     } else {
@@ -2251,11 +2253,29 @@ impl SessionActor {
                 let section_stats = |value: &str| {
                     format!("{} bytes / {} chars", value.len(), value.chars().count())
                 };
-                let prompt_context_json = serde_json::to_string_pretty(&prompt_context)
+                // PromptContext contains full rule-file bodies for persistence
+                // and rebuilds. The first request does not send that JSON;
+                // render only a diagnostic summary to avoid counting copied
+                // internal state as model context.
+                let prompt_context_summary = serde_json::json!({
+                    "version": prompt_context.version,
+                    "prompt_mode": prompt_context.prompt_mode,
+                    "audience": prompt_context.audience,
+                    "agent_file_count": prompt_context.agents_md_files.len(),
+                    "persona_count": prompt_context.persona_summaries.len(),
+                    "memory_enabled": prompt_context.memory_enabled,
+                    "os_name": prompt_context.os_name,
+                    "shell_path": prompt_context.shell_path,
+                    "working_directory": prompt_context.working_directory,
+                    "current_date": prompt_context.current_date,
+                    "is_non_interactive": prompt_context.is_non_interactive,
+                    "system_prompt_label": prompt_context.system_prompt_label,
+                });
+                let prompt_context_json = serde_json::to_string_pretty(&prompt_context_summary)
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
                 let items_json = serde_json::to_string_pretty(&request.items)
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
-                let tools_json = serde_json::to_string_pretty(&request.tools)
+                let tools_json = serde_json::to_string(&request.tools)
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
                 let envelope_json = serde_json::json!({
                     "model": request.model.clone(),

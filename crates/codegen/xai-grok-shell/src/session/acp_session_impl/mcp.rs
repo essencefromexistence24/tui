@@ -1623,7 +1623,7 @@ impl SessionActor {
     /// injector and the `/context` estimate. `None` when the template
     /// fails to render.
     async fn rendered_mcp_hint(&self) -> Option<String> {
-        let hint_template = " Before use_tool, call search_tool for exact schema; never guess params.";
+        let hint_template = " search_tool before use_tool; never guess args.";
         self.tool_bridge_handle()
             .render_prompt(hint_template, &serde_json::json!({}))
             .await
