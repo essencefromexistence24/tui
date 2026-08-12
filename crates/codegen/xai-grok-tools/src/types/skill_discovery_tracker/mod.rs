@@ -17,7 +17,10 @@ use crate::implementations::skills::types::SkillInfo;
 use crate::types::compat::CompatConfig;
 
 use conditional::ConditionalSkills;
-use listing::{DEFAULT_SKILL_TOOL_NAME, SKILL_BUDGET_CONTEXT_PERCENT, format_announcement};
+use listing::{
+    DEFAULT_SKILL_TOOL_NAME, SKILL_BUDGET_CONTEXT_PERCENT, format_announcement,
+    format_compact_announcement,
+};
 
 pub use listing::{XmlRenderMode, format_announcement_xml, format_compaction_skill_listing};
 
@@ -440,7 +443,12 @@ impl SkillManager {
         };
         let skills = skills_owned.as_deref().unwrap_or(&self.discovered_skills);
 
-        let system_reminder = render_listing(skills, &mut announced, &self.render_params());
+        let params = self.render_params();
+        let system_reminder = if kind == SkillUpdateKind::BaselineChange && !params.use_xml_format {
+            format_compact_announcement(skills, &mut announced)
+        } else {
+            render_listing(skills, &mut announced, &params)
+        };
         self.announced_names = announced;
 
         // Disabled skills are omitted from the listing via `s.enabled` in
@@ -489,8 +497,8 @@ impl SkillManager {
         &self.discovery_snapshot_names
     }
 
-    /// Render the canonical listing for the entire current skill set, for
-    /// `/context` accounting. Leaves announce state untouched.
+    /// Render the compact first-prompt listing for the entire current skill
+    /// set, for `/context` accounting. Leaves announce state untouched.
     ///
     /// The result estimates what the listing costs in context; it is not a
     /// replay of the injected reminders, which accumulate incrementally.
@@ -501,7 +509,11 @@ impl SkillManager {
         // A throwaway set keeps `self.announced_names` untouched and, once
         // filled by the renderer's filter pass, counts the qualifying skills.
         let mut qualified = HashSet::new();
-        let text = render_listing(&skills, &mut qualified, &self.render_params())?;
+        let text = if self.use_xml_format {
+            render_listing(&skills, &mut qualified, &self.render_params())?
+        } else {
+            format_compact_announcement(&skills, &mut qualified)?
+        };
         Some(SkillListingSnapshot {
             text,
             skill_count: qualified.len(),
@@ -1228,9 +1240,10 @@ mod tests {
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        // Display path must use the display cwd.
-        assert!(text.contains("/home/user/project"));
-        // Real overlay path must NOT appear in announcement.
+        // The compact baseline contains names only; neither display nor real
+        // filesystem paths belong in the first prompt.
+        assert!(text.contains("deploy"));
+        assert!(!text.contains("/home/user/project"));
         assert!(!text.contains("/overlay/worktree"));
     }
 
@@ -1250,7 +1263,8 @@ mod tests {
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        assert!(text.contains("/real/path"));
+        assert!(text.contains("deploy"));
+        assert!(!text.contains("/real/path"));
     }
 
     // ── /clear + startup visibility tests ─────────────────────────
@@ -1316,17 +1330,15 @@ mod tests {
                 s
             })
             .collect();
-        // 128k context window → budget = 128_000 * 4 * 0.5 = 256000 chars
+        // The baseline is a compact index, independent of description size.
         let context_window: u64 = 128_000;
         let expected_budget = (context_window as f64 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize;
         mgr.seed(None, None, skills, None, Some(context_window), None);
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        assert!(
-            text.len() <= expected_budget + 100,
-            "listing should be near budget ({expected_budget}), got {} chars",
-            text.len()
-        );
+        assert!(text.len() < expected_budget);
+        assert!(text.contains("skill-0"));
+        assert!(text.contains("47 more"));
     }
 
     #[test]
@@ -1339,19 +1351,14 @@ mod tests {
                 s
             })
             .collect();
-        // 300 token context window → budget = 300 * 4 * 0.5 = 600 chars.
-        // 200 skills with 500-char descriptions can't fit.
+        // Even a very small context window receives only the compact index.
         let context_window: u64 = 300;
         let expected_budget = (context_window as f64 * 4.0 * SKILL_BUDGET_CONTEXT_PERCENT) as usize;
         mgr.seed(None, None, skills, None, Some(context_window), None);
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        assert!(
-            text.len() <= expected_budget + 100,
-            "listing should be near budget ({expected_budget}), got {} chars",
-            text.len()
-        );
-        assert!(text.contains("... and"), "should indicate truncated skills");
+        assert!(text.len() < expected_budget + 100);
+        assert!(text.contains("197 more"), "should include remaining count");
     }
 
     #[test]
@@ -1361,12 +1368,14 @@ mod tests {
             make_skill("commit", "/s/commit/SKILL.md"),
             make_skill("review", "/s/review/SKILL.md"),
         ];
-        // 200k context window → 12000 char budget, 2 skills fit easily.
+        // Descriptions are intentionally not sent in the baseline listing.
         mgr.seed(None, None, skills, None, Some(200_000), None);
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        assert!(text.contains("desc for commit"));
-        assert!(text.contains("desc for review"));
+        assert_eq!(
+            text,
+            "<skills>\nAvailable skills: commit, review.\n</skills>"
+        );
     }
 
     // ── XML format mode tests ───────────────────────────────────

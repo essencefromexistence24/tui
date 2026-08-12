@@ -1,6 +1,7 @@
 //! System prompt assembly — template rendering, AGENTS.md, and skills.
 pub mod agents_md;
 pub mod context;
+pub mod dx_serializer_compact;
 pub mod ignore;
 pub mod skills;
 pub mod subagent_prompts;

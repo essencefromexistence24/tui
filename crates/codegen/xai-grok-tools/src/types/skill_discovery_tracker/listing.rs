@@ -606,6 +606,41 @@ pub fn format_announcement_xml(
     }
 }
 
+/// Render the compact skill index used in the first prompt.
+///
+/// Only the first three names and the remaining count are sent initially;
+/// descriptions, paths, and full bodies stay available through the skill tool.
+/// Filters and announcement bookkeeping match the normal listing path.
+pub(super) fn format_compact_announcement(
+    skills: &[SkillInfo],
+    announced: &mut HashSet<String>,
+) -> Option<String> {
+    let names: Vec<&str> = skills
+        .iter()
+        .filter(|s| {
+            s.enabled
+                && !s.disable_model_invocation
+                && is_listable(s)
+                && announced.insert(s.dedup_key())
+        })
+        .map(|s| s.name.as_str())
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+
+    let preview = names.iter().take(3).copied().collect::<Vec<_>>().join(", ");
+    let remaining = names.len().saturating_sub(3);
+    let suffix = if remaining == 0 {
+        String::new()
+    } else {
+        format!(", ... {remaining} more")
+    };
+    Some(format!(
+        "<skills>\nAvailable skills: {preview}{suffix}.\n</skills>"
+    ))
+}
+
 /// Build and render a skill listing announcement within the given budget.
 ///
 /// Filters out skills with `disable_model_invocation` and those already

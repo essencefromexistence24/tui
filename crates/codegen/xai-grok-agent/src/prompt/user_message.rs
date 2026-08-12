@@ -15,11 +15,9 @@
 use crate::prompt::agents_md::AgentConfigFile;
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::path::PathBuf;
 use xai_grok_tools::bridge::ToolBridge;
 use xai_grok_tools::implementations::skills::types::SkillInfo;
-use xai_grok_tools::types::skill_discovery_tracker::{XmlRenderMode, format_announcement_xml};
 /// Date format for the `Today's date` field of the user-message preamble
 /// (e.g. "Friday Apr 24, 2026"). Any format change is observable to the model.
 pub const USER_MESSAGE_DATE_FORMAT: &str = "%A %b %-d, %Y";
@@ -194,8 +192,9 @@ pub struct UserMessageContext {
     pub workspace_rules: Vec<RuleEntry>,
     /// User-scoped rule files (~/.grok/, ~/.claude/).
     pub user_rules: Vec<RuleEntry>,
-    /// Skill registry snapshot (already deduped). Rendered through the
-    /// shared budget-tier renderer.
+    /// Skill registry snapshot (already deduped). The first user message
+    /// receives only a compact name index; full skill bodies remain available
+    /// through the skill tool when a skill is selected.
     pub skills: Vec<SkillInfo>,
     /// Optional listing budget in characters; defaults to the standard
     /// 1%-of-context heuristic when None.
@@ -246,9 +245,8 @@ struct UserMessagePlaceholders<'a> {
     has_rules: bool,
     workspace_rules: &'a [RuleEntry],
     user_rules: &'a [RuleEntry],
-    /// Pre-rendered budgeted `<agent_skill>` XML rows; the template
-    /// just substitutes this verbatim. See `render_skill_listing_xml` for
-    /// why the skill listing is special-cased.
+    /// Pre-rendered compact skill index; the template just substitutes this
+    /// verbatim.
     skill_listing: String,
     /// Client-facing name of the read tool, used in the skill section's
     /// instructional text. Defaults to `"Read"`.
@@ -285,21 +283,29 @@ impl UserMessageContext {
             mcps_root: self.mcps_root.as_deref(),
         }
     }
-    /// Render the skill list as `<agent_skill>` XML rows.
+    /// Render the first-prompt skill index without loading descriptions or
+    /// paths. This keeps large skill registries out of the initial request;
+    /// the full body is loaded only after the model selects a skill.
     pub fn render_skill_listing_xml(&self) -> Option<String> {
         if self.skills.is_empty() {
             return None;
         }
-        let mode = if self.template.is_cursor() {
-            XmlRenderMode::Verbatim
+        let preview = self
+            .skills
+            .iter()
+            .take(3)
+            .map(|skill| skill.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let remaining = self.skills.len().saturating_sub(3);
+        let suffix = if remaining == 0 {
+            String::new()
         } else {
-            XmlRenderMode::Budgeted {
-                budget_chars: self.skill_listing_budget_chars,
-                overflow_indicator: true,
-            }
+            format!(", ... {remaining} more")
         };
-        let mut announced = HashSet::new();
-        format_announcement_xml(&self.skills, &mut announced, None, None, mode)
+        Some(format!(
+            "<skills>\nAvailable skills: {preview}{suffix}.\n</skills>"
+        ))
     }
     /// Render the first user message.
     ///

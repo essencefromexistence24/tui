@@ -25,6 +25,10 @@ pub struct OptimizationConfig {
     pub mode: OptimizationMode,
     pub enabled: bool,
     pub optimize_tool_schemas: bool,
+    /// Advertise built-in tool schemas through the first-turn
+    /// `Dx Serializer Compact` catalog. Native tool calls still carry JSON,
+    /// and canonical schemas remain unchanged for runtime validation.
+    pub dx_serializer_compact_tools: bool,
     pub route_tools: bool,
     pub compress_tool_results: bool,
     pub compact_history: bool,
@@ -46,6 +50,7 @@ impl Default for OptimizationConfig {
             mode: OptimizationMode::Safe,
             enabled: true,
             optimize_tool_schemas: true,
+            dx_serializer_compact_tools: true,
             route_tools: true,
             compress_tool_results: true,
             compact_history: true,
@@ -88,6 +93,7 @@ mod tests {
         assert_eq!(config.effective_mode(), OptimizationMode::Safe);
         assert!(config.validates());
         assert!(config.preserve_canonical_tool_data);
+        assert!(config.dx_serializer_compact_tools);
     }
 
     #[test]

@@ -525,10 +525,7 @@ mod tests {
             tool_names: vec!["get_issue".into(), "save_issue".into()],
         }];
         let text = build_server_reminder(&servers).unwrap();
-        assert!(
-            text.contains("MCP: linear(12)."),
-            "got: {text}"
-        );
+        assert!(text.contains("MCP: linear(12)."), "got: {text}");
         assert!(!text.contains("Project management"));
         assert!(
             !text.contains("Tools:"),

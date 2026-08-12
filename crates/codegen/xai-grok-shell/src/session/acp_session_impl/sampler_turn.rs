@@ -215,9 +215,23 @@ impl SessionActor {
             .get_sampling_config()
             .await
             .is_some_and(|config| crate::agent::local_model::is_local_base_url(&config.base_url));
+        let compact_tools_enabled = !local_model
+            && token_optimization.effective_mode()
+                != xai_grok_token_optimization::OptimizationMode::Off
+            && token_optimization.dx_serializer_compact_tools;
         let mut defs = if local_model {
             let bridge = self.agent.borrow().tool_bridge().clone();
             bridge.tool_definitions_builtins_only().await
+        } else if compact_tools_enabled {
+            // The first system message carries complete built-in schemas in
+            // Dx Serializer Compact. Keep native function names in the API,
+            // but avoid paying for their duplicate JSON Schemas. Definitions
+            // not represented by that catalog retain their canonical schema.
+            let mut definitions = self.agent.borrow().tool_definitions().await;
+            for definition in &mut definitions {
+                xai_grok_agent::prompt::dx_serializer_compact::use_compact_transport(definition);
+            }
+            definitions
         } else {
             let query = self
                 .chat_state_handle
@@ -243,7 +257,23 @@ impl SessionActor {
                 "disabling tool schemas for reliable local-model chat"
             );
         }
-        if !local_model && token_optimization.route_tools && token_optimization.tool_routing.enabled
+        if compact_tools_enabled {
+            let compact_count = defs
+                .iter()
+                .filter(|definition| {
+                    xai_grok_agent::prompt::dx_serializer_compact::contains_tool(
+                        &definition.function.name,
+                    )
+                })
+                .count();
+            tracing::info!(
+                compact_count,
+                total_count = defs.len(),
+                "prepared Dx Serializer Compact model-facing tool definitions"
+            );
+        } else if !local_model
+            && token_optimization.route_tools
+            && token_optimization.tool_routing.enabled
         {
             tracing::info!(
                 routed_count = defs.len(),
