@@ -168,7 +168,10 @@ impl SessionActor {
                     "rebuild_agent: build failed for agent_type={new_agent_name}: {e}"
                 ))
             })?;
-        let new_system_prompt = new_agent.system_prompt().to_string();
+        let new_system_prompt =
+            xai_grok_agent::prompt::dx_serializer_compact::append_to_system_prompt(
+                new_agent.system_prompt(),
+            );
         let mut new_prompt_context = new_agent.prompt_context().clone();
         new_prompt_context.normalize_for_persistence();
         if let Some(handle) = self.compaction.prefire.take_handle() {

@@ -2238,7 +2238,10 @@ impl SessionActor {
             if loop_index == 1
                 && let Ok(flag) = std::env::var("DX_DUMP_FIRST_PROMPT")
                 && !flag.trim().is_empty()
-                && !matches!(flag.trim().to_ascii_lowercase().as_str(), "0" | "false" | "off")
+                && !matches!(
+                    flag.trim().to_ascii_lowercase().as_str(),
+                    "0" | "false" | "off"
+                )
             {
                 let dump_path = if matches!(
                     flag.trim().to_ascii_lowercase().as_str(),
@@ -2248,7 +2251,21 @@ impl SessionActor {
                 } else {
                     std::path::PathBuf::from(flag.trim())
                 };
-                let system_prompt = self.agent.borrow().system_prompt().to_owned();
+                // Read the finalized system item from the request itself. The
+                // session injects Dx Serializer Compact during initialization;
+                // reading the immutable Agent template here would omit that
+                // injected contract and make the diagnostic lie about the
+                // payload actually sent to provider adapters.
+                let system_prompt = request
+                    .items
+                    .iter()
+                    .find_map(|item| match item {
+                        xai_grok_sampling_types::ConversationItem::System(system) => {
+                            Some(system.content.to_string())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| self.agent.borrow().system_prompt().to_owned());
                 let prompt_context = self.agent.borrow().prompt_context().clone();
                 let section_stats = |value: &str| {
                     format!("{} bytes / {} chars", value.len(), value.chars().count())

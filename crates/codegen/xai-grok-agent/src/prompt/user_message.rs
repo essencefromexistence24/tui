@@ -419,6 +419,6 @@ mod tests {
         assert!(out.len() <= GIT_STATUS_CHARACTER_LIMIT);
         assert!(out.contains("files="));
         assert!(!out.contains("src/"));
-        assert!(!body.ends_with('\n'), "body should be snapped to last line");
+        assert!(!out.ends_with('\n'), "summary must not end with a newline");
     }
 }

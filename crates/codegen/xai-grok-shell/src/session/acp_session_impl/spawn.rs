@@ -1012,6 +1012,9 @@ pub(crate) async fn spawn_session_actor(
     } else {
         agent.system_prompt().to_string()
     };
+    let system_prompt = xai_grok_agent::prompt::dx_serializer_compact::append_to_system_prompt(
+        &system_prompt,
+    );
     let mut prompt_context = agent.prompt_context().clone();
     prompt_context.normalize_for_persistence();
     save_prompt_context(&session_info, &prompt_context);
