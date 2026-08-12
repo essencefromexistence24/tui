@@ -138,5 +138,53 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
         );
     }
 
+    // ChatGPT Sign-in / Codex Responses provider.  The credential is resolved
+    // just before each request from ZeroClaw's encrypted OAuth profile; no
+    // token is embedded in the catalog or copied into xAI auth state.
+    let mut codex_headers = IndexMap::new();
+    codex_headers.insert(
+        "OpenAI-Beta".to_string(),
+        "responses=experimental".to_string(),
+    );
+    codex_headers.insert("originator".to_string(), "pi".to_string());
+    map.insert(
+        "gpt-5.6-luna".to_string(),
+        ModelEntryConfig {
+            id: Some("gpt-5.6-luna".to_string()),
+            model: "gpt-5.6-luna".to_string(),
+            base_url: crate::auth::codex::CODEX_RESPONSES_URL.to_string(),
+            api_base_url: None,
+            name: Some("GPT-5.6 Luna · ChatGPT/Codex".to_string()),
+            description: Some("OpenAI Codex Responses model via ChatGPT sign-in".to_string()),
+            max_completion_tokens: None,
+            temperature: None,
+            top_p: None,
+            api_key: None,
+            env_key: None,
+            api_backend: ApiBackend::Responses,
+            auth_scheme: None,
+            reasoning_effort: None,
+            supports_reasoning_effort: true,
+            reasoning_efforts: vec![],
+            extra_headers: codex_headers,
+            context_window: NonZeroU64::new(200_000).unwrap(),
+            auto_compact_threshold_percent: None,
+            system_prompt_label: Some("codex".to_string()),
+            use_concise: false,
+            agent_type: "codex".to_string(),
+            inference_idle_timeout_secs: Some(300),
+            max_retries: None,
+            hidden: false,
+            supported_in_api: true,
+            supports_backend_search: false,
+            compactions_remaining: None,
+            compaction_at_tokens: None,
+            show_model_fingerprint: false,
+            stream_tool_calls: None,
+            local_model_path: None,
+            laziness_detector: LazinessDetectorPerModelConfig::default(),
+        },
+    );
+
     map
 }

@@ -990,6 +990,17 @@
     "free": "false"
   },
   {
+    "id": "openai-codex",
+    "name": "OpenAI Codex (ChatGPT)",
+    "baseUrl": "https://chatgpt.com/backend-api/codex/responses",
+    "authType": "oauth",
+    "authScheme": "bearer",
+    "apiBackend": "responses",
+    "envKeyHint": "ChatGPT OAuth",
+    "modelCount": 1,
+    "free": "false"
+  },
+  {
     "id": "opencode",
     "name": "opencode",
     "baseUrl": "https://opencode.ai/zen/v1",

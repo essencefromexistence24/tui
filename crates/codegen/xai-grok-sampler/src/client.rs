@@ -89,6 +89,22 @@ struct GrokRequestHeaders<'a> {
     user_id: Option<&'a str>,
 }
 
+/// Whether the endpoint is an xAI-owned API that understands `x-grok-*`
+/// protocol headers. Never send those headers to OpenAI-compatible community
+/// providers such as OpenCode Zen; some gateways route or reject requests
+/// based on them.
+fn is_xai_endpoint(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    host == "x.ai"
+        || host.ends_with(".x.ai")
+        || host == "cli-chat-proxy.grok.com"
+}
+
 impl GrokRequestHeaders<'_> {
     fn apply(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         let mut b = builder
@@ -628,8 +644,11 @@ impl SamplingClient {
             &mut headers,
         );
 
-        // Add x-grok-client-version header for version gating at the proxy.
-        if let Some(client_version) = config.client_version.as_ref()
+        // Add x-grok headers only for xAI-owned endpoints. Third-party
+        // OpenAI-compatible providers must receive a provider-neutral request.
+        let xai_endpoint = is_xai_endpoint(&config.base_url);
+        if xai_endpoint
+            && let Some(client_version) = config.client_version.as_ref()
             && let Ok(header_value) = HeaderValue::from_str(client_version)
         {
             headers.insert(
@@ -638,7 +657,8 @@ impl SamplingClient {
             );
         }
 
-        if let Some(deployment_id) = config.deployment_id.as_ref()
+        if xai_endpoint
+            && let Some(deployment_id) = config.deployment_id.as_ref()
             && let Ok(header_value) = HeaderValue::from_str(deployment_id)
         {
             headers.insert(
@@ -647,13 +667,14 @@ impl SamplingClient {
             );
         }
 
-        if let Some(user_id) = config.user_id.as_ref()
+        if xai_endpoint
+            && let Some(user_id) = config.user_id.as_ref()
             && let Ok(header_value) = HeaderValue::from_str(user_id)
         {
             headers.insert(HeaderName::from_static("x-grok-user-id"), header_value);
         }
 
-        {
+        if xai_endpoint {
             let client_id = config
                 .client_identifier
                 .clone()
@@ -1019,7 +1040,11 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("chat/completions"));
-        let http_request = grok_headers.apply(builder).json(&payload);
+        let http_request = if is_xai_endpoint(&self.base_url) {
+            grok_headers.apply(builder).json(&payload)
+        } else {
+            builder.json(&payload)
+        };
 
         let response = http_request.send().await.map_err(|e| {
             // Log at debug level; errors are surfaced to the caller.
@@ -1079,10 +1104,16 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("chat/completions"));
-        let http_request = grok_headers
-            .apply(builder)
-            .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
-            .json(&streaming_request);
+        let http_request = if is_xai_endpoint(&self.base_url) {
+            grok_headers
+                .apply(builder)
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&streaming_request)
+        } else {
+            builder
+                .header(ACCEPT, HeaderValue::from_static("text/event-stream"))
+                .json(&streaming_request)
+        };
 
         let built_request = http_request.build().map_err(|e| {
             tracing::error!("Failed to build HTTP request: {}", e);
@@ -1344,7 +1375,11 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("responses"));
-        let http_request = grok_headers.apply(builder).json(&request_body);
+        let http_request = if is_xai_endpoint(&self.base_url) {
+            grok_headers.apply(builder).json(&request_body)
+        } else {
+            builder.json(&request_body)
+        };
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -1720,7 +1755,11 @@ impl SamplingClient {
             builder,
             sent_bearer,
         } = self.post(self.endpoint("messages"));
-        let http_request = grok_headers.apply(builder).json(&request.inner);
+        let http_request = if is_xai_endpoint(&self.base_url) {
+            grok_headers.apply(builder).json(&request.inner)
+        } else {
+            builder.json(&request.inner)
+        };
 
         let response = http_request.send().await.map_err(|e| {
             tracing::debug!("HTTP request failed: {}", e);
@@ -2252,6 +2291,14 @@ mod tests {
     use super::*;
     use indexmap::IndexMap;
     use xai_grok_sampling_types::types::ChatRequestMessage;
+
+    #[test]
+    fn xai_header_gate_excludes_third_party_endpoints() {
+        assert!(is_xai_endpoint("https://api.x.ai/v1"));
+        assert!(is_xai_endpoint("https://cli-chat-proxy.grok.com/v1"));
+        assert!(!is_xai_endpoint("https://opencode.ai/zen/v1"));
+        assert!(!is_xai_endpoint("https://api.openai.com/v1"));
+    }
 
     #[test]
     fn stream_collect_error_preserves_should_retry() {

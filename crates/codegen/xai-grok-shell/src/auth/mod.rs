@@ -1,5 +1,6 @@
 pub(crate) mod api_key_probe;
 pub(crate) mod attribution;
+pub mod codex;
 mod auth_provider;
 mod config;
 pub mod credential_provider;

@@ -21426,6 +21426,7 @@ dependencies = [
  "xai-tracing-macros",
  "xai-tty-utils",
  "xai-workflow",
+ "zeroclaw-providers",
  "zstd",
 ]
 

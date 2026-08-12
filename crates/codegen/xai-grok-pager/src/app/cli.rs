@@ -20,14 +20,18 @@ pub enum Command {
     /// Manage running leader processes
     Leader(LeaderMgmtArgs),
     /// Sign out and clear cached credentials
-    Logout,
+    Logout {
+        /// Disconnect only the ChatGPT/Codex account, leaving xAI signed in.
+        #[arg(long = "openai-codex")]
+        openai_codex: bool,
+    },
     /// Sign in to Grok
     Login {
         /// Ignored (kept for backwards compatibility). OAuth2 is now the only auth method.
         #[arg(long, hide = true)]
         legacy: bool,
         /// Use Grok OAuth via auth.x.ai.
-        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth"])]
+        #[arg(long = "oauth", alias = "oidc", conflicts_with_all = ["device_auth", "openai_codex"])]
         oauth: bool,
         /// Use device-code authentication for headless/remote environments.
         #[arg(
@@ -36,6 +40,9 @@ pub enum Command {
             conflicts_with_all = ["oauth"]
         )]
         device_auth: bool,
+        /// Sign in with ChatGPT for the OpenAI Codex Responses provider.
+        #[arg(long = "openai-codex", conflicts_with = "oauth")]
+        openai_codex: bool,
         /// Authenticate for remote development environments (hidden).
         ///
         /// Field is always present so match arms stay feature-unification-safe
@@ -1392,7 +1399,7 @@ mod tests {
     #[test]
     fn subcommand_takes_precedence_over_positional_prompt() {
         let args = PagerArgs::try_parse_from(["grok", "logout"]).expect("subcommand parses");
-        assert!(matches!(args.command, Some(Command::Logout)));
+        assert!(matches!(args.command, Some(Command::Logout { .. })));
         assert!(args.prompt.is_none());
     }
     #[test]

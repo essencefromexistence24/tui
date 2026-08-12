@@ -2140,10 +2140,15 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 legacy: _,
                 oauth,
                 device_auth,
+                openai_codex,
                 devbox,
             } => {
                 init_tracing_simple("cli");
                 let _otel_guard = xai_grok_telemetry::otel_layer::otel_guard();
+                if openai_codex {
+                    xai_grok_shell::auth::codex::run_login(device_auth).await?;
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -2152,8 +2157,12 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 println!();
                 xai_grok_shell::instrumentation::finalize_and_exit(0);
             }
-            Command::Logout => {
+            Command::Logout { openai_codex } => {
                 init_tracing_simple("cli");
+                if openai_codex {
+                    xai_grok_shell::auth::codex::run_logout().await?;
+                    xai_grok_shell::instrumentation::finalize_and_exit(0);
+                }
                 let config = xai_grok_shell::config::load_effective_config_disk_only()
                     .map_err(|e| anyhow::anyhow!("Failed to load config: {e}"))?;
                 let config = AgentConfig::new_from_toml_cfg(&config)
@@ -2186,7 +2195,7 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             | Command::Mcp(_)
             | Command::Plugin(_)
             | Command::Login { .. }
-            | Command::Logout
+            | Command::Logout { .. }
             | Command::Wrap(_)
             | Command::Completions { .. }
             | Command::Share(_) => {

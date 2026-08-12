@@ -224,7 +224,11 @@ impl SessionActor {
             bridge.tool_definitions_builtins_only().await
         } else {
             let definitions = self.agent.borrow().tool_definitions().await;
-            definitions
+            if token_optimization.optimize_tool_schemas {
+                xai_grok_agent::native_tool_presentation::compact_native_definitions(definitions)
+            } else {
+                definitions
+            }
         };
         if local_model {
             let original_count = defs.len();
@@ -240,9 +244,9 @@ impl SessionActor {
             );
         }
         if !local_model && token_optimization.optimize_tool_schemas {
-            tracing::debug!(
+            tracing::info!(
                 tool_count = defs.len(),
-                "sending full native JSON tool schemas to hosted provider"
+                "prepared compact native tool registrations"
             );
         }
         let plan_active = self.plan_mode.lock().is_active();
@@ -463,6 +467,14 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
+        let codex_credentials = if crate::auth::codex::is_codex_endpoint(&cfg.base_url) {
+            crate::auth::codex::resolve_credentials()
+                .await
+                .ok()
+                .flatten()
+        } else {
+            None
+        };
         let auth_method = self.auth_method_id.load();
         let gate =
             SessionTokenAuthGate::new(auth_method.as_deref(), model_facts.byok, &cfg.base_url);
@@ -471,7 +483,9 @@ impl SessionActor {
         if use_bearer_resolver && let Some(am) = self.auth_manager.as_ref() {
             let _ = am.auth().await;
         }
-        let api_key = if use_bearer_resolver {
+        let api_key = if let Some(codex) = &codex_credentials {
+            Some(codex.access_token.clone())
+        } else if use_bearer_resolver {
             self.auth_manager
                 .as_ref()
                 .and_then(|am| am.current_wire_valid().map(|a| a.key))
@@ -480,6 +494,11 @@ impl SessionActor {
         };
         let auth_scheme = model_facts.auth_scheme;
         let mut extra_headers = cfg.extra_headers;
+        if let Some(codex) = &codex_credentials {
+            if let Some(account_id) = &codex.account_id {
+                extra_headers.insert("chatgpt-account-id".to_string(), account_id.clone());
+            }
+        }
         crate::agent::config::inject_url_derived_headers(
             &mut extra_headers,
             creds.alpha_test_key.as_deref(),
@@ -540,7 +559,9 @@ impl SessionActor {
                 .map(|a| a.user_id),
             origin_client: self.origin_client.clone(),
             attribution_callback: self.attribution_callback.clone(),
-            bearer_resolver: if use_bearer_resolver {
+            bearer_resolver: if codex_credentials.is_some() {
+                None
+            } else if use_bearer_resolver {
                 self.auth_manager.as_ref().map(|am| {
                     crate::auth::credential_provider::WireValidBearerResolver::shared(am.clone())
                 })
