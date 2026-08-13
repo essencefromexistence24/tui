@@ -30,6 +30,12 @@ pub fn handle_provider_connect_key(
             set_default,
             ..
         } => handle_key_input(state, key, provider_id, input_buffer, *set_default),
+        ConnectMode::OAuth { .. } if key.code == KeyCode::Esc => {
+            state.mode = ConnectMode::Browse;
+            state.error_message = None;
+            state.status_message = None;
+            ConnectOutcome::Unchanged
+        }
         ConnectMode::OAuth { .. } => ConnectOutcome::Unchanged,
     }
 }
@@ -206,7 +212,12 @@ fn handle_key_input(
     let free = all
         .iter()
         .find(|p| p.id == provider_id)
-        .is_some_and(|p| p.auth_type == "none" || p.auth_type == "optional" || p.free == "true");
+        .is_some_and(|p| {
+            p.auth_type == "none"
+                || p.auth_type == "optional"
+                || p.auth_type == "external_oauth"
+                || p.free == "true"
+        });
 
     match key.code {
         KeyCode::Esc => {

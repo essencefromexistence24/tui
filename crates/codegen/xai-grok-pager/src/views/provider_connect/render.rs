@@ -93,16 +93,15 @@ pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut Provide
             &theme,
         ),
         ConnectMode::OAuth { provider_id, .. } => {
-            let text = format!(
-                "Connecting {provider_id}…\n\nComplete the verification in your browser.\nThe Agent credential will be stored automatically.\n\nEsc returns after the flow finishes."
-            );
-            Paragraph::new(text)
-                .style(Style::default().fg(theme.text_primary))
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded),
+            let text = if let Some(error) = &state.error_message {
+                format!("{provider_id} OAuth failed.\n\n{error}\n\nEsc returns to providers.")
+            } else {
+                format!(
+                    "Connecting {provider_id}…\n\nComplete the verification in your browser.\nThe Agent credential will be stored automatically.\n\nEsc returns after the flow finishes."
                 )
+            };
+            Paragraph::new(text)
+                .style(Style::default().fg(theme.text_primary).bg(theme.bg_base))
                 .render(content_area, buf);
         }
     }
@@ -116,7 +115,6 @@ fn render_browse_list(
     state: &mut ProviderConnectState,
     theme: &Theme,
 ) {
-    let searching = state.picker.search_active;
     let query = state.picker.query().to_string();
     let data = ProviderConnectState::picker_entry_data(
         &state.free_providers,
@@ -125,31 +123,6 @@ fn render_browse_list(
         state.active_tab,
         &query,
     );
-
-    picker::render_picker_search_bar(
-        buf,
-        area.x,
-        area.y,
-        area.width,
-        theme,
-        &state.picker,
-        searching,
-        !searching,
-        Some(theme.bg_base),
-    );
-
-    let sep_y = area.y + 1;
-    if sep_y < area.y + area.height {
-        picker::render_divider(buf, inner_x, sep_y, inner_width, theme, Some(theme.bg_base));
-    }
-
-    let esy = sep_y + 1;
-    let ea = Rect {
-        x: area.x,
-        y: esy,
-        width: area.width,
-        height: area.height.saturating_sub(esy.saturating_sub(area.y)),
-    };
 
     let empty: &[&str] = &[];
     let entries: Vec<PickerEntry<'_>> = data
@@ -175,27 +148,23 @@ fn render_browse_list(
         })
         .collect();
 
-    let content_hit = picker::render_picker_content_with_scrollbar_x(
+    // Draw the search bar, filtered rows, and their mouse hit areas through
+    // one shared layout path. This keeps filtered-result clicks aligned with
+    // what is visible instead of leaving stale rectangles behind the overlay.
+    let search_active = state.picker.search_active;
+    picker::render_picker_in_modal_inner(
         buf,
-        ea,
+        area,
+        inner_x,
+        inner_width,
         theme,
         &mut state.picker,
         &entries,
         &data.non_sel,
-        &[],
-        Some(theme.bg_base),
         false,
-        0,
-        inner_x + inner_width - 1,
+        search_active,
+        true,
     );
-    state.picker.hit_areas = Some(picker::PickerHitAreas {
-        close_button: Rect::default(),
-        search_bar: Rect::new(area.x, area.y, area.width, 1),
-        item_rects: content_hit.item_rects,
-        entry_indices: content_hit.entry_indices,
-        tab_rects: vec![],
-        filter_rect: None,
-    });
 }
 
 fn render_key_input(
@@ -238,11 +207,17 @@ fn render_key_input(
     let free =
         pvd.is_some_and(|p| p.auth_type == "none" || p.auth_type == "optional" || p.free == "true");
     let refresh_token = pvd.is_some_and(|p| p.auth_type == "oauth_refresh");
+    let setup_token = pvd.is_some_and(|p| p.auth_type == "setup_token");
+    let external_oauth = pvd.is_some_and(|p| p.auth_type == "external_oauth");
 
     let pt = if free {
         format!("{pn} requires no API key. Press Enter to enable.")
     } else if refresh_token {
         format!("Paste your OAuth refresh token for {pn}:")
+    } else if setup_token {
+        format!("Paste your Claude Code setup token for {pn}:")
+    } else if external_oauth {
+        format!("{pn} uses the existing ~/.gemini OAuth cache. Press Enter to enable.")
     } else {
         let hint = pvd.map(|p| p.env_key_hint.as_str()).unwrap_or("API_KEY");
         format!("Paste your {hint} for {pn}:")
@@ -251,7 +226,7 @@ fn render_key_input(
         .style(Style::default().fg(theme.gray))
         .render(ch[0], buf);
 
-    let disp = if input_buffer.is_empty() && free {
+    let disp = if input_buffer.is_empty() && (free || external_oauth) {
         "(Press Enter to enable)".into()
     } else {
         input_buffer.to_string()
@@ -269,6 +244,10 @@ fn render_key_input(
                 .border_type(BorderType::Rounded)
                 .title(if refresh_token {
                     " OAuth Refresh Token "
+                } else if setup_token {
+                    " Claude Code Setup Token "
+                } else if external_oauth {
+                    " Existing OAuth Cache "
                 } else {
                     " API Key "
                 })
@@ -311,11 +290,18 @@ pub(crate) fn render_embedded_key_input(
             state,
             &Theme::current(),
         ),
-        ConnectMode::OAuth { provider_id, .. } => Paragraph::new(format!(
-            "Connecting {provider_id}…\n\nComplete the OAuth flow in your browser.\nCredentials will be stored automatically."
-        ))
-        .style(Style::default().fg(Theme::current().text_primary))
-        .render(area, buf),
+        ConnectMode::OAuth { provider_id, .. } => {
+            let text = if let Some(error) = &state.error_message {
+                format!("{provider_id} OAuth failed.\n\n{error}\n\nEsc returns to providers.")
+            } else {
+                format!(
+                    "Connecting {provider_id}…\n\nComplete the OAuth flow in your browser.\nCredentials will be stored automatically."
+                )
+            };
+            Paragraph::new(text)
+                .style(Style::default().fg(Theme::current().text_primary))
+                .render(area, buf)
+        }
         ConnectMode::Browse => {}
     }
 }

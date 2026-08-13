@@ -4,6 +4,7 @@ mod router_api_key_providers;
 
 use serde::Deserialize;
 use std::sync::{Arc, Mutex};
+use std::{future::Future, thread};
 use toml_edit::{DocumentMut, Value};
 use xai_grok_tools::util::grok_home::grok_home;
 
@@ -258,14 +259,33 @@ fn external_oauth_cache_exists(provider_id: &str) -> bool {
     }
 }
 
+/// Run a ZeroClaw async operation without creating or blocking a Tokio runtime
+/// on the pager's event-loop thread. Provider configuration is invoked from
+/// synchronous picker handlers, while the pager itself may already be inside
+/// Tokio; spawning a dedicated short-lived worker avoids nested-runtime
+/// panics and keeps the UI runtime ownership in one place.
+fn run_agent_operation<T, F, Fut>(operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: Future<Output = Result<T, String>> + Send + 'static,
+{
+    thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("Failed to initialize Agent auth runtime: {e}"))?;
+        runtime.block_on(operation())
+    })
+    .join()
+    .map_err(|_| "Agent auth worker panicked while saving credentials".to_string())?
+}
+
 fn save_oauth_refresh_token(provider_id: &str, token: &str) -> Result<(), String> {
     let provider = oauth_refresh_provider(provider_id)
         .ok_or_else(|| "Unsupported OAuth refresh-token provider".to_string())?;
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("Failed to initialize Agent config runtime: {e}"))?;
-    runtime.block_on(async move {
+    let token = token.trim().to_string();
+    run_agent_operation(move || async move {
         let mut config = zeroclaw_config::schema::Config::load_or_init()
             .await
             .map_err(|e| format!("Failed to load Agent config: {e}"))?;
@@ -274,10 +294,7 @@ fn save_oauth_refresh_token(provider_id: &str, token: &str) -> Result<(), String
             .set_prop_persistent(&format!("{base}.auth_mode"), "oauth")
             .map_err(|e| format!("Failed to configure OAuth mode: {e}"))?;
         config
-            .set_secret_persistent(
-                &format!("{base}.oauth_refresh_token"),
-                token.trim().to_string(),
-            )
+            .set_secret_persistent(&format!("{base}.oauth_refresh_token"), token)
             .map_err(|e| format!("Failed to protect OAuth refresh token: {e}"))?;
         config
             .save_dirty()
@@ -319,21 +336,52 @@ pub(crate) fn start_oauth_job(provider_id: &str) -> Option<Arc<Mutex<Option<Resu
                     return Ok(());
                 }
                 let (token_set, account_id) = if provider == "openai" {
-                    let device =
+                    let tokens = match
                         zeroclaw_providers::auth::openai_oauth::start_device_code_flow(&client)
                             .await
-                            .map_err(|e| format!("OpenAI OAuth start failed: {e}"))?;
-                    open_verification_page(
-                        device
-                            .verification_uri_complete
-                            .as_deref()
-                            .unwrap_or(&device.verification_uri),
-                    );
-                    let tokens = zeroclaw_providers::auth::openai_oauth::poll_device_code_tokens(
-                        &client, &device,
-                    )
-                    .await
-                    .map_err(|e| format!("OpenAI OAuth failed: {e}"))?;
+                    {
+                        Ok(device) => {
+                            open_verification_page(
+                                device
+                                    .verification_uri_complete
+                                    .as_deref()
+                                    .unwrap_or(&device.verification_uri),
+                            );
+                            zeroclaw_providers::auth::openai_oauth::poll_device_code_tokens(
+                                &client, &device,
+                            )
+                            .await
+                            .map_err(|e| format!("OpenAI OAuth failed: {e}"))?
+                        }
+                        Err(device_error) => {
+                            // OpenAI may reject the device-code endpoint for
+                            // this client with 403. Fall back to the browser
+                            // authorization-code flow, which uses PKCE and
+                            // the localhost callback already supported by
+                            // ZeroClaw's OpenAI auth implementation.
+                            let pkce =
+                                zeroclaw_providers::auth::openai_oauth::generate_pkce_state();
+                            let authorize_url =
+                                zeroclaw_providers::auth::openai_oauth::build_authorize_url(&pkce);
+                            open_verification_page(&authorize_url);
+                            let code =
+                                zeroclaw_providers::auth::openai_oauth::receive_loopback_code(
+                                    &pkce.state,
+                                    std::time::Duration::from_secs(300),
+                                )
+                                .await
+                                .map_err(|e| {
+                                    format!(
+                                        "OpenAI browser OAuth failed after device-code fallback ({device_error}): {e}"
+                                    )
+                                })?;
+                            zeroclaw_providers::auth::openai_oauth::exchange_code_for_tokens(
+                                &client, &code, &pkce,
+                            )
+                            .await
+                            .map_err(|e| format!("OpenAI OAuth token exchange failed: {e}"))?
+                        }
+                    };
                     let account =
                         zeroclaw_providers::auth::openai_oauth::extract_account_id_from_jwt(
                             &tokens.access_token,
@@ -398,14 +446,18 @@ pub(crate) fn poll_oauth_job(state: &mut ProviderConnectState) {
     let result = job.lock().ok().and_then(|mut slot| slot.take());
     let Some(result) = result else { return };
     let name = provider_id.clone();
-    state.mode = ConnectMode::Browse;
     match result {
         Ok(()) => {
+            state.mode = ConnectMode::Browse;
             state.configured_ids = load_configured_providers();
             state.status_message = Some(format!("{name} OAuth connected."));
             state.error_message = None;
         }
         Err(error) => {
+            // Keep the OAuth screen open on failure. The previous behavior
+            // returned to Browse immediately, making a failed device-code
+            // start or token poll look like a cancelled flow and hiding the
+            // actionable provider error behind the preview list.
             state.error_message = Some(error);
             state.status_message = None;
         }
@@ -413,11 +465,30 @@ pub(crate) fn poll_oauth_job(state: &mut ProviderConnectState) {
 }
 
 fn open_verification_page(url: &str) {
+    // OAuth authorize URLs contain query separators (`&`). Validate the
+    // destination before handing it to the platform launcher; on Windows we
+    // must not route it through `cmd /C start`, because cmd.exe interprets
+    // every unquoted `&name=value` as another command.
+    let Ok(parsed) = url::Url::parse(url) else {
+        tracing::warn!("Refusing to open invalid OAuth verification URL");
+        return;
+    };
+    if !matches!(parsed.scheme(), "http" | "https") {
+        tracing::warn!(scheme = parsed.scheme(), "Refusing non-web OAuth URL");
+        return;
+    }
     #[cfg(target_os = "windows")]
     {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
+        // Use Windows' URL protocol handler directly. `explorer.exe` can
+        // treat a URL as a shell/file target on some configurations and open
+        // the file picker instead of the default browser. Passing the URL as
+        // one argument also preserves PKCE query parameters containing `&`.
+        if let Err(error) = std::process::Command::new("rundll32.exe")
+            .args(["url.dll,FileProtocolHandler", parsed.as_str()])
+            .spawn()
+        {
+            tracing::warn!(%error, "failed to open OAuth URL with Windows URL handler");
+        }
     }
     #[cfg(target_os = "macos")]
     {
@@ -663,24 +734,68 @@ fn load_community_providers() -> Vec<ProviderDef> {
             free: if provider.local { "true" } else { "false" }.to_string(),
         });
     }
-    for (id, name, auth_type) in [
-        ("openai-codex", "OpenAI Codex OAuth", "oauth"),
-        ("gemini-oauth", "Google Gemini OAuth", "oauth"),
-        ("qwen-oauth", "Qwen OAuth Refresh Token", "oauth_refresh"),
+    for (id, name, auth_type, auth_scheme, env_key_hint) in [
+        (
+            "openai-codex",
+            "OpenAI Codex OAuth",
+            "oauth",
+            "oauth",
+            "OAuth device/browser login",
+        ),
+        (
+            "gemini-oauth",
+            "Google Gemini OAuth",
+            "oauth",
+            "oauth",
+            "OAuth device login",
+        ),
+        (
+            "qwen-oauth",
+            "Qwen OAuth Refresh Token",
+            "oauth_refresh",
+            "oauth",
+            "OAuth refresh token",
+        ),
         (
             "minimax-oauth",
             "MiniMax OAuth Refresh Token",
             "oauth_refresh",
+            "oauth",
+            "OAuth refresh token",
+        ),
+        (
+            "anthropic-setup-token",
+            "Anthropic Claude Code Setup Token",
+            "setup_token",
+            "bearer",
+            "Claude Code setup token",
+        ),
+        (
+            "gemini_cli",
+            "Gemini CLI Existing OAuth",
+            "external_oauth",
+            "oauth",
+            "Existing ~/.gemini OAuth cache",
         ),
     ] {
+        // ZeroClaw may already have contributed `gemini_cli` to the catalog.
+        // Update that existing row instead of creating a duplicate with the
+        // misleading API-key auth classification.
+        if let Some(provider) = providers.iter_mut().find(|provider| provider.id == id) {
+            provider.name = name.to_string();
+            provider.auth_type = auth_type.to_string();
+            provider.auth_scheme = auth_scheme.to_string();
+            provider.env_key_hint = env_key_hint.to_string();
+            continue;
+        }
         if !providers.iter().any(|provider| provider.id == id) {
             providers.push(ProviderDef {
                 id: id.to_string(),
                 name: name.to_string(),
                 base_url: String::new(),
                 api_backend: String::new(),
-                auth_scheme: "oauth".to_string(),
-                env_key_hint: "OAuth device login".to_string(),
+                auth_scheme: auth_scheme.to_string(),
+                env_key_hint: env_key_hint.to_string(),
                 auth_type: auth_type.to_string(),
                 model_count: 0,
                 free: "false".to_string(),
@@ -773,6 +888,14 @@ pub fn load_configured_providers() -> Vec<String> {
             configured.push(provider.to_string());
         }
     }
+    // The setup-token entry is a dedicated UI auth mode backed by ZeroClaw's
+    // canonical Anthropic profile. Keep its status synchronized with that
+    // profile without creating a second credential store.
+    if configured.iter().any(|id| id == "anthropic")
+        && !configured.iter().any(|id| id == "anthropic-setup-token")
+    {
+        configured.push("anthropic-setup-token".to_string());
+    }
     configured
 }
 
@@ -788,6 +911,19 @@ pub fn save_provider_config(
         save_oauth_refresh_token(provider_id, token)?;
         return Ok(());
     }
+    if provider_id == "anthropic-setup-token" {
+        let token = api_key
+            .filter(|key| !key.trim().is_empty())
+            .ok_or_else(|| "Anthropic setup token cannot be empty.".to_string())?;
+        return save_provider_config("anthropic", Some(token), set_default);
+    }
+    if provider_id == "gemini_cli" {
+        return if external_oauth_cache_exists(provider_id) {
+            Ok(())
+        } else {
+            Err("Gemini CLI OAuth cache was not found at ~/.gemini/oauth_creds.json.".to_string())
+        };
+    }
     if zeroclaw_provider_ids().iter().any(|id| id == provider_id) {
         let is_local = zeroclaw_providers::list_model_providers()
             .into_iter()
@@ -798,22 +934,23 @@ pub fn save_provider_config(
         let token = api_key
             .filter(|key| !key.trim().is_empty())
             .ok_or_else(|| "This Agent provider requires a credential.".to_string())?;
-        let service = zeroclaw_auth_service();
         let provider_id = provider_id.to_string();
         let token = token.to_string();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|e| format!("Failed to initialize Agent auth runtime: {e}"))?;
-        runtime
-            .block_on(service.store_model_provider_token(
-                &provider_id,
-                "default",
-                &token,
-                std::collections::HashMap::new(),
-                true,
-            ))
-            .map_err(|e| format!("Failed to save Agent credential: {e}"))?;
+        let agent_provider_id = provider_id.clone();
+        let agent_token = token.clone();
+        run_agent_operation(move || async move {
+            let service = zeroclaw_auth_service();
+            service
+                .store_model_provider_token(
+                    &agent_provider_id,
+                    "default",
+                    &agent_token,
+                    std::collections::HashMap::new(),
+                    true,
+                )
+                .await
+                .map_err(|e| format!("Failed to save Agent credential: {e}"))
+        })?;
         // Keep Grok ACP as the session/tool host, but mirror providers into a
         // Grok-native protocol configuration. Native protocols are selected
         // explicitly; they are never mislabeled as OpenAI-compatible.

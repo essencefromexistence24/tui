@@ -79,6 +79,11 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         compiled: cfg!(feature = "channel-nextcloud"),
     },
     ChannelCompileSpec {
+        schema_name: Some("Notion"),
+        type_keys: &["notion"],
+        compiled: cfg!(feature = "channel-notion"),
+    },
+    ChannelCompileSpec {
         schema_name: Some("Email"),
         type_keys: &["email"],
         compiled: cfg!(feature = "channel-email"),

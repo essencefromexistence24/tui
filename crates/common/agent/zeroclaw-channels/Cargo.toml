@@ -71,9 +71,6 @@ matrix-sdk = { version = "0.18", optional = true, default-features = false, feat
   "sqlite",
 ] }
 mime_guess = { version = "2", optional = true }
-# Nostr is intentionally disabled until nostr-sdk releases a non-yanked
-# async-utility dependency. Keeping the broken optional dependency here makes
-# Cargo resolve the yanked crate even when the channel is not enabled.
 parking_lot = "0.12"
 portable-atomic = "1"
 prost = { version = "0.14", default-features = false, features = [

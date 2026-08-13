@@ -4156,7 +4156,10 @@ impl AgentView {
             // terminal-level surfaces. Give them the unsplit frame so their
             // window can never collapse to a zero-height retained-buffer
             // region or be clipped behind the right sidebar.
-            let overlay_area = full_area;
+            // Keep the DX sidebar outside the extensions surface. It is
+            // rendered immediately before this modal and must remain visible;
+            // using full_area here repaints over it with the modal background.
+            let overlay_area = area;
             let compact = self.scrollback.appearance().prompt.compact;
             let tick = self.scrollback.animation_tick();
             // Paint the chat sidebar first, then place the modal above it.

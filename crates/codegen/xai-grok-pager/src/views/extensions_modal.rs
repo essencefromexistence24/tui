@@ -1914,6 +1914,7 @@ impl Default for ExtensionsModalState {
 impl ExtensionsModalState {
     /// Create a new modal state with the given initial tab.
     pub fn new(tab: ExtensionsTab) -> Self {
+        let provider_tab = tab == ExtensionsTab::Providers;
         Self {
             window: ModalWindowState::with_tabs(ExtensionsTab::ALL.len()),
             active_tab: tab,
@@ -1968,7 +1969,13 @@ impl ExtensionsModalState {
             hooks_filter: StatusFilter::default(),
             skills_filter: StatusFilter::default(),
             // PickerState mode is vestigial — ModalWindow handles framing.
-            picker_state: picker::PickerState::default(),
+            picker_state: if provider_tab {
+                // The provider catalog is immediately searchable. Opening
+                // this tab must take keyboard focus away from the chat input.
+                picker::PickerState::input_active()
+            } else {
+                picker::PickerState::default()
+            },
             entry_data_indices: Vec::new(),
             entry_labels_cache: Vec::new(),
             entry_group_keys: Vec::new(),
@@ -2004,6 +2011,8 @@ impl ExtensionsModalState {
             self.provider_connect.error_message = None;
         }
         self.active_tab = tab;
+        self.picker_state.search_active = tab == ExtensionsTab::Providers;
+        self.picker_state.tabs_focused = false;
         if self.active_tab == ExtensionsTab::Connect {
             self.channel_connect.refresh();
         }

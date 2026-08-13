@@ -133,6 +133,7 @@ zeroclaw-channels = { workspace = true, features = [
   "channels-full",
   "channel-matrix",
   "channel-wechat",
+  "voice-wake",
   "whatsapp-web",
 ] }
 reqwest.workspace = true

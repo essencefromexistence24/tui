@@ -336,6 +336,15 @@ impl AgentView {
         &mut self,
         key: &crossterm::event::KeyEvent,
     ) -> InputOutcome {
+        // Even when the picker is already at its first/last row, vertical
+        // navigation belongs to the open extensions surface. Consuming the
+        // event prevents it from falling through to chat history, scrollback,
+        // or terminal handling (and avoids an audible terminal bell).
+        let consume_vertical_navigation = matches!(
+            key.code,
+            crossterm::event::KeyCode::Up | crossterm::event::KeyCode::Down
+        );
+
         // Provider credential entry is a form nested in the Providers tab.
         // It owns text keys until saved or cancelled; the outer extensions
         // tabs remain present and are restored immediately on Esc.
@@ -344,6 +353,7 @@ impl AgentView {
                 && matches!(
                     state.provider_connect.mode,
                     crate::views::provider_connect::ConnectMode::KeyInput { .. }
+                        | crate::views::provider_connect::ConnectMode::OAuth { .. }
                 )
         }) {
             let outcome = {
@@ -820,9 +830,17 @@ impl AgentView {
                             state.provider_connect.active_tab,
                             &query,
                         );
+                    // The category tabs add a non-selectable header row.
+                    // Convert the outer picker index to the provider picker
+                    // index before resolving the selected provider.
+                    let provider_idx = if data.non_sel.get(idx).copied().unwrap_or(true) {
+                        return InputOutcome::Changed;
+                    } else {
+                        idx
+                    };
                     crate::views::provider_connect::input::handle_selection(
                         &mut state.provider_connect,
-                        idx,
+                        provider_idx,
                         &data,
                     );
                     InputOutcome::Changed
@@ -849,7 +867,13 @@ impl AgentView {
             crate::views::picker::PickerOutcome::SubmitQuery => InputOutcome::Changed,
             crate::views::picker::PickerOutcome::Changed
             | crate::views::picker::PickerOutcome::QueryChanged => InputOutcome::Changed,
-            crate::views::picker::PickerOutcome::Unchanged => InputOutcome::Unchanged,
+            crate::views::picker::PickerOutcome::Unchanged => {
+                if consume_vertical_navigation {
+                    InputOutcome::Changed
+                } else {
+                    InputOutcome::Unchanged
+                }
+            }
         }
     }
 
@@ -1179,11 +1203,17 @@ impl AgentView {
                 state.provider_connect.active_tab,
                 &query,
             );
-            crate::views::provider_connect::input::handle_selection(
-                &mut state.provider_connect,
-                idx,
-                &data,
-            );
+            // The category tabs prepend a non-selectable header.  The outer
+            // extensions picker and the provider picker must agree on that
+            // row before dispatching, otherwise a header click can resolve to
+            // the next provider (the recurring provider "get index" bug).
+            if !data.non_sel.get(idx).copied().unwrap_or(true) {
+                crate::views::provider_connect::input::handle_selection(
+                    &mut state.provider_connect,
+                    idx,
+                    &data,
+                );
+            }
             return InputOutcome::Changed;
         }
         if let Some(idx) = clicked_entry

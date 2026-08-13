@@ -501,6 +501,14 @@ pub(super) fn dispatch_open_extensions_modal(
 
     // Mutual exclusivity: close agents modal when opening extensions.
     agent.agents_modal = None;
+    // Extensions owns the interaction surface. Stop any DX carousel
+    // intro/outro underneath it so its timer, sound, and animation cannot
+    // continue leaking into the modal while it is open.
+    if agent.dx_ui.view == crate::dx::DxView::Animation {
+        agent.dx_ui.sound.stop_animation_loop();
+        agent.dx_ui.intro_deadline = None;
+        agent.dx_ui.view = crate::dx::DxView::Chat;
+    }
     let mut modal = ExtensionsModalState::new(tab);
     modal.session_team_id = app.team_id.clone();
     agent.extensions_modal = Some(modal);
