@@ -2,8 +2,8 @@ use crate::error::{RLMError, Result};
 use futures::stream::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -100,7 +100,8 @@ impl LLMProviderConfig {
         header_name: impl Into<String>,
         header_value: impl Into<String>,
     ) -> Self {
-        self.extra_headers.insert(header_name.into(), header_value.into());
+        self.extra_headers
+            .insert(header_name.into(), header_value.into());
         self
     }
 }
@@ -372,7 +373,9 @@ impl LLMClient {
             .choices
             .first()
             .map(|choice| choice.message.content.clone())
-            .ok_or_else(|| RLMError::LLMError("No response choices returned by provider".to_string()))?;
+            .ok_or_else(|| {
+                RLMError::LLMError("No response choices returned by provider".to_string())
+            })?;
 
         self.store_cached_response(cache_key, result.clone());
         Ok(result)

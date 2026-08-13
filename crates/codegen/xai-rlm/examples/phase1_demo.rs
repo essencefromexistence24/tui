@@ -1,7 +1,7 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📄 Document: {} characters (~80k tokens)", context.len());
     println!();
 
-    let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-        .with_max_iterations(20);
+    let rlm =
+        RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?.with_max_iterations(20);
 
     println!("================================================================================");
     println!("OPTIMIZATION 1: Zero-Copy Context (Arc<String>)");
@@ -58,8 +58,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let start = Instant::now();
-    let query = "Use fast_find to locate 'AI market' in the context and extract 200 characters around it.";
-    
+    let query =
+        "Use fast_find to locate 'AI market' in the context and extract 200 characters around it.";
+
     match rlm.complete(query, &context).await {
         Ok((answer, _stats)) => {
             let elapsed = start.elapsed();
@@ -101,14 +102,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let parallel_time = start.elapsed();
 
     println!();
-    println!("✅ All queries completed in {:.2}s", parallel_time.as_secs_f64());
+    println!(
+        "✅ All queries completed in {:.2}s",
+        parallel_time.as_secs_f64()
+    );
     println!();
 
     let mut total_individual_time = 0u128;
     for (i, result) in results.iter().enumerate() {
         if let Ok((_, stats)) = result {
             total_individual_time += stats.elapsed_ms;
-            println!("   Query {}: {:.2}s", i + 1, stats.elapsed_ms as f64 / 1000.0);
+            println!(
+                "   Query {}: {:.2}s",
+                i + 1,
+                stats.elapsed_ms as f64 / 1000.0
+            );
         }
     }
 
@@ -117,8 +125,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!();
     println!("Parallel execution benefits:");
-    println!("  - Sequential time (theoretical): {:.2}s", theoretical_sequential);
-    println!("  - Parallel time (actual):        {:.2}s", parallel_time.as_secs_f64());
+    println!(
+        "  - Sequential time (theoretical): {:.2}s",
+        theoretical_sequential
+    );
+    println!(
+        "  - Parallel time (actual):        {:.2}s",
+        parallel_time.as_secs_f64()
+    );
     println!("  - Speedup:                        {:.2}x", speedup);
     println!();
     println!("Python RLM: Cannot do this (GIL prevents true parallelism)");

@@ -252,11 +252,12 @@ mod tests {
         };
         let out = saver.process_multimodal(input, &ctx).await.unwrap();
         assert!(!out.videos.is_empty()); // Passed through
-                                         // Scene metadata added
-        assert!(out
-            .base
-            .messages
-            .iter()
-            .any(|m| m.content.contains("scene")));
+        // Scene metadata added
+        assert!(
+            out.base
+                .messages
+                .iter()
+                .any(|m| m.content.contains("scene"))
+        );
     }
 }

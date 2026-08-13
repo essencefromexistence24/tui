@@ -363,9 +363,17 @@ pub(crate) fn start_oauth_job(provider_id: &str) -> Option<Arc<Mutex<Option<Resu
                                 zeroclaw_providers::auth::openai_oauth::generate_pkce_state();
                             let authorize_url =
                                 zeroclaw_providers::auth::openai_oauth::build_authorize_url(&pkce);
+                            // Bind before launching the browser. A logged-in
+                            // browser can follow the callback immediately;
+                            // binding afterward loses that callback and makes
+                            // a successful login appear to have failed.
+                            let listener =
+                                zeroclaw_providers::auth::openai_oauth::bind_loopback_listener()
+                                    .await
+                                    .map_err(|e| format!("OpenAI OAuth callback setup failed: {e}"))?;
                             open_verification_page(&authorize_url);
-                            let code =
-                                zeroclaw_providers::auth::openai_oauth::receive_loopback_code(
+                            let code = zeroclaw_providers::auth::openai_oauth::receive_loopback_code_on_listener(
+                                    listener,
                                     &pkce.state,
                                     std::time::Duration::from_secs(300),
                                 )
@@ -860,7 +868,11 @@ fn load_zeroclaw_configured_providers() -> Vec<String> {
                 .enable_all()
                 .build()
                 .ok()?;
-            Some(runtime.block_on(service.list_profile_ids()).unwrap_or_default())
+            Some(
+                runtime
+                    .block_on(service.list_profile_ids())
+                    .unwrap_or_default(),
+            )
         })
         .ok()
         .and_then(|join| join.join().ok())
@@ -1019,7 +1031,9 @@ pub fn save_provider_config(
     Ok(())
 }
 
-fn grok_protocol_for_provider(provider_id: &str) -> Option<(&'static str, &'static str, &'static str)> {
+fn grok_protocol_for_provider(
+    provider_id: &str,
+) -> Option<(&'static str, &'static str, &'static str)> {
     // ZeroClaw's Gemini implementation uses Google's generateContent/SSE
     // protocol, which is not interchangeable with Grok's chat-completions
     // client. Leave it for the dedicated Gemini adapter.

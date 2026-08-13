@@ -1,6 +1,6 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +14,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Load massive document
     let doc_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("massive_doc.txt");
     let context = fs::read_to_string(&doc_path)?;
-    
+
     let doc_chars = context.len();
     let doc_tokens = 79743; // From dx token command
 
@@ -26,8 +26,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize RLM
     println!("🚀 Initializing Rust RLM with multi-model routing...");
     let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-    .with_fast_model("meta-llama/llama-3.3-70b-versatile".to_string())
-    .with_max_iterations(30);
+        .with_fast_model("meta-llama/llama-3.3-70b-versatile".to_string())
+        .with_max_iterations(30);
     println!("✓ RLM ready with smart + fast models!");
     println!();
 
@@ -59,16 +59,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 println!("✅ Answer: {}", answer);
                 println!("⚡ Time: {:.2}s", elapsed.as_secs_f64());
-                println!("📊 Stats: {} LLM calls, {} iterations", 
-                    stats.llm_calls, stats.iterations);
-                println!("💾 Cache: {:.1}% hit rate ({} hits)", 
+                println!(
+                    "📊 Stats: {} LLM calls, {} iterations",
+                    stats.llm_calls, stats.iterations
+                );
+                println!(
+                    "💾 Cache: {:.1}% hit rate ({} hits)",
                     stats.cache_hit_rate(),
-                    stats.ast_cache_hits + stats.llm_cache_hits);
-                println!("💰 Models: {} fast, {} smart (cost savings: {:.1}%)",
+                    stats.ast_cache_hits + stats.llm_cache_hits
+                );
+                println!(
+                    "💰 Models: {} fast, {} smart (cost savings: {:.1}%)",
                     stats.fast_model_calls,
                     stats.smart_model_calls,
-                    stats.cost_savings());
-                
+                    stats.cost_savings()
+                );
+
                 total_time += elapsed.as_millis();
                 total_llm_calls += stats.llm_calls;
                 total_iterations += stats.iterations;
@@ -90,7 +96,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let estimated_tokens = total_llm_calls * 400;
     let traditional_tokens = doc_tokens * queries.len();
-    let savings = ((traditional_tokens - estimated_tokens) as f64 / traditional_tokens as f64) * 100.0;
+    let savings =
+        ((traditional_tokens - estimated_tokens) as f64 / traditional_tokens as f64) * 100.0;
 
     println!("Document: {} tokens", doc_tokens);
     println!("Queries: {}", queries.len());
@@ -106,7 +113,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  • Total LLM calls: {}", total_llm_calls);
     println!("  • Total iterations: {}", total_iterations);
     println!("  • Total time: {:.2}s", total_time as f64 / 1000.0);
-    println!("  • Avg time/query: {:.2}s", total_time as f64 / 1000.0 / queries.len() as f64);
+    println!(
+        "  • Avg time/query: {:.2}s",
+        total_time as f64 / 1000.0 / queries.len() as f64
+    );
     println!();
 
     println!("💰 TOKEN SAVINGS: {:.1}%", savings);

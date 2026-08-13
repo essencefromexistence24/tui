@@ -22,6 +22,7 @@ pub mod list_dir;
 pub mod lsp;
 pub mod monitor;
 pub mod read_file;
+pub mod rlm;
 pub mod scheduler;
 pub mod search_replace;
 pub(crate) mod storage;
@@ -33,7 +34,6 @@ pub mod video_gen;
 pub mod web_fetch;
 pub mod web_search;
 pub mod workflow;
-pub mod rlm;
 pub use ask_user_question::AskUserQuestionTool;
 pub use bash::BashTool;
 pub use deploy_app::{AppBuilderDeployerConfig, DEPLOY_APP_TOOL_NAME};
@@ -50,6 +50,7 @@ pub use list_dir::ListDirTool;
 pub use lsp::LspTool;
 pub use monitor::tool::MonitorTool;
 pub use read_file::ReadFileTool;
+pub use rlm::RlmTool;
 pub use scheduler::create::{
     LoopFireMode, SCHEDULER_CREATE_TOOL_NAME, SchedulerCreateTool, loop_schedule_instruction,
     loop_usage_message,
@@ -69,4 +70,3 @@ pub use video_gen::{
 pub use web_fetch::{WebFetchClient, WebFetchConfig, WebFetchParams, WebFetchTool};
 pub use web_search::WebSearchTool;
 pub use workflow::{WORKFLOW_TOOL_NAME, WorkflowTool};
-pub use rlm::RlmTool;

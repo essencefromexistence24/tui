@@ -1,6 +1,6 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,11 +26,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Using only smart model (llama-4-scout) for all tasks...");
     println!();
 
-    let rlm_single = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-        .with_max_iterations(20);
+    let rlm_single =
+        RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?.with_max_iterations(20);
 
     let query = "What is the AI market size? Use fast_find to search.";
-    
+
     let start = Instant::now();
     let (answer1, stats1) = rlm_single.complete(query, &context).await?;
     let time1 = start.elapsed();
@@ -56,8 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let rlm_multi = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-    .with_fast_model("meta-llama/llama-3.3-70b-versatile".to_string())
-    .with_max_iterations(20);
+        .with_fast_model("meta-llama/llama-3.3-70b-versatile".to_string())
+        .with_max_iterations(20);
 
     let start = Instant::now();
     let (answer2, stats2) = rlm_multi.complete(query, &context).await?;
@@ -93,20 +93,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, q) in queries.iter().enumerate() {
         println!("Query {}: {}", i + 1, q);
-        
+
         let start = Instant::now();
         let (answer, stats) = rlm_multi.complete(q, &context).await?;
         let elapsed = start.elapsed();
-        
+
         total_fast += stats.fast_model_calls;
         total_smart += stats.smart_model_calls;
         total_time += elapsed.as_secs_f64();
-        
+
         println!("   Answer: {}...", &answer[..answer.len().min(60)]);
-        println!("   Fast: {} | Smart: {} | Cost savings: {:.1}%", 
-            stats.fast_model_calls, 
+        println!(
+            "   Fast: {} | Smart: {} | Cost savings: {:.1}%",
+            stats.fast_model_calls,
             stats.smart_model_calls,
-            stats.cost_savings());
+            stats.cost_savings()
+        );
         println!();
     }
 
@@ -114,12 +116,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Total time: {:.2}s", total_time);
     println!("   Fast model calls: {}", total_fast);
     println!("   Smart model calls: {}", total_smart);
-    
+
     let total_calls = total_fast + total_smart;
     let baseline_cost = total_calls as f64;
     let actual_cost = (total_fast as f64 * 0.1) + (total_smart as f64);
     let savings = ((baseline_cost - actual_cost) / baseline_cost) * 100.0;
-    
+
     println!("   Overall cost savings: {:.1}%", savings);
     println!();
 

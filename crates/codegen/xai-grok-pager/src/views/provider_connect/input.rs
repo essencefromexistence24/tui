@@ -209,15 +209,12 @@ fn handle_key_input(
         .iter()
         .chain(state.providers.iter())
         .collect();
-    let free = all
-        .iter()
-        .find(|p| p.id == provider_id)
-        .is_some_and(|p| {
-            p.auth_type == "none"
-                || p.auth_type == "optional"
-                || p.auth_type == "external_oauth"
-                || p.free == "true"
-        });
+    let free = all.iter().find(|p| p.id == provider_id).is_some_and(|p| {
+        p.auth_type == "none"
+            || p.auth_type == "optional"
+            || p.auth_type == "external_oauth"
+            || p.free == "true"
+    });
 
     match key.code {
         KeyCode::Esc => {

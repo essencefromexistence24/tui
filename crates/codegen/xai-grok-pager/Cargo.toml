@@ -93,7 +93,9 @@ tokio = { workspace = true, features = [
     "signal",
     "io-util",
     "io-std",
+    "fs",
 ] }
+futures-util.workspace = true
 tokio-util = { workspace = true, features = ["compat"] }
 zeroclaw-log = { workspace = true }
 tracing = { workspace = true }

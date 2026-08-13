@@ -100,9 +100,7 @@ fn is_xai_endpoint(base_url: &str) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
-    host == "x.ai"
-        || host.ends_with(".x.ai")
-        || host == "cli-chat-proxy.grok.com"
+    host == "x.ai" || host.ends_with(".x.ai") || host == "cli-chat-proxy.grok.com"
 }
 
 impl GrokRequestHeaders<'_> {

@@ -45,9 +45,8 @@ impl SessionActor {
     }
 
     fn refine_create(&self, rest: &str) -> String {
-        let (kind_word, title_and_content) = rest
-            .split_once(char::is_whitespace)
-            .unwrap_or((rest, ""));
+        let (kind_word, title_and_content) =
+            rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let Some(kind) = parse_kind(kind_word) else {
             return REFINE_USAGE.to_string();
         };
@@ -60,13 +59,7 @@ impl SessionActor {
             return REFINE_USAGE.to_string();
         }
         let mut session = self.refine.lock();
-        match session.create(
-            kind,
-            title,
-            content,
-            Some(format!("slash:{rest}")),
-            "slash",
-        ) {
+        match session.create(kind, title, content, Some(format!("slash:{rest}")), "slash") {
             Ok(entry) => format!("Created harness {kind} '{}' ({})", entry.title, entry.id),
             Err(err) => format!("Could not create harness {kind}: {err}"),
         }
@@ -92,9 +85,7 @@ impl SessionActor {
     }
 
     fn refine_delete(&self, rest: &str) -> String {
-        let (kind_word, id) = rest
-            .split_once(char::is_whitespace)
-            .unwrap_or((rest, ""));
+        let (kind_word, id) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let Some(kind) = parse_kind(kind_word) else {
             return REFINE_USAGE.to_string();
         };
@@ -114,10 +105,7 @@ impl SessionActor {
     pub(super) fn execute_refine_status(&self) -> String {
         let session = self.refine.lock();
         let state = session.state();
-        let mut lines = vec![format!(
-            "Harness status\n{}",
-            state.overview(2_000)
-        )];
+        let mut lines = vec![format!("Harness status\n{}", state.overview(2_000))];
         let log = session.log();
         lines.push(format!("\nRefinements recorded: {}", log.len()));
         for result in log.recent(5) {

@@ -56,10 +56,7 @@ mod tests {
     #[test]
     fn detects_multiline_final() {
         let response = "Thoughts...\nFINAL(\"\"\"Line 1\nLine 2\"\"\")";
-        assert_eq!(
-            extract_final(response),
-            Some("Line 1\nLine 2".to_string())
-        );
+        assert_eq!(extract_final(response), Some("Line 1\nLine 2".to_string()));
     }
 
     #[test]

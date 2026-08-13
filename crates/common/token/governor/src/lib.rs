@@ -112,10 +112,13 @@ impl GovernorSaver {
 
         // Check total calls
         if tracker.total_calls >= self.config.max_total_calls_per_turn {
-            return (false, format!(
-                "CIRCUIT BREAKER: Total tool calls ({}) exceeded limit ({}). Stop and summarize progress.",
-                tracker.total_calls, self.config.max_total_calls_per_turn
-            ));
+            return (
+                false,
+                format!(
+                    "CIRCUIT BREAKER: Total tool calls ({}) exceeded limit ({}). Stop and summarize progress.",
+                    tracker.total_calls, self.config.max_total_calls_per_turn
+                ),
+            );
         }
 
         // Check same tool count
@@ -124,9 +127,9 @@ impl GovernorSaver {
                 return (
                     false,
                     format!(
-                    "CIRCUIT BREAKER: '{}' called {} times (limit {}). Try a different approach.",
-                    tool_name, count, self.config.max_same_tool_calls
-                ),
+                        "CIRCUIT BREAKER: '{}' called {} times (limit {}). Try a different approach.",
+                        tool_name, count, self.config.max_same_tool_calls
+                    ),
                 );
             }
         }
@@ -134,10 +137,13 @@ impl GovernorSaver {
         // Check identical calls
         if let Some(&count) = tracker.identical_counts.get(&args_hash) {
             if count >= self.config.max_identical_calls {
-                return (false, format!(
-                    "CIRCUIT BREAKER: Identical '{}' call repeated {} times (limit {}). The same call won't give different results.",
-                    tool_name, count, self.config.max_identical_calls
-                ));
+                return (
+                    false,
+                    format!(
+                        "CIRCUIT BREAKER: Identical '{}' call repeated {} times (limit {}). The same call won't give different results.",
+                        tool_name, count, self.config.max_identical_calls
+                    ),
+                );
             }
         }
 
@@ -211,7 +217,10 @@ impl TokenSaver for GovernorSaver {
             tokens_after,
             tokens_saved,
             description: if blocked_count > 0 {
-                format!("Circuit breaker triggered: {} tool calls flagged for blocking, ~{} tokens saved", blocked_count, tokens_saved)
+                format!(
+                    "Circuit breaker triggered: {} tool calls flagged for blocking, ~{} tokens saved",
+                    blocked_count, tokens_saved
+                )
             } else {
                 "No runaway patterns detected.".into()
             },

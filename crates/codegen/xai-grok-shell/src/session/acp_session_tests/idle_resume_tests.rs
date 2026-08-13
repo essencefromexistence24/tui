@@ -129,7 +129,9 @@ async fn test_e2e_idle_resume_refreshes_model_metadata() {
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             let actor = SessionActor {
-                refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
+                refine: Arc::new(parking_lot::Mutex::new(
+                    xai_grok_refine::RefineSession::new(None),
+                )),
                 session_info: SessionInfo {
                     id: acp::SessionId::new("test-idle-resume"),
                     cwd: cwd.as_str().to_string(),

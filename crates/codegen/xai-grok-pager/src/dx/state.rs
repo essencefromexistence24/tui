@@ -78,9 +78,7 @@ impl DxUiState {
         }
         self.intro_seen = true;
         self.animation.begin_intro();
-        self.intro_deadline = Some(
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
-        );
+        self.intro_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
         self.sound.stop_animation_loop();
         self.sound
             .start_animation_loop(self.animation.current().sound());

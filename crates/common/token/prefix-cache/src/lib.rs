@@ -203,7 +203,10 @@ impl TokenSaver for PrefixCacheSaver {
             let streak = self.prefix_hit_streak.lock().unwrap();
             format!(
                 "Prefix cache HIT: {} prefix tokens cached, {:.0}% discount for model '{}', streak: {}",
-                prefix_tokens, discount * 100.0, ctx.model, *streak
+                prefix_tokens,
+                discount * 100.0,
+                ctx.model,
+                *streak
             )
         } else if prefix_tokens < self.config.min_prefix_tokens {
             format!(

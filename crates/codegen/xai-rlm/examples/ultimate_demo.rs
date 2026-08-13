@@ -1,6 +1,6 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,7 +8,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("RUST RLM - ULTIMATE DEMONSTRATION");
     println!("================================================================================");
     println!();
-    println!("This demo shows how RLM reduces oversized document handling into focused search-and-answer loops.");
+    println!(
+        "This demo shows how RLM reduces oversized document handling into focused search-and-answer loops."
+    );
     println!();
 
     dotenvy::dotenv().ok();
@@ -25,24 +27,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut demo_doc = String::new();
             demo_doc.push_str("# Technology Industry Report 2024\n\n");
             demo_doc.push_str("## AI Market Analysis\n");
-            demo_doc.push_str("The global AI market reached $184 billion in 2024, growing at 37.3% annually. ");
+            demo_doc.push_str(
+                "The global AI market reached $184 billion in 2024, growing at 37.3% annually. ",
+            );
             demo_doc.push_str("Major players include OpenAI, Anthropic, Google, and Meta. ");
-            demo_doc.push_str("The enterprise AI adoption rate hit 65% in Fortune 500 companies.\n\n");
+            demo_doc
+                .push_str("The enterprise AI adoption rate hit 65% in Fortune 500 companies.\n\n");
             demo_doc.push_str("## Space Industry Updates\n");
-            demo_doc.push_str("SpaceX completed 96 successful launches in 2024, setting a new record. ");
+            demo_doc.push_str(
+                "SpaceX completed 96 successful launches in 2024, setting a new record. ",
+            );
             demo_doc.push_str("Starship achieved its first orbital flight in March 2024. ");
             demo_doc.push_str("The commercial space market grew to $469 billion.\n\n");
             demo_doc.push_str("## Remote Work Statistics\n");
             demo_doc.push_str("Remote work adoption stabilized at 42% for tech workers in 2024. ");
-            demo_doc.push_str("Hybrid models became the norm, with 3 days in office being most common. ");
+            demo_doc.push_str(
+                "Hybrid models became the norm, with 3 days in office being most common. ",
+            );
             demo_doc.push_str("Productivity metrics showed a 12% increase compared to 2023.\n\n");
 
             for i in 1..20 {
                 demo_doc.push_str(&format!("## Additional Section {}\n", i));
-                demo_doc.push_str(&format!("This section contains detailed information about topic {}. ", i));
-                demo_doc.push_str("It includes market analysis, trends, statistics, and forecasts. ");
-                demo_doc.push_str("The data is sourced from industry reports and expert analysis. ");
-                demo_doc.push_str("Key metrics show significant growth across all measured parameters.\n\n");
+                demo_doc.push_str(&format!(
+                    "This section contains detailed information about topic {}. ",
+                    i
+                ));
+                demo_doc
+                    .push_str("It includes market analysis, trends, statistics, and forecasts. ");
+                demo_doc
+                    .push_str("The data is sourced from industry reports and expert analysis. ");
+                demo_doc.push_str(
+                    "Key metrics show significant growth across all measured parameters.\n\n",
+                );
             }
 
             demo_doc

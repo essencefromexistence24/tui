@@ -12,7 +12,7 @@
 use crate::app::actions::Action;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::{ModeSupport, Remedy};
-use crate::theme::{Theme, ThemeKind, cache as theme_cache, DX_THEME_NAMES, dx_theme_title};
+use crate::theme::{DX_THEME_NAMES, Theme, ThemeKind, cache as theme_cache, dx_theme_title};
 
 /// Switch the pager color theme.
 pub struct ThemeCommand;
@@ -154,8 +154,7 @@ impl SlashCommand for ThemeCommand {
         if let Some(canonical) = crate::theme::canonical_name(trimmed) {
             return CommandResult::Action(Action::SetTheme(canonical.to_string()));
         }
-        let mut all_names: Vec<&str> =
-            ThemeKind::ALL.iter().map(|k| k.display_name()).collect();
+        let mut all_names: Vec<&str> = ThemeKind::ALL.iter().map(|k| k.display_name()).collect();
         all_names.extend(DX_THEME_NAMES.iter().copied());
         CommandResult::Error(format!(
             "Unknown theme: {}. Available: auto, {}",

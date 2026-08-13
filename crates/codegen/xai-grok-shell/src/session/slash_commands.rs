@@ -303,7 +303,9 @@ pub(super) const BUILTIN_COMMANDS: &[BuiltinCommand] = &[
     BuiltinCommand {
         name: "refine",
         description: "Review and refine the agent's harness layer (memory, skills, prompt notes, subagent specs)",
-        argument_hint: Some("status | rollback <id> | create <kind> <title>: <content> | update <id>: <content> | delete <id>"),
+        argument_hint: Some(
+            "status | rollback <id> | create <kind> <title>: <content> | update <id>: <content> | delete <id>",
+        ),
         aliases: &[],
         gate: BuiltinGate::AlwaysOn,
         resolve: |args| {

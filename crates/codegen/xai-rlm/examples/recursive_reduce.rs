@@ -1,4 +1,4 @@
-use xai_rlm::{RLMChunkingConfig, RLMDocument, RLMProfile, RLM};
+use xai_rlm::{RLM, RLMChunkingConfig, RLMDocument, RLMProfile};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

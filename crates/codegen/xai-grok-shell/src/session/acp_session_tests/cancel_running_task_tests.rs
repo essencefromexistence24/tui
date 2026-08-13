@@ -111,7 +111,9 @@ async fn persist_ack_waits_for_disk_flush_before_success() {
                 tokio_util::sync::CancellationToken::new(),
             );
             let actor = Arc::new(SessionActor {
-                refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
+                refine: Arc::new(parking_lot::Mutex::new(
+                    xai_grok_refine::RefineSession::new(None),
+                )),
                 session_info,
                 auth_method_id: test_auth_method_id("test-auth"),
                 model_auth_memo: std::cell::RefCell::new(None),
@@ -585,7 +587,9 @@ async fn first_turn_memory_injection_disabled_does_not_persist_to_chat_history()
             };
             let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
             let actor = Arc::new(SessionActor {
-                refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
+                refine: Arc::new(parking_lot::Mutex::new(
+                    xai_grok_refine::RefineSession::new(None),
+                )),
                 session_info: session_info.clone(),
                 auth_method_id: test_auth_method_id("test-auth"),
                 model_auth_memo: std::cell::RefCell::new(None),

@@ -3789,9 +3789,7 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
                 dispatch_access_gate_menu_action,
             );
         }
-        if matches!(ctx.auth_state, AuthState::Done)
-            && ctx.prompt.text().trim().is_empty()
-        {
+        if matches!(ctx.auth_state, AuthState::Done) && ctx.prompt.text().trim().is_empty() {
             if key.code == KeyCode::Left && key.modifiers.is_empty() {
                 *ctx.post_new_view = Some(crate::dx::DxView::FileBrowser);
                 return InputOutcome::Action(Action::NewSession);

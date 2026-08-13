@@ -8,12 +8,32 @@ use xai_grok_tools::types::definition::ToolDefinition;
 
 /// Built-in tools described by the Dx Serializer Compact catalog.
 const BUILTIN_TOOL_NAMES: &[&str] = &[
-    "run_terminal_command", "read_file", "search_replace", "list_dir", "grep",
-    "kill_command_or_subagent", "todo_write", "get_command_or_subagent_output",
-    "spawn_subagent", "scheduler_create", "scheduler_delete", "scheduler_list", "monitor",
-    "search_tool", "use_tool", "workflow", "enter_plan_mode", "exit_plan_mode",
-    "ask_user_question", "web_search", "web_fetch", "image_gen", "image_edit", "image_to_video",
-    "reference_to_video", "write",
+    "run_terminal_command",
+    "read_file",
+    "search_replace",
+    "list_dir",
+    "grep",
+    "kill_command_or_subagent",
+    "todo_write",
+    "get_command_or_subagent_output",
+    "spawn_subagent",
+    "scheduler_create",
+    "scheduler_delete",
+    "scheduler_list",
+    "monitor",
+    "search_tool",
+    "use_tool",
+    "workflow",
+    "enter_plan_mode",
+    "exit_plan_mode",
+    "ask_user_question",
+    "web_search",
+    "web_fetch",
+    "image_gen",
+    "image_edit",
+    "image_to_video",
+    "reference_to_video",
+    "write",
 ];
 
 /// Convert canonical definitions into compact native registrations.
@@ -34,7 +54,8 @@ pub fn compact_native_definitions(mut definitions: Vec<ToolDefinition>) -> Vec<T
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_native_definitions, BUILTIN_TOOL_NAMES};
+    use super::{BUILTIN_TOOL_NAMES, compact_native_definitions};
+    use serde_json::json;
     use xai_grok_tools::types::definition::ToolDefinition;
 
     #[test]

@@ -3330,6 +3330,7 @@ pub fn render_extensions_modal(
                             let status_label = match plugin.install_status.as_str() {
                                 "installed" => "[installed]",
                                 "update_available" => "[update available]",
+                                "not_installed" => "[Install]",
                                 _ => "",
                             };
                             entry_labels.push(plugin.name.clone());
@@ -3400,6 +3401,7 @@ pub fn render_extensions_modal(
                             entry_badge_color.push(match plugin.install_status.as_str() {
                                 "installed" => Some(theme.accent_success),
                                 "update_available" => Some(theme.warning),
+                                "not_installed" => Some(theme.accent_tool),
                                 _ => None,
                             });
                         }
@@ -7582,5 +7584,4 @@ mod tests {
             ["on:Notification", "on:Pre-Tool Use /Bash", "on:Stop"]
         );
     }
-
 }

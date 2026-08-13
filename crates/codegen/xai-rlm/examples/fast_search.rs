@@ -1,5 +1,5 @@
-use xai_rlm::RLM;
 use std::fs;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,8 +16,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📄 Document: {} characters", context.len());
     println!();
 
-    let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-        .with_max_iterations(20);
+    let rlm =
+        RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?.with_max_iterations(20);
 
     println!("Query: Count how many times '2024' appears in the document");
     println!();

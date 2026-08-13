@@ -255,7 +255,9 @@ pub(crate) async fn create_test_actor_with_terminal(
     );
     chat_state_handle.record_token_usage(total_tokens);
     let actor = SessionActor {
-        refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
+        refine: Arc::new(parking_lot::Mutex::new(
+            xai_grok_refine::RefineSession::new(None),
+        )),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
             cwd: cwd.as_str().to_string(),

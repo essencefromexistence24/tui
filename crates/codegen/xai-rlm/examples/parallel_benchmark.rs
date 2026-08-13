@@ -1,7 +1,7 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let doc_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("massive_doc.txt");
     let context = fs::read_to_string(&doc_path)?;
     let context_arc = Arc::new(context.clone());
-    
+
     let doc_chars = context.len();
     let doc_tokens = 79743;
 
@@ -24,8 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   Tokens: {} tokens", doc_tokens);
     println!();
 
-    let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-        .with_max_iterations(30);
+    let rlm =
+        RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?.with_max_iterations(30);
 
     let queries = [
         "What is the total AI market size and its growth rate?",
@@ -57,7 +57,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let sequential_time = start.elapsed();
-    println!("Total sequential time: {:.2}s", sequential_time.as_secs_f64());
+    println!(
+        "Total sequential time: {:.2}s",
+        sequential_time.as_secs_f64()
+    );
     println!();
 
     println!("================================================================================");
@@ -68,10 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let start = Instant::now();
 
     // Prepare parallel queries
-    let parallel_queries: Vec<_> = queries
-        .iter()
-        .map(|q| (*q, context_arc.clone()))
-        .collect();
+    let parallel_queries: Vec<_> = queries.iter().map(|q| (*q, context_arc.clone())).collect();
 
     println!("🚀 Launching {} queries in parallel...", queries.len());
     println!();
@@ -105,16 +105,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let speedup = sequential_time.as_secs_f64() / parallel_time.as_secs_f64();
 
-    println!("Sequential execution: {:.2}s", sequential_time.as_secs_f64());
+    println!(
+        "Sequential execution: {:.2}s",
+        sequential_time.as_secs_f64()
+    );
     println!("Parallel execution:   {:.2}s", parallel_time.as_secs_f64());
     println!();
-    println!("🚀 SPEEDUP: {:.2}x faster with parallel execution!", speedup);
+    println!(
+        "🚀 SPEEDUP: {:.2}x faster with parallel execution!",
+        speedup
+    );
     println!();
 
     println!("Benefits of Rust RLM:");
     println!("  ✅ Zero-copy context sharing (Arc<String>)");
     println!("  ✅ SIMD-accelerated text search (10-100x faster)");
-    println!("  ✅ Parallel recursive execution ({:.1}x speedup)", speedup);
+    println!(
+        "  ✅ Parallel recursive execution ({:.1}x speedup)",
+        speedup
+    );
     println!("  ✅ Memory safe (no GIL, no copying)");
     println!();
 

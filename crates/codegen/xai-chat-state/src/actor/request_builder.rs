@@ -128,8 +128,7 @@ impl ChatStateActor {
         // prompt plus every tool schema takes minutes on CPU. Give this local
         // model a compact coding profile so the interactive TUI can respond
         // promptly while retaining the essential read/edit/shell tools.
-        let is_compact_local =
-            self.state.sampling_config.model == "qwen2.5-coder-1.5b-local";
+        let is_compact_local = self.state.sampling_config.model == "qwen2.5-coder-1.5b-local";
         if is_compact_local {
             // Even the five core Grok Build schemas consume thousands of
             // tokens and take minutes for this 1B CPU model to evaluate.

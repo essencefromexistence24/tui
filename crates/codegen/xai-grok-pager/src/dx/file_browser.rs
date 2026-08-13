@@ -656,9 +656,7 @@ impl BrowserEngine {
         let theme = crate::theme::Theme::current();
         buf.set_style(
             area,
-            Style::default()
-                .fg(theme.text_primary)
-                .bg(theme.bg_base),
+            Style::default().fg(theme.text_primary).bg(theme.bg_base),
         );
         self.ensure_initialized();
         // Full theme sync: push the active pager palette into the YAZI Lua
@@ -859,8 +857,14 @@ mod tests {
             value["notify"]["title_error"]["fg"].as_str(),
             Some("#0d0e0f")
         );
-        assert_eq!(value["mgr"]["symlink_target"]["fg"].as_str(), Some("#101112"));
-        assert_eq!(value["filetype"]["rules"][9]["fg"].as_str(), Some("#101112"));
+        assert_eq!(
+            value["mgr"]["symlink_target"]["fg"].as_str(),
+            Some("#101112")
+        );
+        assert_eq!(
+            value["filetype"]["rules"][9]["fg"].as_str(),
+            Some("#101112")
+        );
         let primary = color_value(theme.text_primary);
         assert_eq!(value["app"]["overall"]["fg"].as_str(), primary.as_deref());
         assert_eq!(

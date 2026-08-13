@@ -1,4 +1,5 @@
 use std::num::NonZeroU64;
+use std::path::{Path, PathBuf};
 
 use indexmap::IndexMap;
 
@@ -19,20 +20,6 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     }
 
     let models = [
-        ModelSpec {
-            key: "minicpm5-1b-tooluse",
-            name: "MiniCPM5 1B Tool Use (Local)",
-            model_id: "minicpm5-1b-tooluse",
-            ctx: 32_768,
-            title_header: None,
-        },
-        ModelSpec {
-            key: "qwen2.5-coder-1.5b-local",
-            name: "Qwen2.5 Coder 1.5B (Local)",
-            model_id: "qwen2.5-coder-1.5b-local",
-            ctx: 32_768,
-            title_header: None,
-        },
         ModelSpec {
             key: "big-pickle",
             name: "Big Pickle",
@@ -79,15 +66,12 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
 
     for m in &models {
         let mut extra_headers = IndexMap::new();
-        let is_local = matches!(m.key, "minicpm5-1b-tooluse" | "qwen2.5-coder-1.5b-local");
-        if !is_local {
-            extra_headers.insert(
-                "HTTP-Referer".to_string(),
-                "https://opencode.ai/".to_string(),
-            );
-            if let Some(title) = m.title_header {
-                extra_headers.insert("X-Title".to_string(), title.to_string());
-            }
+        extra_headers.insert(
+            "HTTP-Referer".to_string(),
+            "https://opencode.ai/".to_string(),
+        );
+        if let Some(title) = m.title_header {
+            extra_headers.insert("X-Title".to_string(), title.to_string());
         }
 
         map.insert(
@@ -95,20 +79,15 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
             ModelEntryConfig {
                 id: Some(m.key.to_string()),
                 model: m.model_id.to_string(),
-                base_url: if is_local {
-                    "http://localhost:8080/v1".to_string()
-                } else {
-                    "https://opencode.ai/zen/v1".to_string()
-                },
+                base_url: "https://opencode.ai/zen/v1".to_string(),
                 api_base_url: None,
                 name: Some(m.name.to_string()),
                 description: None,
                 max_completion_tokens: None,
                 temperature: None,
                 top_p: None,
-                // llama-server ignores this placeholder; the client uses its
-                // presence to avoid sending xAI session credentials locally.
-                api_key: Some(if is_local { "local" } else { "public" }.to_string()),
+                // OpenCode Zen's free catalog is intentionally public.
+                api_key: Some("public".to_string()),
                 env_key: None,
                 api_backend: ApiBackend::ChatCompletions,
                 auth_scheme: None,
@@ -119,11 +98,9 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
                 context_window: NonZeroU64::new(m.ctx).unwrap(),
                 auto_compact_threshold_percent: None,
                 system_prompt_label: None,
-                use_concise: is_local,
+                use_concise: false,
                 agent_type: "grok-build".to_string(),
-                // CPU-hosted models can spend tens of seconds ingesting the
-                // prompt before their first streamed token.
-                inference_idle_timeout_secs: is_local.then_some(600),
+                inference_idle_timeout_secs: None,
                 max_retries: None,
                 hidden: false,
                 supported_in_api: true,
@@ -187,4 +164,147 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     );
 
     map
+}
+
+/// Build model entries from GGUF/GGML files already present in DX's local
+/// model cache. The catalog deliberately has no bundled local model names:
+/// a model appears only after the user places/downloads the file.
+pub(crate) fn cached_local_model_entries() -> IndexMap<String, ModelEntryConfig> {
+    let mut entries = IndexMap::new();
+    for directory in local_model_directories() {
+        let Ok(read_dir) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            if !is_supported_local_model_file(&path) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|v| v.to_str()).map(str::to_owned) else {
+                continue;
+            };
+            let key = local_model_key(&stem);
+            entries
+                .entry(key.clone())
+                .or_insert_with(|| local_model_config(key, &stem, path));
+        }
+    }
+    entries
+}
+
+fn local_model_config(key: String, stem: &str, path: PathBuf) -> ModelEntryConfig {
+    ModelEntryConfig {
+        id: Some(key.clone()),
+        model: key,
+        base_url: "http://127.0.0.1:8080/v1".to_string(),
+        api_base_url: None,
+        name: Some(stem.replace(['_', '-'], " ")),
+        description: Some("Local GGUF/GGML model · DX cache".to_string()),
+        max_completion_tokens: None,
+        temperature: None,
+        top_p: None,
+        api_key: Some("local".to_string()),
+        env_key: None,
+        api_backend: ApiBackend::ChatCompletions,
+        auth_scheme: None,
+        reasoning_effort: None,
+        supports_reasoning_effort: false,
+        reasoning_efforts: Vec::new(),
+        extra_headers: IndexMap::new(),
+        context_window: NonZeroU64::new(32_768).expect("non-zero context window"),
+        auto_compact_threshold_percent: None,
+        system_prompt_label: None,
+        use_concise: false,
+        agent_type: "grok-build".to_string(),
+        inference_idle_timeout_secs: Some(600),
+        max_retries: None,
+        hidden: false,
+        supported_in_api: true,
+        supports_backend_search: false,
+        compactions_remaining: None,
+        compaction_at_tokens: None,
+        show_model_fingerprint: false,
+        stream_tool_calls: None,
+        local_model_path: Some(path),
+        laziness_detector: LazinessDetectorPerModelConfig::default(),
+    }
+}
+
+fn is_supported_local_model_file(path: &Path) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                extension.eq_ignore_ascii_case("gguf") || extension.eq_ignore_ascii_case("ggml")
+            })
+}
+
+fn local_model_key(stem: &str) -> String {
+    let slug: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!("local-{}", slug.trim_matches('-'))
+}
+
+fn local_model_directories() -> Vec<PathBuf> {
+    let mut directories = Vec::new();
+    if let Some(path) = std::env::var_os("DX_FLOW_MODELS_DIR") {
+        directories.push(PathBuf::from(path));
+    }
+    if let Some(data_local) = dirs::data_local_dir() {
+        directories.push(
+            data_local
+                .join("dx")
+                .join("flow")
+                .join("models")
+                .join("llm"),
+        );
+    }
+    if let Some(data) = dirs::data_dir() {
+        directories.push(data.join("dx").join("flow").join("models").join("llm"));
+    }
+    if let Some(home) = dirs::home_dir() {
+        directories.push(home.join(".dx").join("flow").join("models").join("llm"));
+    }
+    directories.sort();
+    directories.dedup();
+    directories
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{builtin_community_models, is_supported_local_model_file, local_model_key};
+
+    #[test]
+    fn bundled_community_catalog_has_no_local_model_names() {
+        let models = builtin_community_models();
+        assert!(!models.keys().any(|key| key.starts_with("local-")));
+        assert!(!models.contains_key("minicpm5-1b-tooluse"));
+        assert!(!models.contains_key("qwen2.5-coder-1.5b-local"));
+    }
+
+    #[test]
+    fn local_model_keys_are_stable_and_files_are_extension_filtered() {
+        assert_eq!(
+            local_model_key("Qwen2.5-Coder_Q4"),
+            "local-qwen2-5-coder-q4"
+        );
+        assert!(is_supported_local_model_file(std::path::Path::new(
+            "model.GGUF"
+        )));
+        assert!(is_supported_local_model_file(std::path::Path::new(
+            "model.ggml"
+        )));
+        assert!(!is_supported_local_model_file(std::path::Path::new(
+            "model.bin"
+        )));
+    }
 }

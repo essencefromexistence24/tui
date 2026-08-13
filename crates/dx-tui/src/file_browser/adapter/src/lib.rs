@@ -16,7 +16,11 @@ use std::sync::{
 use ansi_to_tui::IntoText;
 use fb_emulator::{Brand, CLOSE, EMULATOR, ESCAPE, Emulator, Mux, START, TMUX};
 use fb_shared::{SyncCell, in_wsl};
-use ratatui::{buffer::Buffer, layout::Rect, widgets::{Paragraph, Widget}};
+use ratatui::{
+	buffer::Buffer,
+	layout::Rect,
+	widgets::{Paragraph, Widget},
+};
 
 pub static ADAPTOR: SyncCell<Adapter> = SyncCell::new(Adapter::Chafa);
 
@@ -74,7 +78,9 @@ fn init_with_flavor(embedded: bool) -> anyhow::Result<()> {
 }
 
 #[inline]
-pub(crate) fn embedded() -> bool { EMBEDDED.load(Ordering::Relaxed) }
+pub(crate) fn embedded() -> bool {
+	EMBEDDED.load(Ordering::Relaxed)
+}
 
 pub(crate) fn store_embedded_image(area: Rect, ansi: Vec<u8>) {
 	*EMBEDDED_IMAGE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((area, ansi));
@@ -100,11 +106,7 @@ pub fn render_embedded_image(win: Rect, buf: &mut Buffer) {
 }
 
 fn detect_emulator(embedded: bool) -> Emulator {
-	if embedded {
-		Emulator::default()
-	} else {
-		Emulator::detect().unwrap_or_default()
-	}
+	if embedded { Emulator::default() } else { Emulator::detect().unwrap_or_default() }
 }
 
 #[cfg(test)]

@@ -74,7 +74,9 @@ pub(super) async fn make_replay_send_update_fixture() -> ReplaySendUpdateFixture
     });
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let actor = SessionActor {
-        refine: Arc::new(parking_lot::Mutex::new(xai_grok_refine::RefineSession::new(None))),
+        refine: Arc::new(parking_lot::Mutex::new(
+            xai_grok_refine::RefineSession::new(None),
+        )),
         session_info: SessionInfo {
             id: acp::SessionId::new("test-session"),
             cwd: cwd.as_str().to_string(),

@@ -1,7 +1,7 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -34,8 +34,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-    .with_fast_model("meta-llama/llama-3.3-70b-versatile".to_string())
-    .with_max_iterations(20);
+        .with_fast_model("meta-llama/llama-3.3-70b-versatile".to_string())
+        .with_max_iterations(20);
 
     println!("================================================================================");
     println!("COMPREHENSIVE BENCHMARK - ALL PHASES");
@@ -56,20 +56,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, query) in queries.iter().enumerate() {
         println!("Query {}/{}: {}", i + 1, queries.len(), query);
-        
+
         let start = Instant::now();
         let (answer, stats) = rlm.complete_streaming(query, context_arc.clone()).await?;
         let elapsed = start.elapsed();
-        
+
         total_time += elapsed.as_secs_f64();
         total_llm_calls += stats.llm_calls;
         total_fast_calls += stats.fast_model_calls;
         total_smart_calls += stats.smart_model_calls;
         total_cache_hits += stats.ast_cache_hits + stats.llm_cache_hits;
-        
+
         println!("✅ Answer: {}", answer);
         println!("   Time: {:.2}s", elapsed.as_secs_f64());
-        println!("   Models: {} fast, {} smart", stats.fast_model_calls, stats.smart_model_calls);
+        println!(
+            "   Models: {} fast, {} smart",
+            stats.fast_model_calls, stats.smart_model_calls
+        );
         println!("   Cache: {:.1}% hit rate", stats.cache_hit_rate());
         println!("   Cost savings: {:.1}%", stats.cost_savings());
         println!();
@@ -85,19 +88,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Performance:");
     println!("  Total time: {:.2}s", total_time);
-    println!("  Avg time/query: {:.2}s", total_time / queries.len() as f64);
+    println!(
+        "  Avg time/query: {:.2}s",
+        total_time / queries.len() as f64
+    );
     println!("  Total LLM calls: {}", total_llm_calls);
     println!();
 
     println!("Model Usage:");
-    println!("  Fast model: {} calls (search/exploration)", total_fast_calls);
-    println!("  Smart model: {} calls (synthesis/reasoning)", total_smart_calls);
-    
+    println!(
+        "  Fast model: {} calls (search/exploration)",
+        total_fast_calls
+    );
+    println!(
+        "  Smart model: {} calls (synthesis/reasoning)",
+        total_smart_calls
+    );
+
     let total_model_calls = total_fast_calls + total_smart_calls;
     let baseline_cost = total_model_calls as f64;
     let actual_cost = (total_fast_calls as f64 * 0.1) + (total_smart_calls as f64);
     let cost_savings = ((baseline_cost - actual_cost) / baseline_cost) * 100.0;
-    
+
     println!("  Cost savings: {:.1}%", cost_savings);
     println!();
 

@@ -3578,19 +3578,15 @@ pub(crate) fn resolve_model_list(
         // These point to opencode.ai/zen/v1 with a public API key and must be
         // visible alongside the xAI API models in the model picker.
         for (key, entry) in super::community_models::builtin_community_models() {
-            if matches!(
-                key.as_str(),
-                "minicpm5-1b-tooluse" | "qwen2.5-coder-1.5b-local"
-            ) {
-                // The local model must never inherit a same-named prefetched
-                // proxy entry; its localhost URL and Chat Completions backend
-                // are required for inference to reach llama-server.
-                resolved.insert(key, ModelEntry::from_config_entry(&entry));
-            } else {
-                resolved
-                    .entry(key)
-                    .or_insert_with(|| ModelEntry::from_config_entry(&entry));
-            }
+            resolved
+                .entry(key)
+                .or_insert_with(|| ModelEntry::from_config_entry(&entry));
+        }
+        // Local entries are derived from the user's DX cache, never from a
+        // bundled list of model names. Re-inject them after a remote catalog
+        // replacement so a server refresh cannot hide locally downloaded GGUFs.
+        for (key, entry) in super::community_models::cached_local_model_entries() {
+            resolved.insert(key, ModelEntry::from_config_entry(&entry));
         }
     }
     for (key, model_override) in &cfg.config_models {
@@ -3901,6 +3897,9 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
     // (e.g. the minimal `big-pickle` entry) so the correct base URL and
     // API key from the community definition are used.
     for (key, entry) in super::community_models::builtin_community_models() {
+        map.insert(key, entry);
+    }
+    for (key, entry) in super::community_models::cached_local_model_entries() {
         map.insert(key, entry);
     }
 
@@ -5416,6 +5415,12 @@ pub(crate) fn to_acp_model_info(
                     "agentType".to_string(),
                     serde_json::Value::String(info.agent_type.clone()),
                 );
+                if let Some(provider) = model_provider_label(model) {
+                    map.insert(
+                        "dxProvider".to_string(),
+                        serde_json::Value::String(provider),
+                    );
+                }
                 if info.supports_reasoning_effort {
                     map.insert(
                         "supportsReasoningEffort".to_string(),
@@ -5447,6 +5452,85 @@ pub(crate) fn to_acp_model_info(
             )
         })
         .collect()
+}
+
+/// Stable, user-facing provider label for the model picker. This is derived
+/// from the effective endpoint rather than from credentials, so secrets never
+/// cross the ACP boundary and configured providers still receive a useful
+/// label without maintaining a second provider registry in the TUI.
+fn model_provider_label(entry: &ModelEntry) -> Option<String> {
+    if let Some(provider) = entry
+        .auth_provider
+        .as_ref()
+        .filter(|provider| !provider.is_fail_closed())
+    {
+        let name = provider
+            .name
+            .strip_prefix("model_provider:")
+            .unwrap_or(&provider.name);
+        if !name.is_empty() {
+            return Some(name.to_string());
+        }
+    }
+
+    let info = &entry.info;
+    let base_url = info.base_url.trim();
+    if base_url.is_empty() {
+        return None;
+    }
+    let lower = base_url.to_ascii_lowercase();
+    if lower.contains("opencode.ai") {
+        return Some("OpenCode Zen".to_string());
+    }
+    if lower.contains("openrouter.ai") {
+        return Some("OpenRouter".to_string());
+    }
+    if lower.contains("x.ai") || lower.contains("grok.com") {
+        return Some("xAI Grok".to_string());
+    }
+    if lower.contains("127.0.0.1") || lower.contains("localhost") || lower.contains("[::1]") {
+        return Some("Local GGUF".to_string());
+    }
+
+    // Configured providers use arbitrary hosts. Keep the label deterministic
+    // and readable without exposing the path or query string.
+    let host = base_url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(base_url)
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let known_provider = [
+        ("anthropic.com", "Anthropic"),
+        ("googleapis.com", "Google Gemini"),
+        ("generativelanguage.googleapis.com", "Google Gemini"),
+        ("github.com", "GitHub Copilot"),
+        ("qwen.ai", "Qwen"),
+        ("minimax.io", "MiniMax"),
+        ("mistral.ai", "Mistral"),
+        ("deepseek.com", "DeepSeek"),
+        ("groq.com", "Groq"),
+        ("together.xyz", "Together AI"),
+        ("fireworks.ai", "Fireworks AI"),
+        ("cerebras.ai", "Cerebras"),
+        ("cohere.com", "Cohere"),
+        ("perplexity.ai", "Perplexity"),
+    ];
+    if let Some((_, label)) = known_provider.iter().find(|(domain, _)| {
+        host.eq_ignore_ascii_case(domain) || host.ends_with(&format!(".{domain}"))
+    }) {
+        return Some((*label).to_string());
+    }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_string())
+    }
 }
 /// Error code for model switch rejection due to agent type mismatch.
 pub const MODEL_SWITCH_INCOMPATIBLE_AGENT: &str = "MODEL_SWITCH_INCOMPATIBLE_AGENT";

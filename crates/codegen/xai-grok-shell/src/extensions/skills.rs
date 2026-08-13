@@ -421,8 +421,7 @@ pub async fn handle(
                 .session_id
                 .as_deref()
                 .and_then(|session_id| {
-                    agent
-                        .get_session_cwd(&acp::SessionId::new(session_id.to_owned()))
+                    agent.get_session_cwd(&acp::SessionId::new(session_id.to_owned()))
                 })
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or(req.cwd);

@@ -7,11 +7,11 @@
 //! [`RefineSession`](crate::RefineSession), which snapshots state before each
 //! mutation so any edit is reversible.
 
+use crate::RefineSession;
 use crate::log::RefinementAction;
 use crate::state::HarnessKind;
-use crate::RefineSession;
-use ::rhai::Engine;
 use ::rhai::Dynamic;
+use ::rhai::Engine;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -21,31 +21,39 @@ use std::sync::{Arc, Mutex};
 /// the same session the host owns.
 pub fn register_refine_fns(engine: &mut Engine, session: &Arc<Mutex<RefineSession>>) {
     let ctx = session.clone();
-    engine.register_fn("harness_create", move |kind: &str, title: &str, content: &str| {
-        let kind = match HarnessKind::parse(kind) {
-            Some(k) => k,
-            None => return format!("Error: unknown harness kind: {kind}"),
-        };
-        let mut s = ctx.lock().unwrap();
-        match s.create(kind, title, content, None, "script") {
-            Ok(entry) => format!("created {} {}/{}", kind.as_str(), entry.id, entry.title),
-            Err(e) => format!("Error: {e}"),
-        }
-    });
+    engine.register_fn(
+        "harness_create",
+        move |kind: &str, title: &str, content: &str| {
+            let kind = match HarnessKind::parse(kind) {
+                Some(k) => k,
+                None => return format!("Error: unknown harness kind: {kind}"),
+            };
+            let mut s = ctx.lock().unwrap();
+            match s.create(kind, title, content, None, "script") {
+                Ok(entry) => format!("created {} {}/{}", kind.as_str(), entry.id, entry.title),
+                Err(e) => format!("Error: {e}"),
+            }
+        },
+    );
 
     let ctx = session.clone();
-    engine.register_fn("harness_update", move |kind: &str, id: &str, content: &str| {
-        let kind = match HarnessKind::parse(kind) {
-            Some(k) => k,
-            None => return format!("Error: unknown harness kind: {kind}"),
-        };
-        let mut s = ctx.lock().unwrap();
-        match s.update(kind, id, content, "script") {
-            Ok(Some(entry)) => format!("updated {} {}/{}", kind.as_str(), entry.id, entry.title),
-            Ok(None) => format!("Error: no {}/{id} entry", kind.as_str()),
-            Err(e) => format!("Error: {e}"),
-        }
-    });
+    engine.register_fn(
+        "harness_update",
+        move |kind: &str, id: &str, content: &str| {
+            let kind = match HarnessKind::parse(kind) {
+                Some(k) => k,
+                None => return format!("Error: unknown harness kind: {kind}"),
+            };
+            let mut s = ctx.lock().unwrap();
+            match s.update(kind, id, content, "script") {
+                Ok(Some(entry)) => {
+                    format!("updated {} {}/{}", kind.as_str(), entry.id, entry.title)
+                }
+                Ok(None) => format!("Error: no {}/{id} entry", kind.as_str()),
+                Err(e) => format!("Error: {e}"),
+            }
+        },
+    );
 
     let ctx = session.clone();
     engine.register_fn("harness_delete", move |kind: &str, id: &str| {
@@ -96,17 +104,21 @@ pub fn register_refine_fns(engine: &mut Engine, session: &Arc<Mutex<RefineSessio
     let ctx = session.clone();
     engine.register_fn("harness_overview", move || {
         let s = ctx.lock().unwrap();
-        s.state().overview(crate::prompt::HARNESS_OVERVIEW_MAX_CHARS)
+        s.state()
+            .overview(crate::prompt::HARNESS_OVERVIEW_MAX_CHARS)
     });
 
     let ctx = session.clone();
-    engine.register_fn("harness_record_refinement", move |map: BTreeMap<String, Dynamic>| {
-        let mut s = ctx.lock().unwrap();
-        match s.record_from_map(map, "script") {
-            Ok(id) => format!("recorded refinement {id}"),
-            Err(e) => format!("Error: {e}"),
-        }
-    });
+    engine.register_fn(
+        "harness_record_refinement",
+        move |map: BTreeMap<String, Dynamic>| {
+            let mut s = ctx.lock().unwrap();
+            match s.record_from_map(map, "script") {
+                Ok(id) => format!("recorded refinement {id}"),
+                Err(e) => format!("Error: {e}"),
+            }
+        },
+    );
 
     let ctx = session.clone();
     engine.register_fn("refine_rollback", move |id: &str| {

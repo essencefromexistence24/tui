@@ -20920,6 +20920,7 @@ dependencies = [
  "fb-widgets",
  "figlet-rs",
  "flate2",
+ "futures-util",
  "git2",
  "image",
  "indexmap 2.14.0",

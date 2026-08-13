@@ -1,10 +1,12 @@
 //! DX themes auto-generated from dx-tui themes.json (dark variant).
 //! Regenerate with: pwsh crates/dx-tui/scripts/generate-pager-dx-themes.ps1
-use ratatui::style::{Color, Modifier};
 use super::tokyonight::Theme;
+use ratatui::style::{Color, Modifier};
 
 /// Helper for concise const Color::Rgb definitions.
-const fn rgb(r: u8, g: u8, b: u8) -> Color { Color::Rgb(r, g, b) }
+const fn rgb(r: u8, g: u8, b: u8) -> Color {
+    Color::Rgb(r, g, b)
+}
 
 /// All DX theme names, in catalog order.
 pub const DX_THEME_NAMES: &[&str] = &[
@@ -90,7 +92,10 @@ pub const DX_THEME_TITLES: &[&str] = &[
 
 /// Display title for a DX theme name.
 pub fn dx_theme_title(name: &str) -> Option<&'static str> {
-    DX_THEME_NAMES.iter().position(|n| *n == name).map(|i| DX_THEME_TITLES[i])
+    DX_THEME_NAMES
+        .iter()
+        .position(|n| *n == name)
+        .map(|i| DX_THEME_TITLES[i])
 }
 
 /// Build the pager Theme for a DX theme name (dark variant).

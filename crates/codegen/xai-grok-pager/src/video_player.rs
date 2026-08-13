@@ -299,7 +299,10 @@ fn local_path_from_user_text(path_text: &str) -> PathBuf {
     #[cfg(windows)]
     if path_text.len() >= 2
         && path_text.as_bytes()[1] == b':'
-        && !path_text.as_bytes().get(2).is_some_and(|byte| *byte == b'\\' || *byte == b'/')
+        && !path_text
+            .as_bytes()
+            .get(2)
+            .is_some_and(|byte| *byte == b'\\' || *byte == b'/')
     {
         return PathBuf::from(format!(
             "{}\\{}",

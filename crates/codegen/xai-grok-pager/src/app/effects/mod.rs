@@ -1707,6 +1707,45 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
+        Effect::DownloadModel {
+            model_id,
+            display_name,
+            url,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let model = crate::model_catalog::DownloadableModel {
+                    key: model_id.clone(),
+                    display_name: display_name.clone(),
+                    url,
+                };
+                let result = match crate::model_catalog::download(&model).await {
+                    Ok(path) => {
+                        let params = serde_json::json!({});
+                        let request = acp::ExtRequest::new(
+                            "x.ai/internal/reload_models",
+                            serde_json::value::to_raw_value(&params)
+                                .expect("serialize model reload params")
+                                .into(),
+                        );
+                        acp_send(request, &tx)
+                            .await
+                            .map(|_| path.clone())
+                            .map_err(|error| {
+                                format!(
+                                    "downloaded model to {} but catalog reload failed: {error}",
+                                    path.display()
+                                )
+                            })
+                    }
+                    Err(error) => Err(error),
+                };
+                TaskResult::ModelDownloadComplete {
+                    display_name,
+                    result,
+                }
+            });
+        }
         Effect::SwitchModel {
             agent_id,
             session_id,

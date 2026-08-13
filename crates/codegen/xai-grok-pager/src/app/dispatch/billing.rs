@@ -102,9 +102,9 @@ pub(super) fn open_credit_limit_upsell(
     max_tier: bool,
 ) {
     let _ = (mode, max_tier);
-    agent.scrollback.push_block(RenderBlock::system(
-        "Usage limit reached for this session.",
-    ));
+    agent
+        .scrollback
+        .push_block(RenderBlock::system("Usage limit reached for this session."));
 }
 
 /// Open the free-usage paywall on the given agent: a Q&A modal in the

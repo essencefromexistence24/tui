@@ -138,17 +138,18 @@ impl TokenSaver for DedupSaver {
 
             if let Some((orig_turn, orig_id, _orig_tokens)) = tracker.seen.get(&hash) {
                 // Duplicate found
-                let ref_text =
-                    if self.config.keep_reference {
-                        format!(
+                let ref_text = if self.config.keep_reference {
+                    format!(
                         "[Duplicate output — same as turn {}{}, {} tokens. Content deduplicated.]",
                         orig_turn,
-                        orig_id.as_ref().map_or(String::new(), |id| format!(" ({})", id)),
+                        orig_id
+                            .as_ref()
+                            .map_or(String::new(), |id| format!(" ({})", id)),
                         msg.token_count
                     )
-                    } else {
-                        "[Duplicate output removed.]".into()
-                    };
+                } else {
+                    "[Duplicate output removed.]".into()
+                };
 
                 let old_tokens = msg.token_count;
                 let new_tokens = ref_text.len() / 4 + 5;

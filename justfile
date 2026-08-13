@@ -1,6 +1,9 @@
 set shell := ["pwsh", "-c"]
 
 protoc := env_var_or_default('PROTOC', env_var('TEMP') + '/protoc/bin/protoc.exe')
+# DX runtime/config/cache root on this machine. An explicitly exported
+# GROK_HOME still wins because the recipes preserve it when present.
+grok_home := env_var_or_default('GROK_HOME', 'C:/Users/Computer/Dx/tui')
 
 default:
     @just --list
@@ -11,19 +14,19 @@ default:
 # graph with bounded concurrency; the public build/run recipes still finish
 # with the requested 1-job build once the heavy artifacts are available.
 _release-prime:
-    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12
+    $env:PROTOC = "{{protoc}}"; $env:GROK_HOME = "{{grok_home}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12
 
 build: _release-prime
-    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12
+    $env:PROTOC = "{{protoc}}"; $env:GROK_HOME = "{{grok_home}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12
 
 watch:
-    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo watch -x "build -p xai-grok-pager-bin --release -j 12" -s ".\target\release\xai-grok-pager.exe"
+    $env:PROTOC = "{{protoc}}"; $env:GROK_HOME = "{{grok_home}}"; $env:CARGO_INCREMENTAL = "1"; cargo watch -x "build -p xai-grok-pager-bin --release -j 12" -s ".\target\release\xai-grok-pager.exe"
 
 check:
-    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo check -p xai-grok-pager-bin
+    $env:PROTOC = "{{protoc}}"; $env:GROK_HOME = "{{grok_home}}"; $env:CARGO_INCREMENTAL = "1"; cargo check -p xai-grok-pager-bin
 
 run:
-    $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12; if ($LASTEXITCODE -eq 0) { & ".\target\release\xai-grok-pager.exe" }
+    $env:PROTOC = "{{protoc}}"; $env:GROK_HOME = "{{grok_home}}"; $env:CARGO_INCREMENTAL = "1"; cargo build -p xai-grok-pager-bin --release -j 12; if ($LASTEXITCODE -eq 0) { & ".\target\release\xai-grok-pager.exe" }
 
 fmt:
     $env:CARGO_INCREMENTAL = "1"; cargo fmt --all

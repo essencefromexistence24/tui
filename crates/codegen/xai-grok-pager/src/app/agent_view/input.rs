@@ -820,9 +820,7 @@ impl AgentView {
                     ));
                 }
                 KeyCode::Char('a') => {
-                    if self.dx_ui.diff.view_mode
-                        == crate::dx::diff_view::DiffViewMode::AiSummary
-                    {
+                    if self.dx_ui.diff.view_mode == crate::dx::diff_view::DiffViewMode::AiSummary {
                         self.dx_ui.diff.show_file_tree();
                         return InputOutcome::Changed;
                     }

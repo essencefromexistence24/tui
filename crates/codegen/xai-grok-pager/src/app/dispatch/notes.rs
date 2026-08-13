@@ -120,9 +120,9 @@ pub(super) fn dispatch_edit_note(app: &mut AppView) -> Vec<Effect> {
         let text = text.trim().to_string();
         agent.prompt.set_text(&text);
         if text.is_empty() {
-            agent
-                .scrollback
-                .push_block(RenderBlock::system("No memory note to edit yet.".to_string()));
+            agent.scrollback.push_block(RenderBlock::system(
+                "No memory note to edit yet.".to_string(),
+            ));
         }
     });
     vec![]

@@ -31,8 +31,8 @@ pub mod prompt;
 pub mod rhai;
 pub mod state;
 
-use log::{RefinementAction, RefinementLog, RefinementResult};
 use ::rhai::Dynamic;
+use log::{RefinementAction, RefinementLog, RefinementResult};
 use state::{HarnessEntry, HarnessKind, HarnessState};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -112,7 +112,9 @@ impl RefineSession {
             write_json(p, &self.state)?;
         }
         if let Some(p) = &self.log_path {
-            self.log.save(p).map_err(|e| RefineError::Persistence(e.to_string()))?;
+            self.log
+                .save(p)
+                .map_err(|e| RefineError::Persistence(e.to_string()))?;
         }
         Ok(())
     }
@@ -122,7 +124,16 @@ impl RefineSession {
         format!("refine-{seq:05}", seq = self.seq)
     }
 
-    fn record(&mut self, kind: HarnessKind, action: RefinementAction, title: &str, content: &str, trigger: &str, baseline: HarnessState, outcome: &str) -> Result<String, RefineError> {
+    fn record(
+        &mut self,
+        kind: HarnessKind,
+        action: RefinementAction,
+        title: &str,
+        content: &str,
+        trigger: &str,
+        baseline: HarnessState,
+        outcome: &str,
+    ) -> Result<String, RefineError> {
         let id = self.next_id();
         let result = RefinementResult {
             id: id.clone(),
@@ -154,7 +165,15 @@ impl RefineSession {
         let entry = self
             .state
             .create(kind, title.to_string(), content.to_string(), evidence);
-        self.record(kind, RefinementAction::Create, title, content, trigger, baseline, "created")?;
+        self.record(
+            kind,
+            RefinementAction::Create,
+            title,
+            content,
+            trigger,
+            baseline,
+            "created",
+        )?;
         Ok(entry)
     }
 
@@ -178,7 +197,15 @@ impl RefineSession {
         let Some(entry) = self.state.update(kind, id, content.to_string()) else {
             return Ok(None);
         };
-        self.record(kind, RefinementAction::Update, &entry.title, content, trigger, baseline, "updated")?;
+        self.record(
+            kind,
+            RefinementAction::Update,
+            &entry.title,
+            content,
+            trigger,
+            baseline,
+            "updated",
+        )?;
         Ok(Some(entry))
     }
 
@@ -192,7 +219,15 @@ impl RefineSession {
         let Some(entry) = self.state.delete(kind, id) else {
             return Ok(None);
         };
-        self.record(kind, RefinementAction::Delete, &entry.title, "", trigger, baseline, "deleted")?;
+        self.record(
+            kind,
+            RefinementAction::Delete,
+            &entry.title,
+            "",
+            trigger,
+            baseline,
+            "deleted",
+        )?;
         Ok(Some(entry))
     }
 
@@ -227,8 +262,7 @@ impl RefineSession {
 
 fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), RefineError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| RefineError::Persistence(e.to_string()))?;
+        std::fs::create_dir_all(parent).map_err(|e| RefineError::Persistence(e.to_string()))?;
     }
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(value).unwrap())
@@ -271,12 +305,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         {
             let mut s = RefineSession::load_or_default(Some(dir.path()));
-            s.create_memory("lesson", "compile first", Some("traj-7".to_string())).unwrap();
+            s.create_memory("lesson", "compile first", Some("traj-7".to_string()))
+                .unwrap();
         }
         {
             let s = RefineSession::load_or_default(Some(dir.path()));
             assert_eq!(s.state().list(HarnessKind::Memory).len(), 1);
-            assert_eq!(s.state().list(HarnessKind::Memory)[0].content, "compile first");
+            assert_eq!(
+                s.state().list(HarnessKind::Memory)[0].content,
+                "compile first"
+            );
             assert!(!s.log().is_empty());
         }
     }

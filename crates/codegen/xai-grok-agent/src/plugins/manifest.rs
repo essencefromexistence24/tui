@@ -14,20 +14,29 @@
 
 use std::path::{Path, PathBuf};
 
+use super::codex_manifest;
+
 use serde::Deserialize;
 
-/// Maximum length of a plugin name (kebab-case identifier).
+/// Maximum length of a plugin name (kebab-case or Agent Plugin identifier).
 const MAX_PLUGIN_NAME_LEN: usize = 64;
 
-/// Regex pattern for valid plugin names: lowercase alphanumeric + hyphens.
+/// Valid plugin names use lowercase alphanumeric characters, hyphens, and
+/// single dots. Dots are accepted because the Agent Plugin specification uses
+/// names such as `provider.tools`; leading/trailing/repeated separators remain
+/// invalid.
 fn is_valid_plugin_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= MAX_PLUGIN_NAME_LEN
         && name
             .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
         && !name.starts_with('-')
+        && !name.starts_with('.')
         && !name.ends_with('-')
+        && !name.ends_with('.')
+        && !name.contains("--")
+        && !name.contains("..")
 }
 
 /// Author metadata from a plugin manifest.
@@ -292,6 +301,7 @@ fn resolve_dirs(
 /// Manifest search order within a plugin directory.
 const MANIFEST_PATHS: &[&str] = &[
     "plugin.json",
+    ".codex-plugin/plugin.json",
     ".grok-plugin/plugin.json",
     ".claude-plugin/plugin.json",
 ];
@@ -311,7 +321,21 @@ pub enum ManifestLoadResult {
 /// If no manifest is found, returns `ManifestLoadResult::NotFound`.
 /// The caller can still create a convention-based plugin from the directory.
 pub fn load_manifest(plugin_root: &Path) -> Result<ManifestLoadResult, ManifestError> {
+    if codex_manifest::manifest_path(plugin_root).is_file() {
+        return codex_manifest::load(plugin_root)
+            .map(|manifest| match manifest {
+                Some(manifest) => ManifestLoadResult::Found(Box::new(manifest)),
+                None => ManifestLoadResult::NotFound,
+            })
+            .map_err(|message| ManifestError::ParseError {
+                path: codex_manifest::manifest_path(plugin_root),
+                message,
+            });
+    }
     for rel_path in MANIFEST_PATHS {
+        if *rel_path == ".codex-plugin/plugin.json" {
+            continue;
+        }
         let manifest_path = plugin_root.join(rel_path);
         if manifest_path.is_file() {
             let content =
@@ -413,7 +437,8 @@ mod tests {
         assert!(!is_valid_plugin_name("UPPER"));
         assert!(!is_valid_plugin_name("has space"));
         assert!(!is_valid_plugin_name("has_underscore"));
-        assert!(!is_valid_plugin_name("has.dot"));
+        assert!(is_valid_plugin_name("has.dot"));
+        assert!(!is_valid_plugin_name("has..dot"));
         assert!(!is_valid_plugin_name(&"a".repeat(65)));
     }
 

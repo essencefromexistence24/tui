@@ -106,14 +106,23 @@ pub fn send_latest_response_async(
         .expect("channel session route mutex poisoned")
         .get(&agent_id)
         .cloned()
-    else { return };
-    let Some(agent) = app.agents.get(&agent_id) else { return };
+    else {
+        return;
+    };
+    let Some(agent) = app.agents.get(&agent_id) else {
+        return;
+    };
     let entries: Vec<_> = agent.scrollback.iter_entries().collect();
     let Some(message) = entries.into_iter().rev().find_map(|(_, entry)| {
-        matches!(&entry.block, crate::scrollback::block::RenderBlock::AgentMessage(_))
-            .then(|| entry.block.copy_text(false))
-            .flatten()
-    }) else { return };
+        matches!(
+            &entry.block,
+            crate::scrollback::block::RenderBlock::AgentMessage(_)
+        )
+        .then(|| entry.block.copy_text(false))
+        .flatten()
+    }) else {
+        return;
+    };
     if !message.trim().is_empty() {
         send_message_async(channel_id, recipient, message);
     }

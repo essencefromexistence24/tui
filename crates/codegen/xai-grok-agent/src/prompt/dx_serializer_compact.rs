@@ -33,6 +33,10 @@ mod tests {
         let once = append_to_system_prompt("base");
         let twice = append_to_system_prompt(&once);
         assert_eq!(once, twice);
-        assert_eq!(once.matches("26[name description parameters(required type properties)]").count(), 2);
+        assert_eq!(
+            once.matches("26[name description parameters(required type properties)]")
+                .count(),
+            2
+        );
     }
 }

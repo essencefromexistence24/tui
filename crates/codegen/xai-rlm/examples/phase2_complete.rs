@@ -1,7 +1,7 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,8 +29,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📄 Document: {} characters (~80k tokens)", context.len());
     println!();
 
-    let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-        .with_max_iterations(20);
+    let rlm =
+        RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?.with_max_iterations(20);
 
     println!("================================================================================");
     println!("COMPREHENSIVE BENCHMARK");
@@ -53,11 +53,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, query) in queries.iter().enumerate() {
         println!("Query {}/{}: {}", i + 1, queries.len(), query);
-        
+
         let start = Instant::now();
         let (answer, stats) = rlm.complete_streaming(query, context_arc.clone()).await?;
         let elapsed = start.elapsed();
-        
+
         total_time += elapsed.as_secs_f64();
         total_llm_calls += stats.llm_calls;
         total_iterations += stats.iterations;
@@ -65,7 +65,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         total_ast_misses += stats.ast_cache_misses;
         total_llm_hits += stats.llm_cache_hits;
         total_llm_misses += stats.llm_cache_misses;
-        
+
         println!("✅ Answer: {}", answer);
         println!("   Time: {:.2}s", elapsed.as_secs_f64());
         println!("   Cache hit rate: {:.1}%", stats.cache_hit_rate());
@@ -82,15 +82,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Performance:");
     println!("  Total time: {:.2}s", total_time);
-    println!("  Avg time/query: {:.2}s", total_time / queries.len() as f64);
+    println!(
+        "  Avg time/query: {:.2}s",
+        total_time / queries.len() as f64
+    );
     println!("  Total LLM calls: {}", total_llm_calls);
     println!("  Total iterations: {}", total_iterations);
     println!();
 
     println!("Caching Efficiency:");
-    println!("  AST cache: {} hits, {} misses", total_ast_hits, total_ast_misses);
-    println!("  LLM cache: {} hits, {} misses", total_llm_hits, total_llm_misses);
-    
+    println!(
+        "  AST cache: {} hits, {} misses",
+        total_ast_hits, total_ast_misses
+    );
+    println!(
+        "  LLM cache: {} hits, {} misses",
+        total_llm_hits, total_llm_misses
+    );
+
     let total_cache_ops = total_ast_hits + total_ast_misses + total_llm_hits + total_llm_misses;
     let total_cache_hits = total_ast_hits + total_llm_hits;
     let cache_hit_rate = if total_cache_ops > 0 {
@@ -98,7 +107,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         0.0
     };
-    
+
     println!("  Overall hit rate: {:.1}%", cache_hit_rate);
     println!();
 

@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::{ManifestLoadResult, PluginManifest, load_manifest, name_from_dirname};
+use super::manifest::{load_manifest, name_from_dirname, ManifestLoadResult, PluginManifest};
 use super::trust::TrustStore;
 
 // ── Public types ──────────────────────────────────────────────────────
@@ -223,6 +223,9 @@ fn user_plugin_dirs(home: Option<&Path>, grok: Option<&Path>) -> Vec<(PathBuf, P
     }
     if let Some(h) = home {
         dirs.push((h.join(".claude").join("plugins"), PluginOrigin::UserClaude));
+        // OpenAI Agent Plugins use the shared ~/.agents/plugins directory.
+        // They are still governed by DX's existing user-plugin trust policy.
+        dirs.push((h.join(".agents").join("plugins"), PluginOrigin::UserGrok));
     }
     dirs
 }
@@ -256,12 +259,16 @@ pub fn project_plugin_dirs(cwd: Option<&Path>) -> (Vec<PathBuf>, Option<PathBuf>
     (project_plugin_dirs_in(&chain.dirs), chain.git_root)
 }
 
-/// Existing project plugin parent dirs (`.grok/plugins`, `.claude/plugins`)
+/// Existing project plugin parent dirs (`.grok/plugins`, `.claude/plugins`,
+/// `.agents/plugins`)
 /// under each dir of a precomputed cwd→git-root chain
 /// ([`crate::repo::RepoDirChain`]). The folder-trust gate reuses its one shared
 /// chain here so detection and discovery can never drift.
 pub fn project_plugin_dirs_in(chain_dirs: &[PathBuf]) -> Vec<PathBuf> {
-    crate::repo::existing_subdirs_along(chain_dirs, &[".grok/plugins", ".claude/plugins"])
+    crate::repo::existing_subdirs_along(
+        chain_dirs,
+        &[".grok/plugins", ".claude/plugins", ".agents/plugins"],
+    )
 }
 
 /// Discover all plugins from the filesystem.
@@ -298,7 +305,7 @@ pub fn discover_plugins(
         }
     }
 
-    // 2-3. Project plugins (.grok/plugins/, .claude/plugins/) — scan the SAME
+    // 2-3. Project plugins (.grok/plugins/, .claude/plugins/, .agents/plugins) — scan the SAME
     // dirs the folder-trust gate detects, via the shared `project_plugin_dirs`
     // walk (cwd→git root), so discovery and gating can never drift.
     if let Some(cwd) = cwd {
@@ -645,7 +652,8 @@ fn collect_plugin(
             let has_skills =
                 plugin_root.join("skills").is_dir() || plugin_root.join("commands").is_dir();
             let has_agents = plugin_root.join("agents").is_dir();
-            let has_mcp = plugin_root.join(".mcp.json").is_file();
+            let has_mcp =
+                plugin_root.join(".mcp.json").is_file() || plugin_root.join("mcp.json").is_file();
             let has_lsp = plugin_root.join(".lsp.json").is_file();
             let has_hooks = plugin_root.join("hooks").join("hooks.json").is_file();
 
@@ -919,11 +927,9 @@ mod tests {
             PluginOrigin::UserClaude
         )));
         // Plugins are not discovered from the legacy ~/.grok tree.
-        assert!(
-            !dirs
-                .iter()
-                .any(|(p, _)| p == &home.join(".grok").join("plugins"))
-        );
+        assert!(!dirs
+            .iter()
+            .any(|(p, _)| p == &home.join(".grok").join("plugins")));
     }
 
     #[test]

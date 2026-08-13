@@ -268,8 +268,16 @@ mod tests {
         let ctx = SaverContext::default();
         let input = SaverInput {
             messages: vec![
-                msg("tool", "The server returned status code 200 with response body containing user data fields name email and address", 80),
-                msg("tool", "The server returned status code 200 with response body containing user data fields name email and phone", 80),
+                msg(
+                    "tool",
+                    "The server returned status code 200 with response body containing user data fields name email and address",
+                    80,
+                ),
+                msg(
+                    "tool",
+                    "The server returned status code 200 with response body containing user data fields name email and phone",
+                    80,
+                ),
             ],
             tools: vec![],
             images: vec![],

@@ -14,7 +14,7 @@ pub mod cache;
 pub mod color_support;
 mod dx_themes;
 pub mod env_appearance;
- mod grokday;
+mod grokday;
 mod groknight;
 pub mod md_style;
 pub mod osc11;
@@ -25,7 +25,7 @@ mod terminal_default;
 pub mod tokyonight;
 
 pub use color_support::quantize;
-pub use dx_themes::{dx_theme, dx_theme_title, DX_THEME_NAMES, DX_THEME_TITLES};
+pub use dx_themes::{DX_THEME_NAMES, DX_THEME_TITLES, dx_theme, dx_theme_title};
 pub use tokyonight::{Theme, pulse_brightness, wave_brightness};
 
 /// Four-color compatibility view used by directly merged DX widgets.
@@ -195,7 +195,10 @@ pub fn canonical_name(value: &str) -> Option<&'static str> {
     if let Some(kind) = ThemeKind::from_name(value) {
         return Some(kind.display_name());
     }
-    DX_THEME_NAMES.iter().find(|n| n.eq_ignore_ascii_case(value)).copied()
+    DX_THEME_NAMES
+        .iter()
+        .find(|n| n.eq_ignore_ascii_case(value))
+        .copied()
 }
 
 /// Human-friendly display name for a canonical theme value (e.g.
@@ -432,7 +435,10 @@ impl Theme {
         if cache::terminal_native_locked() {
             return false;
         }
-        let Some(idx) = DX_THEME_NAMES.iter().position(|n| n.eq_ignore_ascii_case(name)) else {
+        let Some(idx) = DX_THEME_NAMES
+            .iter()
+            .position(|n| n.eq_ignore_ascii_case(name))
+        else {
             return false;
         };
         cache::set_dx(idx);

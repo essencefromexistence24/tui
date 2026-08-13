@@ -12,11 +12,11 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU16, Ordering};
 
+use super::DX_THEME_NAMES;
 use super::ThemeKind;
 use super::system_appearance;
-use super::DX_THEME_NAMES;
 
 /// In-memory theme kind, encoded as a `u8` matching the
 /// `ThemeKind` discriminants. Loaded from disk once at startup via
@@ -339,7 +339,10 @@ fn load_from_disk() -> Option<ThemeKind> {
         // Fallback: top-level `theme` key (legacy)
         .or_else(|| table.get("theme").and_then(|v| v.as_str()))?;
     // DX theme: seed the DX slot, leave the nominal kind as GrokNight.
-    if let Some(idx) = DX_THEME_NAMES.iter().position(|name| name.eq_ignore_ascii_case(value)) {
+    if let Some(idx) = DX_THEME_NAMES
+        .iter()
+        .position(|name| name.eq_ignore_ascii_case(value))
+    {
         CURRENT_DX.store(idx as u16, Ordering::Relaxed);
         return None;
     }

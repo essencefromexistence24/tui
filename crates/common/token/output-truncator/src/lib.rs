@@ -218,7 +218,10 @@ impl TokenSaver for OutputTruncatorSaver {
             tokens_after,
             tokens_saved,
             description: if truncated_count > 0 {
-                format!("Truncated {} long outputs: {} → {} tokens ({:.1}% saved). Content-aware safety classification applied.", truncated_count, tokens_before, tokens_after, pct)
+                format!(
+                    "Truncated {} long outputs: {} → {} tokens ({:.1}% saved). Content-aware safety classification applied.",
+                    truncated_count, tokens_before, tokens_after, pct
+                )
             } else {
                 "No outputs exceeded truncation threshold.".into()
             },

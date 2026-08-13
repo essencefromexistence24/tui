@@ -19,7 +19,9 @@ pub enum RLMError {
     ///
     /// This occurs when the RLM reaches the configured maximum number of
     /// iterations without finding a FINAL() answer.
-    #[error("Max iterations ({0}) exceeded - consider increasing max_iterations or simplifying the query")]
+    #[error(
+        "Max iterations ({0}) exceeded - consider increasing max_iterations or simplifying the query"
+    )]
     MaxIterations(usize),
 
     /// Maximum recursion depth exceeded.

@@ -1,15 +1,12 @@
 use crate::app::actions::Action;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-pub struct ConnectCommand;
+/// AI provider catalog and credential configuration.
+pub struct ProvidersCommand;
 
-impl SlashCommand for ConnectCommand {
+impl SlashCommand for ProvidersCommand {
     fn name(&self) -> &str {
-        "connect"
-    }
-
-    fn aliases(&self) -> &[&str] {
-        &["provider", "providers"]
+        "providers"
     }
 
     fn description(&self) -> &str {
@@ -17,7 +14,7 @@ impl SlashCommand for ConnectCommand {
     }
 
     fn usage(&self) -> &str {
-        "/connect"
+        "/providers"
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {

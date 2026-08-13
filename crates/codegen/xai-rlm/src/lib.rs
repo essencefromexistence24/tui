@@ -36,15 +36,15 @@
 //! }
 //! ```
 
-pub mod rlm;
-pub mod llm;
-pub mod repl;
-pub mod parser;
 pub mod error;
+pub mod llm;
+pub mod parser;
+pub mod repl;
+pub mod rlm;
 
+pub use error::{RLMError, Result};
 pub use llm::{LLMAuthScheme, LLMProviderConfig, Message};
 pub use rlm::{
-    RLMBuilder, RLMChunk, RLMChunkingConfig, RLMDocument, RLMProfile, RLMRecursiveResponse,
-    RLMReductionPass, RLMRequest, RLMResponse, RLMRunMode, RLMStats, RLMTaskKind, RLM,
+    RLM, RLMBuilder, RLMChunk, RLMChunkingConfig, RLMDocument, RLMProfile, RLMRecursiveResponse,
+    RLMReductionPass, RLMRequest, RLMResponse, RLMRunMode, RLMStats, RLMTaskKind,
 };
-pub use error::{RLMError, Result};

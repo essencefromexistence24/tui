@@ -309,13 +309,7 @@ mod tests {
         let pager_theme = crate::theme::Theme::tokyonight();
         let theme = ChatTheme::from(&pager_theme);
 
-        render(
-            area,
-            &mut buffer,
-            &theme,
-            0,
-            &RainbowEffect::new(),
-        );
+        render(area, &mut buffer, &theme, 0, &RainbowEffect::new());
 
         let logo_colors = buffer
             .content
@@ -324,6 +318,10 @@ mod tests {
             .map(|cell| cell.fg)
             .collect::<std::collections::HashSet<_>>();
         assert!(logo_colors.len() > 1);
-        assert!(logo_colors.iter().all(|color| matches!(color, Color::Rgb(_, _, _))));
+        assert!(
+            logo_colors
+                .iter()
+                .all(|color| matches!(color, Color::Rgb(_, _, _)))
+        );
     }
 }

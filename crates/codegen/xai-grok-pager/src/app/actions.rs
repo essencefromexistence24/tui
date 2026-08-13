@@ -575,6 +575,12 @@ pub enum Action {
     /// session and persists via `Effect::PersistSetting`. Does not
     /// carry effort — use `Action::SwitchModel` for that.
     SetDefaultModel(acp::ModelId),
+    /// Download a GGUF/GGML model selected from the dynamic model catalog.
+    DownloadModel {
+        model_id: String,
+        display_name: String,
+        url: String,
+    },
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves
     /// via the shell's default-resolution chain.
@@ -1586,6 +1592,12 @@ pub enum Effect {
         session_id: acp::SessionId,
         tool_call_id: String,
     },
+    /// Download a dynamically discovered GGUF/GGML model.
+    DownloadModel {
+        model_id: String,
+        display_name: String,
+        url: String,
+    },
     /// Switch active model.
     SwitchModel {
         agent_id: AgentId,
@@ -2482,6 +2494,12 @@ pub enum TaskResult {
     },
     PreferredModelPersisted {
         result: Result<(), String>,
+    },
+    /// A dynamic GGUF/GGML download completed and the shell catalog reload
+    /// was attempted.
+    ModelDownloadComplete {
+        display_name: String,
+        result: Result<std::path::PathBuf, String>,
     },
     /// Manual `/compact` command completed.
     CompactComplete {

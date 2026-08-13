@@ -239,8 +239,12 @@ impl TokenSaver for VisionCompressSaver {
             description: if images_processed > 0 {
                 format!(
                     "Compressed {} images: {} → {} tokens ({:.1}% saved). Downscale to {}px max, JPEG q{}.",
-                    images_processed, total_before, total_after, pct,
-                    self.config.max_dimension, self.config.jpeg_quality
+                    images_processed,
+                    total_before,
+                    total_after,
+                    pct,
+                    self.config.max_dimension,
+                    self.config.jpeg_quality
                 )
             } else {
                 "No images to compress.".into()

@@ -609,7 +609,11 @@ impl RLM {
         RLMChunkingConfig::for_profile(self.profile)
     }
 
-    pub fn should_reduce_document(&self, document: &RLMDocument, chunking: &RLMChunkingConfig) -> bool {
+    pub fn should_reduce_document(
+        &self,
+        document: &RLMDocument,
+        chunking: &RLMChunkingConfig,
+    ) -> bool {
         document.content.len() > chunking.recursive_threshold_chars
     }
 
@@ -631,7 +635,8 @@ impl RLM {
     }
 
     pub async fn complete(&self, query: &str, context: &str) -> Result<(String, RLMStats)> {
-        self.complete_with_arc(query, Arc::new(context.to_string())).await
+        self.complete_with_arc(query, Arc::new(context.to_string()))
+            .await
     }
 
     pub async fn complete_with_arc(
@@ -639,7 +644,8 @@ impl RLM {
         query: &str,
         context: Arc<String>,
     ) -> Result<(String, RLMStats)> {
-        self.run_loop(query, context, RLMRunMode::Standard, None).await
+        self.run_loop(query, context, RLMRunMode::Standard, None)
+            .await
     }
 
     pub async fn complete_streaming(
@@ -647,7 +653,8 @@ impl RLM {
         query: &str,
         context: Arc<String>,
     ) -> Result<(String, RLMStats)> {
-        self.run_loop(query, context, RLMRunMode::Streaming, None).await
+        self.run_loop(query, context, RLMRunMode::Streaming, None)
+            .await
     }
 
     pub async fn complete_request(&self, request: RLMRequest) -> Result<RLMResponse> {
@@ -662,8 +669,11 @@ impl RLM {
             )
             .await?;
 
-        let evidence_excerpt =
-            build_evidence_excerpt(&request.document.content, &request.query, &request.hint_keywords);
+        let evidence_excerpt = build_evidence_excerpt(
+            &request.document.content,
+            &request.query,
+            &request.hint_keywords,
+        );
         let document = request.document;
         let document_id = document.id;
         let document_title = document.title;
@@ -689,7 +699,8 @@ impl RLM {
         query: impl Into<String>,
         document: RLMDocument,
     ) -> Result<RLMResponse> {
-        self.complete_request(RLMRequest::question(query, document)).await
+        self.complete_request(RLMRequest::question(query, document))
+            .await
     }
 
     pub async fn complete_document_recursive(
@@ -720,7 +731,8 @@ impl RLM {
         goal: impl Into<String>,
         document: RLMDocument,
     ) -> Result<RLMResponse> {
-        self.complete_request(RLMRequest::agent_context(goal, document)).await
+        self.complete_request(RLMRequest::agent_context(goal, document))
+            .await
     }
 
     pub async fn build_agent_context_recursive(
@@ -738,7 +750,8 @@ impl RLM {
         query: impl Into<String>,
         path: impl AsRef<Path>,
     ) -> Result<RLMResponse> {
-        self.complete_document(query, RLMDocument::from_file(path)?).await
+        self.complete_document(query, RLMDocument::from_file(path)?)
+            .await
     }
 
     pub async fn summarize_file(&self, path: impl AsRef<Path>) -> Result<RLMResponse> {
@@ -790,7 +803,11 @@ impl RLM {
             .await
     }
 
-    pub fn chunk_document(&self, document: &RLMDocument, chunking: &RLMChunkingConfig) -> Vec<RLMChunk> {
+    pub fn chunk_document(
+        &self,
+        document: &RLMDocument,
+        chunking: &RLMChunkingConfig,
+    ) -> Vec<RLMChunk> {
         let text = &document.content;
         let text_len = text.len();
 
@@ -891,8 +908,7 @@ impl RLM {
         }
 
         let max_iterations = max_iterations_override.unwrap_or(self.max_iterations);
-        let system_prompt =
-            build_system_prompt(context.len(), self.current_depth, self.profile);
+        let system_prompt = build_system_prompt(context.len(), self.current_depth, self.profile);
 
         let mut messages = vec![
             Message {
@@ -938,19 +954,20 @@ impl RLM {
             };
 
             if is_final(&response)
-                && let Some(answer) = extract_final(&response) {
-                    return Ok((
-                        answer,
-                        self.build_stats(
-                            llm_calls,
-                            iterations,
-                            &start,
-                            (start_ast_hits, start_ast_misses),
-                            (start_llm_hits, start_llm_misses),
-                            (start_fast_calls, start_smart_calls),
-                        ),
-                    ));
-                }
+                && let Some(answer) = extract_final(&response)
+            {
+                return Ok((
+                    answer,
+                    self.build_stats(
+                        llm_calls,
+                        iterations,
+                        &start,
+                        (start_ast_hits, start_ast_misses),
+                        (start_llm_hits, start_llm_misses),
+                        (start_fast_calls, start_smart_calls),
+                    ),
+                ));
+            }
 
             let exec_result = match self.repl.execute(&response, &mut scope) {
                 Ok(result) => result,
@@ -1109,9 +1126,7 @@ impl RLM {
 
 fn build_system_prompt(context_size: usize, depth: usize, profile: RLMProfile) -> String {
     let profile_note = match profile {
-        RLMProfile::LowMemory => {
-            "Prefer narrow searches, short excerpts, and early FINAL answers."
-        }
+        RLMProfile::LowMemory => "Prefer narrow searches, short excerpts, and early FINAL answers.",
         RLMProfile::Balanced => {
             "Balance search breadth with synthesis quality and avoid redundant scans."
         }
@@ -1230,11 +1245,7 @@ fn align_chunk_end(text: &str, proposed_end: usize) -> usize {
     align_boundary_backward(text, end)
 }
 
-fn build_evidence_excerpt(
-    content: &str,
-    query: &str,
-    hint_keywords: &[String],
-) -> Option<String> {
+fn build_evidence_excerpt(content: &str, query: &str, hint_keywords: &[String]) -> Option<String> {
     let mut keywords = hint_keywords.to_vec();
     keywords.extend(extract_keywords(query));
 
@@ -1251,15 +1262,17 @@ fn build_evidence_excerpt(
 
 fn extract_keywords(query: &str) -> Vec<String> {
     const STOP_WORDS: &[&str] = &[
-        "what", "which", "where", "when", "with", "from", "that", "this", "into", "than",
-        "have", "does", "about", "there", "their", "your", "will", "would", "could", "should",
-        "use", "using", "please", "find", "show", "give", "make",
+        "what", "which", "where", "when", "with", "from", "that", "this", "into", "than", "have",
+        "does", "about", "there", "their", "your", "will", "would", "could", "should", "use",
+        "using", "please", "find", "show", "give", "make",
     ];
 
     let mut keywords = Vec::new();
 
     for token in query
-        .split(|character: char| !character.is_alphanumeric() && character != '_' && character != '-')
+        .split(|character: char| {
+            !character.is_alphanumeric() && character != '_' && character != '-'
+        })
         .map(|token| token.trim().to_lowercase())
         .filter(|token| token.len() >= 4 && !STOP_WORDS.contains(&token.as_str()))
     {

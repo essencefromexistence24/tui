@@ -256,7 +256,11 @@ impl TokenSaver for CompactionSaver {
                 strategies_applied.join(", "),
                 tokens_before,
                 tokens_after,
-                if tokens_before > 0 { tokens_saved as f64 / tokens_before as f64 * 100.0 } else { 0.0 }
+                if tokens_before > 0 {
+                    tokens_saved as f64 / tokens_before as f64 * 100.0
+                } else {
+                    0.0
+                }
             ),
         };
         *self.report.lock().unwrap() = report;

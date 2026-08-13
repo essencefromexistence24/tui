@@ -329,6 +329,18 @@ fn candidate_model_dirs() -> Vec<PathBuf> {
         dirs.push(root.join("llm"));
         dirs.push(root);
     }
+    if let Some(data_local) = ::dirs::data_local_dir() {
+        dirs.push(
+            data_local
+                .join("dx")
+                .join("flow")
+                .join("models")
+                .join("llm"),
+        );
+    }
+    if let Some(data) = ::dirs::data_dir() {
+        dirs.push(data.join("dx").join("flow").join("models").join("llm"));
+    }
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors().take(4) {
             let root = ancestor.join("flow").join("models");
@@ -347,7 +359,10 @@ fn find_model_file(dir: &PathBuf, key: &str) -> Option<PathBuf> {
     for entry in std::fs::read_dir(dir).ok()? {
         let entry = entry.ok()?;
         let path = entry.path();
-        if path.extension().map(|e| e == "gguf").unwrap_or(false) {
+        if path.extension().is_some_and(|e| {
+            let extension = e.to_string_lossy();
+            extension.eq_ignore_ascii_case("gguf") || extension.eq_ignore_ascii_case("ggml")
+        }) {
             let name = normalized_model_tokens(&path.file_stem()?.to_string_lossy());
             let wanted = normalized_model_tokens(key);
             if wanted.iter().all(|token| name.contains(token)) {
@@ -384,13 +399,11 @@ mod tests {
     #[test]
     fn model_lookup_matches_catalog_slug_to_gguf_name() {
         let dir = tempfile::tempdir().expect("temp model dir");
-        let expected = dir
-            .path()
-            .join("MiniCPM5-1B-Agentic-Tooluse-Nemotron-DPO.Q4_K_M.gguf");
+        let expected = dir.path().join("Qwen2.5-Coder.Q4_K_M.gguf");
         std::fs::File::create(&expected).expect("create fake GGUF");
 
         assert_eq!(
-            find_model_file(&dir.path().to_path_buf(), "minicpm5-1b-tooluse"),
+            find_model_file(&dir.path().to_path_buf(), "local-qwen2.5-coder"),
             Some(expected)
         );
     }
@@ -398,8 +411,8 @@ mod tests {
     #[test]
     fn local_catalog_suffix_is_not_required_in_filename() {
         assert_eq!(
-            normalized_model_tokens("qwen2.5-coder-1.5b-local"),
-            vec!["qwen2", "5", "coder", "1", "5b"]
+            normalized_model_tokens("local-qwen2.5-coder"),
+            vec!["qwen2", "5", "coder"]
         );
     }
 

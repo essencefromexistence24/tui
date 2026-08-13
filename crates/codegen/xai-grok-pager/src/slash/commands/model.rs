@@ -7,6 +7,7 @@ use xai_grok_shell::sampling::types::supports_reasoning_effort_meta;
 
 use crate::acp::model_state::ModelState;
 use crate::app::actions::Action;
+use crate::model_catalog;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 use crate::slash::commands::effort_levels::build_effort_arg_items;
 
@@ -61,13 +62,24 @@ impl SlashCommand for ModelCommand {
         if let Some(model_id) = detect_effort_phase(ctx.models, args_query) {
             return Some(build_effort_items(ctx.models, &model_id));
         }
-        Some(build_model_items(ctx.models))
+        model_catalog::request_search(args_query);
+        let mut items = build_model_items(ctx.models);
+        items.extend(model_catalog::suggestions(args_query));
+        Some(items)
     }
 
     fn run(&self, ctx: &mut CommandExecCtx, args: &str) -> CommandResult {
         let trimmed = args.trim();
         if trimmed.is_empty() {
             return CommandResult::Error("Usage: /model <name> [effort]".into());
+        }
+
+        if let Some(model) = model_catalog::resolve(trimmed) {
+            return CommandResult::Action(Action::DownloadModel {
+                model_id: model.key,
+                display_name: model.display_name,
+                url: model.url,
+            });
         }
 
         // Prefer an exact full-string catalog match first. Model display names
@@ -157,10 +169,19 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         let is_current = current_id == Some(id);
         let supports = supports_reasoning_effort(info);
 
+        let provider = info
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("dxProvider"))
+            .and_then(serde_json::Value::as_str)
+            .filter(|provider| !provider.is_empty());
+        let labeled_name = provider
+            .map(|provider| format!("{} ({provider})", info.name))
+            .unwrap_or_else(|| info.name.clone());
         let display = if is_current {
-            format!("{} (current)", info.name)
+            format!("{labeled_name} (current)")
         } else {
-            info.name.clone()
+            labeled_name
         };
 
         // Trailing space on reasoning models: signals "more input
@@ -174,7 +195,9 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
 
         items.push(ArgItem {
             display,
-            match_text: info.name.clone(),
+            match_text: provider
+                .map(|provider| format!("{} {provider}", info.name))
+                .unwrap_or_else(|| info.name.clone()),
             insert_text,
             description: info.description.clone().unwrap_or_default(),
         });
@@ -299,6 +322,26 @@ mod tests {
         // Plain model has no trailing space -- Enter commits immediately.
         let plain = items.iter().find(|i| i.match_text == "Grok 4.5").unwrap();
         assert_eq!(plain.insert_text, "Grok 4.5");
+    }
+
+    #[test]
+    fn model_rows_include_provider_label_but_insert_only_model_name() {
+        let mut state = ModelState::default();
+        let id = acp::ModelId::new(Arc::from("zen-model"));
+        let mut meta = serde_json::Map::new();
+        meta.insert(
+            "dxProvider".into(),
+            serde_json::Value::String("OpenCode Zen".into()),
+        );
+        let info = acp::ModelInfo::new(id, "Big Pickle".to_string()).meta(Some(meta));
+        state
+            .available
+            .insert(acp::ModelId::new(Arc::from("zen-model")), info);
+
+        let items = build_model_items(&state);
+        assert_eq!(items[0].display, "Big Pickle (OpenCode Zen)");
+        assert_eq!(items[0].match_text, "Big Pickle OpenCode Zen");
+        assert_eq!(items[0].insert_text, "Big Pickle");
     }
 
     #[test]

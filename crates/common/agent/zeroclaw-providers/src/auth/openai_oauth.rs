@@ -230,17 +230,31 @@ pub async fn receive_loopback_code(expected_state: &str, timeout: Duration) -> R
         model_provider_type: "openai",
         model_provider_alias: "oauth",
         => async move {
-            receive_loopback_code_inner(expected_state, timeout).await
+            let listener = bind_loopback_listener().await?;
+            receive_loopback_code_on_listener(listener, expected_state, timeout).await
         }
     )
     .await
 }
 
-async fn receive_loopback_code_inner(expected_state: &str, timeout: Duration) -> Result<String> {
-    let listener = TcpListener::bind("127.0.0.1:1455")
+/// Bind the OpenAI OAuth callback before opening the browser.
+///
+/// The browser can complete a cached login almost immediately. Callers that
+/// need to launch the browser themselves must bind first, otherwise the
+/// callback may arrive before the listener exists and the login is reported
+/// as failed even though the user completed it successfully.
+pub async fn bind_loopback_listener() -> Result<TcpListener> {
+    TcpListener::bind("127.0.0.1:1455")
         .await
-        .context("Failed to bind callback listener at 127.0.0.1:1455")?;
+        .context("Failed to bind callback listener at 127.0.0.1:1455")
+}
 
+/// Receive a callback using a listener that was bound before browser launch.
+pub async fn receive_loopback_code_on_listener(
+    listener: TcpListener,
+    expected_state: &str,
+    timeout: Duration,
+) -> Result<String> {
     let accepted = tokio::time::timeout(timeout, listener.accept())
         .await
         .context("Timed out waiting for browser callback")?

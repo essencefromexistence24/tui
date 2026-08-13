@@ -236,9 +236,14 @@ mod tests {
         let mut s = state();
         let e = s.create(HarnessKind::Memory, "flaky tests", "retry 3x", None);
         assert!(e.id.contains("flaky-tests"));
-        assert_eq!(s.get(HarnessKind::Memory, &e.id).unwrap().content, "retry 3x");
+        assert_eq!(
+            s.get(HarnessKind::Memory, &e.id).unwrap().content,
+            "retry 3x"
+        );
 
-        let u = s.update(HarnessKind::Memory, &e.id, "retry 3x then skip").unwrap();
+        let u = s
+            .update(HarnessKind::Memory, &e.id, "retry 3x then skip")
+            .unwrap();
         assert_eq!(u.content, "retry 3x then skip");
         assert!(u.updated_at >= e.created_at);
 
@@ -259,7 +264,12 @@ mod tests {
     fn overview_is_bounded_and_ordered() {
         let mut s = state();
         s.create(HarnessKind::Prompt, "style", "always run cargo fmt", None);
-        s.create(HarnessKind::Memory, "lesson", "compile before push", Some("traj-42".to_string()));
+        s.create(
+            HarnessKind::Memory,
+            "lesson",
+            "compile before push",
+            Some("traj-42".to_string()),
+        );
         let ov = s.overview(10_000);
         assert!(ov.contains("prompt"));
         assert!(ov.contains("always run cargo fmt"));
@@ -291,7 +301,12 @@ mod tests {
     #[test]
     fn serde_roundtrip() {
         let mut s = state();
-        s.create(HarnessKind::Subagent, "reviewer", "review diffs", Some("traj-1".to_string()));
+        s.create(
+            HarnessKind::Subagent,
+            "reviewer",
+            "review diffs",
+            Some("traj-1".to_string()),
+        );
         let json = serde_json::to_string(&s).unwrap();
         let back: HarnessState = serde_json::from_str(&json).unwrap();
         assert_eq!(back, s);

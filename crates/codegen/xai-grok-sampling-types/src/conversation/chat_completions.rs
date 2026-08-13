@@ -200,7 +200,9 @@ pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRe
     // persisted conversation state remains lossless and unchanged.
     let flush_user = |pending: &mut Option<UserItem>, messages: &mut Vec<ChatRequestMessage>| {
         if let Some(user) = pending.take() {
-            messages.push(conversation_item_to_chat_message(ConversationItem::User(user)));
+            messages.push(conversation_item_to_chat_message(ConversationItem::User(
+                user,
+            )));
         }
     };
 

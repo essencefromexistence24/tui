@@ -1,6 +1,6 @@
-use xai_rlm::RLM;
 use std::fs;
 use std::time::Instant;
+use xai_rlm::RLM;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -19,8 +19,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("📄 Document: {} characters", context.len());
     println!();
 
-    let rlm = RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?
-        .with_max_iterations(20);
+    let rlm =
+        RLM::from_env_groq("meta-llama/llama-4-scout-17b-16e-instruct")?.with_max_iterations(20);
 
     println!("================================================================================");
     println!("TEST 1: First Query (Cold Cache)");
@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let query = "What is the AI market size? Use fast_find to search for 'AI market'.";
-    
+
     let start = Instant::now();
     let (answer1, stats1) = rlm.complete(query, &context).await?;
     let time1 = start.elapsed();
@@ -40,10 +40,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   LLM calls: {}", stats1.llm_calls);
     println!("   Iterations: {}", stats1.iterations);
     println!();
-    println!("   AST Cache: {} hits, {} misses", 
-        stats1.ast_cache_hits, stats1.ast_cache_misses);
-    println!("   LLM Cache: {} hits, {} misses", 
-        stats1.llm_cache_hits, stats1.llm_cache_misses);
+    println!(
+        "   AST Cache: {} hits, {} misses",
+        stats1.ast_cache_hits, stats1.ast_cache_misses
+    );
+    println!(
+        "   LLM Cache: {} hits, {} misses",
+        stats1.llm_cache_hits, stats1.llm_cache_misses
+    );
     println!("   Cache Hit Rate: {:.1}%", stats1.cache_hit_rate());
     println!();
 
@@ -58,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let query2 = "What is the AI market size? Use fast_find to search for 'AI market'.";
-    
+
     let start = Instant::now();
     let (answer2, stats2) = rlm.complete(query2, &context).await?;
     let time2 = start.elapsed();
@@ -70,10 +74,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("   LLM calls: {}", stats2.llm_calls);
     println!("   Iterations: {}", stats2.iterations);
     println!();
-    println!("   AST Cache: {} hits, {} misses", 
-        stats2.ast_cache_hits, stats2.ast_cache_misses);
-    println!("   LLM Cache: {} hits, {} misses", 
-        stats2.llm_cache_hits, stats2.llm_cache_misses);
+    println!(
+        "   AST Cache: {} hits, {} misses",
+        stats2.ast_cache_hits, stats2.ast_cache_misses
+    );
+    println!(
+        "   LLM Cache: {} hits, {} misses",
+        stats2.llm_cache_hits, stats2.llm_cache_misses
+    );
     println!("   Cache Hit Rate: {:.1}%", stats2.cache_hit_rate());
     println!();
 
@@ -97,19 +105,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     for (i, q) in queries.iter().enumerate() {
         println!("Query {}: {}", i + 1, q);
-        
+
         let start = Instant::now();
         let (answer, stats) = rlm.complete(q, &context).await?;
         let elapsed = start.elapsed();
-        
+
         total_time += elapsed.as_secs_f64();
         total_cache_hits += stats.ast_cache_hits + stats.llm_cache_hits;
         total_cache_misses += stats.ast_cache_misses + stats.llm_cache_misses;
-        
+
         println!("   Answer: {}...", &answer[..answer.len().min(60)]);
-        println!("   Time: {:.2}s | Cache hits: {}", 
+        println!(
+            "   Time: {:.2}s | Cache hits: {}",
             elapsed.as_secs_f64(),
-            stats.ast_cache_hits + stats.llm_cache_hits);
+            stats.ast_cache_hits + stats.llm_cache_hits
+        );
         println!();
     }
 

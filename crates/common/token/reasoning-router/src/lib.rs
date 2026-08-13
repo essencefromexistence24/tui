@@ -334,7 +334,9 @@ mod tests {
         let saver = ReasoningRouterSaver::new();
         let ctx = SaverContext::default();
         let input = SaverInput {
-            messages: vec![user_msg("prove that this algorithm is correct and analyze all edge cases for the race condition in the mutex handler")],
+            messages: vec![user_msg(
+                "prove that this algorithm is correct and analyze all edge cases for the race condition in the mutex handler",
+            )],
             tools: vec![],
             images: vec![],
             turn_number: 1,

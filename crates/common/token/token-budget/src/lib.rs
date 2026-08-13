@@ -197,10 +197,11 @@ impl TokenSaver for TokenBudgetSaver {
                 )));
             }
             OverflowStrategy::WarnOnly => {
-                description =
-                    format!(
+                description = format!(
                     "WARNING: Over budget by {} tokens ({} > {}). No truncation (warn-only mode).",
-                    tokens_before - budget, tokens_before, budget
+                    tokens_before - budget,
+                    tokens_before,
+                    budget
                 );
                 tokens_saved = 0;
             }
