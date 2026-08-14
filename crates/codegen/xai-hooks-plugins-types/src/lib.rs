@@ -43,6 +43,8 @@ pub enum PluginOrigin {
     ProjectClaude,
     /// `$GROK_HOME/plugins/`.
     UserGrok,
+    /// Codex-compatible marketplace/bundled plugin cache.
+    UserCodex,
     /// `~/.claude/plugins/`.
     UserClaude,
     /// A compat marketplace clone.
@@ -244,6 +246,10 @@ pub struct PluginInfo {
     pub version: Option<String>,
     /// Description from manifest (if available).
     pub description: Option<String>,
+    /// Pre-rendered plugin logo for the extensions accordion, generated from
+    /// the plugin's declared asset and cached in the DX local-data directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo_ascii: Option<String>,
     /// Number of skill subdirectories.
     pub skill_count: usize,
     /// Skill names (directory names under skills/).

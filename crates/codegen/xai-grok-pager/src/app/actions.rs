@@ -993,7 +993,7 @@ pub enum Action {
     },
     /// Open the memory browser modal.
     OpenMemoryModal,
-    /// Open the provider connect browser (/connect).
+    /// Open the provider connect browser (/providers).
     OpenProviderConnect,
     /// Open the hidden `/gboom` easter egg (DOOM-style raycaster modal).
     OpenGboom,

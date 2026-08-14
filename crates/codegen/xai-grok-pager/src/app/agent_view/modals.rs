@@ -756,6 +756,7 @@ impl AgentView {
                         tab,
                         crate::views::extensions_modal::ExtensionsTab::Providers
                             | crate::views::extensions_modal::ExtensionsTab::Connect
+                            | crate::views::extensions_modal::ExtensionsTab::Connects
                     ) {
                         return InputOutcome::Action(Action::RefreshExtensions);
                     }
@@ -1006,6 +1007,7 @@ impl AgentView {
                             tab,
                             crate::views::extensions_modal::ExtensionsTab::Providers
                                 | crate::views::extensions_modal::ExtensionsTab::Connect
+                                | crate::views::extensions_modal::ExtensionsTab::Connects
                         ) {
                             return InputOutcome::Action(Action::RefreshExtensions);
                         }
@@ -1079,6 +1081,42 @@ impl AgentView {
                 return self.execute_modal_button_action(action);
             }
             return InputOutcome::Changed;
+        }
+
+        // Plugins have a visible right-aligned Enable/Disable control. Handle
+        // that hit target before the generic picker row click, otherwise the
+        // picker would only select/expand the row and the control would look
+        // clickable without changing the plugin state.
+        if matches!(
+            mouse.kind,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left)
+        ) {
+            let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
+            let plugin_button = self
+                .extensions_modal
+                .as_ref()
+                .filter(|state| {
+                    state.active_tab == crate::views::extensions_modal::ExtensionsTab::Plugins
+                })
+                .and_then(|state| {
+                    state
+                        .button_areas
+                        .iter()
+                        .find(|button| button.rect.contains(pos))
+                        .map(|button| (button.entry_index, button.action.clone()))
+                });
+            if let Some((Some(entry_index), action)) = plugin_button {
+                if let Some(state) = self.extensions_modal.as_mut() {
+                    state.picker_state.selected = entry_index;
+                    state.picker_state.selection_hidden = false;
+                }
+                self.log_extensions_modal_resolved_action(
+                    ' ',
+                    &action,
+                    xai_grok_telemetry::events::ExtensionsInputMethod::Mouse,
+                );
+                return self.execute_modal_button_action(action);
+            }
         }
 
         let Some(ref mut state) = self.extensions_modal else {
@@ -1577,6 +1615,7 @@ impl AgentView {
                 }
             }
             crate::views::extensions_modal::ExtensionsTab::Connect => false,
+            crate::views::extensions_modal::ExtensionsTab::Connects => false,
         }
     }
 
@@ -2059,6 +2098,7 @@ impl AgentView {
                         }
                         ExtensionsTab::Providers => {}
                         ExtensionsTab::Connect => {}
+                        ExtensionsTab::Connects => {}
                     }
                 }
                 InputOutcome::Changed

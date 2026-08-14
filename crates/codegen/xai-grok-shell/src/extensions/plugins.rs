@@ -60,6 +60,7 @@ pub(crate) fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlug
         enabled: plugin.enabled,
         version: plugin.version.clone(),
         description: plugin.description.clone(),
+        logo_ascii: plugin_logo_ascii(&plugin.name),
         skill_count: plugin.skill_count,
         skill_names: plugin.skill_names.clone(),
         agent_count: plugin.agent_count,
@@ -74,6 +75,30 @@ pub(crate) fn loaded_plugin_to_info(plugin: &xai_grok_agent::plugins::LoadedPlug
     }
 }
 
+/// Read the generated logo cache produced by the DX Codex-plugin sync.
+/// Keeping this lookup here makes the wire DTO portable: older shells simply
+/// omit the optional field and the pager renders the normal metadata.
+fn plugin_logo_ascii(name: &str) -> Option<String> {
+    let safe = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let path = dirs::data_local_dir()?
+        .join("dx")
+        .join("plugins")
+        .join("ascii")
+        .join(format!("{safe}.txt"));
+    std::fs::read_to_string(path)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+}
+
 /// Map the agent-side origin to the wire DTO.
 fn origin_to_dto(origin: &xai_grok_agent::plugins::PluginOrigin) -> PluginOrigin {
     use xai_grok_agent::plugins::PluginOrigin as AgentOrigin;
@@ -82,6 +107,7 @@ fn origin_to_dto(origin: &xai_grok_agent::plugins::PluginOrigin) -> PluginOrigin
         AgentOrigin::ProjectGrok => PluginOrigin::ProjectGrok,
         AgentOrigin::ProjectClaude => PluginOrigin::ProjectClaude,
         AgentOrigin::UserGrok => PluginOrigin::UserGrok,
+        AgentOrigin::UserCodex => PluginOrigin::UserCodex,
         AgentOrigin::UserClaude => PluginOrigin::UserClaude,
         AgentOrigin::ClaudeMarketplace { marketplace } => PluginOrigin::ClaudeMarketplace {
             marketplace: marketplace.clone(),

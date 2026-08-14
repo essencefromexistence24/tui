@@ -12,6 +12,7 @@ pub mod context_bar;
 pub mod credit_bar;
 pub mod dashboard;
 pub mod debug_style;
+pub(crate) mod extension_assets;
 pub mod extensions_modal;
 pub mod file_search;
 pub mod fps_hud;

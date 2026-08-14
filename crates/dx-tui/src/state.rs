@@ -1376,7 +1376,7 @@ impl ChatState {
 		let Ok(handle) = tokio::runtime::Handle::try_current() else {
 			return;
 		};
-		// Catalog is loaded into state via channel-less fire-and-forget; we reload on /connect.
+		// Catalog is loaded into state via channel-less fire-and-forget; we reload on /providers.
 		handle.spawn(async move {
 			let cat = tokio::task::spawn_blocking(load_or_refresh_catalog).await;
 			match cat {
@@ -1753,7 +1753,8 @@ impl ChatState {
 			return;
 		}
 		self.apply_model_entry(&entry);
-		self.show_toast(format!("Model: {} ({})", entry.display_name, entry.provider));
+		let state = if entry.is_local { "ready · local" } else { "ready" };
+		self.show_toast(format!("Model: {} ({}) · {state}", entry.display_name, entry.provider_badge()));
 	}
 
 	pub fn open_popup(&mut self, popup: BottomPopup) {
@@ -1784,19 +1785,13 @@ impl ChatState {
 
 		let mut n = 0usize;
 		let mut push_model = |m: &ModelEntry, items: &mut Vec<(String, String)>| {
-			if !m.is_selectable_model() {
+			if !m.is_selectable_model() || (m.is_local && !m.available) {
 				return;
 			}
 			n += 1;
 			let check = if m.model_id == self.provider.selected_model { "  ✓" } else { "" };
 			let left = format!("{n}. {}{check}", m.display_name);
-			let tag = if m.is_local {
-				"Flow".to_string()
-			} else if m.provider.to_ascii_lowercase().contains("zen") {
-				"Zen".to_string()
-			} else {
-				m.provider.chars().take(16).collect()
-			};
+			let tag = m.provider_badge();
 			items.push((left, format!("{}||{tag}", m.model_id)));
 		};
 
@@ -1908,7 +1903,12 @@ impl ChatState {
 						.cloned()
 					{
 						self.apply_model_entry(&entry);
-						self.show_toast(format!("Model: {}", entry.display_name));
+						let state = if entry.is_local { "ready · local" } else { "ready" };
+						self.show_toast(format!(
+							"Model: {} ({}) · {state}",
+							entry.display_name,
+							entry.provider_badge()
+						));
 						self.save_prefs();
 						self.close_tachyon_only();
 						return true;
@@ -2082,7 +2082,7 @@ impl ChatState {
 										.provider
 										.model_catalog
 										.iter()
-										.filter(|m| m.is_local && m.is_selectable_model())
+										.filter(|m| m.is_local && m.is_selectable_model() && m.available)
 										.count(),
 									crate::flow_backend::flow_models_dir().display()
 								));

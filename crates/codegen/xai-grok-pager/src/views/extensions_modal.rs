@@ -362,6 +362,10 @@ type GroupedPlugins<'a> = std::collections::BTreeMap<
     Vec<(usize, &'a xai_hooks_plugins_types::PluginInfo)>,
 >;
 
+/// DX plugins are user-installed items in the Plugins tab. Keep their rows
+/// visible directly instead of wrapping them in a redundant `User` accordion.
+const USER_PLUGIN_GROUP_KEY: &str = "origin:user";
+
 /// Header count suffix: `1 plugin`, `2 plugins`.
 fn plugin_count_label(n: usize) -> String {
     if n == 1 {
@@ -386,6 +390,7 @@ pub fn plugin_group(plugin: &xai_hooks_plugins_types::PluginInfo) -> PluginGroup
             PluginGroup::new(1, "origin:project-claude", "Project (Claude)")
         }
         Some(PluginOrigin::UserGrok) => PluginGroup::new(2, "origin:user", "User"),
+        Some(PluginOrigin::UserCodex) => PluginGroup::new(2, "origin:user", "User"),
         Some(PluginOrigin::UserClaude)
         | Some(PluginOrigin::ClaudeInstalled { marketplace: None }) => {
             PluginGroup::new(3, "origin:user-claude", "User (Claude)")
@@ -494,6 +499,7 @@ pub enum ExtensionsTab {
     McpServers,
     Providers,
     Connect,
+    Connects,
 }
 
 impl ExtensionsTab {
@@ -506,6 +512,7 @@ impl ExtensionsTab {
         Self::McpServers,
         Self::Providers,
         Self::Connect,
+        Self::Connects,
     ];
 
     /// Display label for the tab bar.
@@ -517,7 +524,8 @@ impl ExtensionsTab {
             Self::Skills => "Skills",
             Self::McpServers => "MCP Servers",
             Self::Providers => "Providers",
-            Self::Connect => "Connect",
+            Self::Connect => "Channels",
+            Self::Connects => "Connects",
         }
     }
 
@@ -530,19 +538,21 @@ impl ExtensionsTab {
             Self::Skills => Self::McpServers,
             Self::McpServers => Self::Providers,
             Self::Providers => Self::Connect,
-            Self::Connect => Self::Hooks,
+            Self::Connect => Self::Connects,
+            Self::Connects => Self::Hooks,
         }
     }
     /// Previous tab (wraps around).
     pub fn prev(self) -> Self {
         match self {
-            Self::Hooks => Self::Connect,
+            Self::Hooks => Self::Connects,
             Self::Plugins => Self::Hooks,
             Self::Marketplace => Self::Plugins,
             Self::Skills => Self::Marketplace,
             Self::McpServers => Self::Skills,
             Self::Providers => Self::McpServers,
             Self::Connect => Self::Providers,
+            Self::Connects => Self::Connect,
         }
     }
 
@@ -556,6 +566,7 @@ impl ExtensionsTab {
             Self::McpServers => ExtensionsModalTab::McpServers,
             Self::Providers => ExtensionsModalTab::Providers,
             Self::Connect => ExtensionsModalTab::Providers,
+            Self::Connects => ExtensionsModalTab::Providers,
         }
     }
 }
@@ -1101,6 +1112,10 @@ pub struct ButtonArea {
     pub rect: Rect,
     pub action: ButtonAction,
     pub key: char,
+    /// Picker entry to select before dispatching the action. This lets a
+    /// mouse click on a row-level control act on that exact plugin rather
+    /// than whichever row was previously selected.
+    pub entry_index: Option<usize>,
 }
 
 /// Transient, non-covering feedback shown after an extensions action
@@ -1194,6 +1209,7 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
             ('m', "message"),
             ('b', "bind session"),
         ],
+        ExtensionsTab::Connects => Vec::new(),
     }
 }
 
@@ -1329,6 +1345,7 @@ fn selected_item_enabled_at(
         ExtensionsTab::Marketplace => None,
         ExtensionsTab::Providers => None,
         ExtensionsTab::Connect => Some(true),
+        ExtensionsTab::Connects => Some(true),
     }
 }
 
@@ -1854,10 +1871,12 @@ pub struct ExtensionsModalState {
     pub mcps_collapsed_sections: std::collections::HashSet<String>,
     /// Whether plugin section collapse defaults have been applied after first load.
     pub mcps_section_collapse_initialized: bool,
-    /// Provider catalog and credential form reused from `/connect`.
+    /// Provider catalog and credential form reused from `/providers`.
     pub provider_connect: crate::views::provider_connect::ProviderConnectState,
     /// ZeroClaw's real messaging-channel inventory and readiness state.
     pub channel_connect: crate::views::channel_connect::ChannelConnectState,
+    /// Source-aware Flow-Like, n8n, and DX node catalog rendered in Connects.
+    pub connect_nodes: Vec<dx_connect::NodeDefinition>,
     /// Maps visible row offset to skill index (for mouse click).
     pub skills_visible_map: Vec<Option<usize>>,
     pub hooks_collapsed_groups: std::collections::HashSet<String>,
@@ -1904,6 +1923,8 @@ pub struct ExtensionsModalState {
     /// MCP section labels: not selectable, but clickable to fold/unfold.
     pub entry_non_selectable_clickable: Vec<bool>,
 }
+
+const CONNECTS_INITIAL_LIMIT: usize = 160;
 
 impl Default for ExtensionsModalState {
     fn default() -> Self {
@@ -1955,6 +1976,7 @@ impl ExtensionsModalState {
             mcps_section_collapse_initialized: false,
             provider_connect: crate::views::provider_connect::ProviderConnectState::new(),
             channel_connect: crate::views::channel_connect::ChannelConnectState::new(),
+            connect_nodes: dx_connect::catalog_limited(CONNECTS_INITIAL_LIMIT),
             skills_visible_map: Vec::new(),
             skills_expanded: std::collections::HashSet::new(),
             skills_collapsed_groups: std::collections::HashSet::new(),
@@ -2015,6 +2037,8 @@ impl ExtensionsModalState {
         self.picker_state.tabs_focused = false;
         if self.active_tab == ExtensionsTab::Connect {
             self.channel_connect.refresh();
+        } else if self.active_tab == ExtensionsTab::Connects {
+            self.connect_nodes = dx_connect::catalog_limited(CONNECTS_INITIAL_LIMIT);
         }
         // Clear modal flow state from the previous tab.
         self.input = None;
@@ -2043,7 +2067,12 @@ impl ExtensionsModalState {
         if self.plugins_groups_seeded {
             return;
         }
-        self.plugins_collapsed_groups = plugins.iter().map(|p| plugin_group(p).key).collect();
+        self.plugins_collapsed_groups = plugins
+            .iter()
+            .map(plugin_group)
+            .filter(|group| group.key != "origin:user")
+            .map(|group| group.key)
+            .collect();
         self.plugins_groups_seeded = true;
     }
 
@@ -2117,6 +2146,7 @@ impl ExtensionsModalState {
             }
             ExtensionsTab::Providers => self.picker_state.expanded.contains(&sel),
             ExtensionsTab::Connect => false,
+            ExtensionsTab::Connects => false,
         }
     }
 
@@ -2594,35 +2624,6 @@ fn skill_source_str(skill: &SkillInfo) -> String {
     }
 }
 
-/// Build picker fields for an expanded plugin.
-fn build_plugin_fields(plugin: &xai_hooks_plugins_types::PluginInfo) -> Vec<String> {
-    use xai_hooks_plugins_types::McpStatus;
-    let mut components = Vec::new();
-    if !plugin.skill_names.is_empty() {
-        components.push(format!("skills: {}", plugin.skill_names.join(", ")));
-    } else if plugin.skill_count > 0 {
-        components.push(format!("{} skills", plugin.skill_count));
-    }
-    if !plugin.agent_names.is_empty() {
-        components.push(format!("agents: {}", plugin.agent_names.join(", ")));
-    } else if plugin.agent_count > 0 {
-        components.push(format!("{} agents", plugin.agent_count));
-    }
-    if plugin.hook_count > 0 {
-        components.push(format!("{} hooks", plugin.hook_count));
-    }
-    match plugin.mcp_status {
-        McpStatus::Active | McpStatus::ActiveInline => {
-            components.push(format!("{} MCP servers", plugin.mcp_server_count));
-        }
-        McpStatus::Blocked => {
-            components.push(format!("{} MCP: blocked", plugin.mcp_server_count));
-        }
-        McpStatus::None => {}
-    }
-    components
-}
-
 /// Names shown per component category before "+N more".
 const COMPONENT_ITEMS_CAP: usize = 8;
 
@@ -2758,6 +2759,7 @@ pub fn render_extensions_modal(
         ExtensionsTab::McpServers => matches!(state.mcps_data, TabDataState::Loading),
         ExtensionsTab::Providers => false,
         ExtensionsTab::Connect => false,
+        ExtensionsTab::Connects => false,
     };
 
     // Input mode hides the entry list (form overlay owns the content area).
@@ -2853,7 +2855,7 @@ pub fn render_extensions_modal(
                         .unwrap_or(if supervisor.qr_payload.is_some() {
                             "QR pairing is ready below"
                         } else {
-                            "Manages all configured ZeroClaw messaging channels"
+                            "Manages all configured DX messaging channels"
                         })
                         .to_string(),
                 ]);
@@ -2881,6 +2883,7 @@ pub fn render_extensions_modal(
                 entry_badge_text.push(String::new());
                 entry_badge_color.push(None);
                 for (idx, channel) in state.channel_connect.entries.iter().enumerate() {
+                    let entry_index = entry_labels.len();
                     entry_labels.push(channel.name.to_string());
                     entry_right_labels.push(if channel.configured {
                         "Configured".to_string()
@@ -2891,7 +2894,14 @@ pub fn render_extensions_modal(
                     // The channel kind is used by actions/configuration and
                     // does not need to appear as a second accordion line.
                     entry_summary_lines.push(Vec::new());
-                    entry_fields.push(Vec::new());
+                    let fields = if state.picker_state.expanded.contains(&entry_index) {
+                        crate::views::extension_assets::channel_ascii(channel)
+                            .map(|ascii| vec![("logo".to_string(), ascii)])
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
+                    entry_fields.push(fields);
                     entry_is_header.push(false);
                     entry_dimmed.push(!channel.configured);
                     entry_indent.push(0);
@@ -2913,6 +2923,62 @@ pub fn render_extensions_modal(
                     entry_is_header.push(true);
                     entry_dimmed.push(true);
                     entry_indent.push(0);
+                    entry_data_indices.push(None);
+                    entry_group_keys.push(None);
+                    entry_badge_text.push(String::new());
+                    entry_badge_color.push(None);
+                }
+            }
+            ExtensionsTab::Connects => {
+                let query = state.picker_state.query();
+                entry_labels.push(format!(
+                    "Connect nodes (showing {} of full catalog)",
+                    state.connect_nodes.len()
+                ));
+                entry_right_labels.push("Workflow nodes".to_string());
+                entry_desc_lines.push(vec![
+                    "Initial node set loaded for responsiveness; search and execution remain available through the connect runtime".to_string(),
+                ]);
+                entry_summary_lines
+                    .push(vec!["/connects run <node-id> <json-context>".to_string()]);
+                entry_fields.push(Vec::new());
+                entry_is_header.push(false);
+                entry_dimmed.push(false);
+                entry_indent.push(0);
+                entry_data_indices.push(None);
+                entry_group_keys.push(None);
+                entry_badge_text.push(String::new());
+                entry_badge_color.push(None);
+                for node in state.connect_nodes.iter().filter(|node| {
+                    query.is_empty()
+                        || fuzzy_matches(&node.id, query)
+                        || fuzzy_matches(&node.display_name, query)
+                }) {
+                    let entry_index = entry_labels.len();
+                    entry_labels.push(node.display_name.clone());
+                    entry_right_labels.push(match node.backend {
+                        dx_connect::NodeBackend::Native => "native".to_string(),
+                        dx_connect::NodeBackend::FlowLikeAdapter => "WASM runtime".to_string(),
+                        dx_connect::NodeBackend::N8nAdapter => "Node runtime".to_string(),
+                    });
+                    entry_desc_lines.push(vec![node.description.clone()]);
+                    entry_summary_lines.push(vec![format!(
+                        "{} inputs · {} outputs",
+                        node.inputs, node.outputs
+                    )]);
+                    let mut fields = vec![
+                        ("inputs".to_string(), node.inputs.to_string()),
+                        ("outputs".to_string(), node.outputs.to_string()),
+                    ];
+                    if state.picker_state.expanded.contains(&entry_index)
+                        && let Some(ascii) = crate::views::extension_assets::connect_ascii(node)
+                    {
+                        fields.insert(0, ("logo".to_string(), ascii));
+                    }
+                    entry_fields.push(fields);
+                    entry_is_header.push(false);
+                    entry_dimmed.push(false);
+                    entry_indent.push(1);
                     entry_data_indices.push(None);
                     entry_group_keys.push(None);
                     entry_badge_text.push(String::new());
@@ -3128,27 +3194,31 @@ pub fn render_extensions_modal(
                     for (group_key, plugins) in &groups {
                         let label = &group_key.label;
                         let group_key = &group_key.key;
+                        let hide_user_header = group_key == USER_PLUGIN_GROUP_KEY;
                         // While searching we ignore previous collapse state so
                         // every plugin inside the group can be seen and matched.
                         let searching = !state.picker_state.query().is_empty();
-                        let collapsed =
-                            !searching && state.plugins_collapsed_groups.contains(group_key);
-                        entry_labels.push(format!(
-                            "{} ({})",
-                            label,
-                            plugin_count_label(plugins.len())
-                        ));
-                        entry_right_labels.push(String::new());
-                        entry_desc_lines.push(vec![]);
-                        entry_summary_lines.push(vec![]);
-                        entry_fields.push(vec![]);
-                        entry_is_header.push(false); // group header, but selectable
-                        entry_dimmed.push(false);
-                        entry_indent.push(0);
-                        entry_data_indices.push(None);
-                        entry_group_keys.push(Some(group_key.clone()));
-                        entry_badge_text.push(String::new());
-                        entry_badge_color.push(None);
+                        let collapsed = !hide_user_header
+                            && !searching
+                            && state.plugins_collapsed_groups.contains(group_key);
+                        if !hide_user_header {
+                            entry_labels.push(format!(
+                                "{} ({})",
+                                label,
+                                plugin_count_label(plugins.len())
+                            ));
+                            entry_right_labels.push(String::new());
+                            entry_desc_lines.push(vec![]);
+                            entry_summary_lines.push(vec![]);
+                            entry_fields.push(vec![]);
+                            entry_is_header.push(false); // group header, but selectable
+                            entry_dimmed.push(false);
+                            entry_indent.push(0);
+                            entry_data_indices.push(None);
+                            entry_group_keys.push(Some(group_key.clone()));
+                            entry_badge_text.push(String::new());
+                            entry_badge_color.push(None);
+                        }
                         if collapsed {
                             continue;
                         }
@@ -3159,39 +3229,39 @@ pub fn render_extensions_modal(
                                 .map(|v| format!(" v{v}"))
                                 .unwrap_or_default();
                             entry_labels.push(format!("{}{}", plugin.name, version_str));
-                            entry_right_labels.push(String::new());
-                            // Build description lines from components.
-                            let components = build_plugin_fields(plugin);
-                            if components.is_empty() {
-                                entry_desc_lines.push(vec![]);
+                            // This is both a visible status control and the
+                            // mouse hit target created after picker rendering.
+                            entry_right_labels.push(if plugin.enabled {
+                                "[Disable]".to_string()
                             } else {
-                                entry_desc_lines.push(vec![components.join("  ")]);
+                                "[Enable]".to_string()
+                            });
+                            if let Some(description) = plugin.description.as_deref()
+                                && !description.is_empty()
+                            {
+                                entry_desc_lines.push(vec![description.to_string()]);
+                            } else {
+                                entry_desc_lines.push(vec![]);
                             }
                             entry_summary_lines.push(vec![]);
                             // Fields for expanded view.
                             let mut fields = Vec::new();
+                            if let Some(ref logo) = plugin.logo_ascii {
+                                fields.push(("logo".to_string(), logo.clone()));
+                            }
                             if let Some(ref desc) = plugin.description
                                 && !desc.is_empty()
                             {
                                 fields.push(("description".to_string(), desc.clone()));
                             }
-                            fields.push(("path".to_string(), plugin.root.clone()));
                             entry_fields.push(fields);
                             entry_is_header.push(false);
                             entry_dimmed.push(!plugin.enabled);
-                            entry_indent.push(1);
+                            entry_indent.push(if hide_user_header { 0 } else { 1 });
                             entry_data_indices.push(Some(pi));
                             entry_group_keys.push(None);
-                            entry_badge_text.push(if !plugin.enabled {
-                                "[disabled]".into()
-                            } else {
-                                String::new()
-                            });
-                            entry_badge_color.push(if !plugin.enabled {
-                                Some(theme.accent_error)
-                            } else {
-                                None
-                            });
+                            entry_badge_text.push(String::new());
+                            entry_badge_color.push(None);
                         }
                     }
                 } else if let TabDataState::Error(ref msg) = state.plugins_data {
@@ -4044,6 +4114,42 @@ pub fn render_extensions_modal(
         (content_hit.item_rects, content_hit.entry_indices)
     };
 
+    // The Plugins tab exposes a real row-level Enable/Disable control on the
+    // right side of every plugin row. Store its hit rectangle alongside the
+    // picker hit areas so mouse clicks dispatch the same action as Space.
+    state.button_areas.clear();
+    if state.active_tab == ExtensionsTab::Plugins {
+        for (visible_index, rect) in item_rects.iter().enumerate() {
+            let Some(&entry_index) = entry_indices.get(visible_index) else {
+                continue;
+            };
+            let Some(Some(_plugin_index)) = state.entry_data_indices.get(entry_index) else {
+                continue;
+            };
+            let Some(status) = entry_right_labels.get(entry_index) else {
+                continue;
+            };
+            if status.is_empty() {
+                continue;
+            }
+            let width = status.width() as u16;
+            if width == 0 || rect.width <= width {
+                continue;
+            }
+            state.button_areas.push(ButtonArea {
+                rect: Rect::new(
+                    rect.x + rect.width.saturating_sub(width + 1),
+                    rect.y,
+                    width,
+                    1,
+                ),
+                action: ButtonAction::ToggleSelectedPlugin,
+                key: ' ',
+                entry_index: Some(entry_index),
+            });
+        }
+    }
+
     // Store hit areas for mouse handling. Build a PickerHitAreas so
     // handle_picker_input (used for content-level events) works.
     let filter_rect = state.picker_state.filter_area;
@@ -4614,6 +4720,7 @@ mod tests {
                     ('x', "stop"),
                 ],
             ),
+            (ExtensionsTab::Connects, &[]),
         ];
         assert_eq!(expected.len(), ExtensionsTab::ALL.len());
         for &(tab, pairs) in expected {
@@ -5557,12 +5664,14 @@ mod tests {
         assert_eq!(ExtensionsTab::Skills.next(), ExtensionsTab::McpServers);
         assert_eq!(ExtensionsTab::McpServers.next(), ExtensionsTab::Providers);
         assert_eq!(ExtensionsTab::Providers.next(), ExtensionsTab::Connect);
-        assert_eq!(ExtensionsTab::Connect.next(), ExtensionsTab::Hooks);
+        assert_eq!(ExtensionsTab::Connect.next(), ExtensionsTab::Connects);
+        assert_eq!(ExtensionsTab::Connects.next(), ExtensionsTab::Hooks);
     }
 
     #[test]
     fn tab_prev_wraps_around() {
-        assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::Connect);
+        assert_eq!(ExtensionsTab::Hooks.prev(), ExtensionsTab::Connects);
+        assert_eq!(ExtensionsTab::Connects.prev(), ExtensionsTab::Connect);
         assert_eq!(ExtensionsTab::Connect.prev(), ExtensionsTab::Providers);
         assert_eq!(ExtensionsTab::Providers.prev(), ExtensionsTab::McpServers);
         assert_eq!(ExtensionsTab::McpServers.prev(), ExtensionsTab::Skills);
@@ -6973,7 +7082,7 @@ mod tests {
     }
 
     #[test]
-    fn plugins_render_groups_with_headers_in_rank_order() {
+    fn plugins_render_user_rows_without_redundant_header() {
         use xai_hooks_plugins_types::PluginOrigin;
         let mut state = plugins_modal_state(vec![
             make_plugin_with_origin(
@@ -6987,7 +7096,7 @@ mod tests {
         ]);
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
 
-        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 1);
+        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 0);
         assert_eq!(buffer_count(&buf, "User (Claude) (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "claude-market (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "user-tool"), 1);
@@ -6997,7 +7106,6 @@ mod tests {
         assert_eq!(
             state.entry_group_keys,
             vec![
-                Some("origin:user".to_string()),
                 None,
                 Some("origin:user-claude".to_string()),
                 None,
@@ -7007,7 +7115,7 @@ mod tests {
         );
         assert_eq!(
             state.entry_data_indices,
-            vec![None, Some(1), None, Some(2), None, Some(0)]
+            vec![Some(1), None, Some(2), None, Some(0)]
         );
     }
 
@@ -7041,19 +7149,13 @@ mod tests {
 
         assert_eq!(
             state.entry_group_keys,
-            vec![
-                Some("origin:user".to_string()),
-                None,
-                Some("claude-mp:claude-market".to_string()),
-                None,
-                None,
-            ]
+            vec![Some("claude-mp:claude-market".to_string()), None, None,]
         );
         // Within the shared marketplace group, children are A–Z by name:
         // catalog-tool (1) before installed-tool (2).
         assert_eq!(
             state.entry_data_indices,
-            vec![None, Some(0), None, Some(1), Some(2)],
+            vec![Some(0), None, Some(1), Some(2)],
             "children A–Z by name within their group (catalog before installed)"
         );
 
@@ -7071,7 +7173,7 @@ mod tests {
     }
 
     #[test]
-    fn plugins_collapsed_group_hides_rows_and_search_forces_open() {
+    fn plugins_user_rows_stay_visible_without_an_accordion() {
         use xai_hooks_plugins_types::PluginOrigin;
         let mut plugin = make_plugin_with_origin("user-tool", PluginOrigin::UserGrok);
         plugin.root = "/opt/p1".into();
@@ -7079,15 +7181,15 @@ mod tests {
         state.plugins_collapsed_groups.insert("origin:user".into());
 
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
-        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 1);
-        assert_eq!(buffer_count(&buf, "user-tool"), 0);
+        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 0);
+        assert_eq!(buffer_count(&buf, "user-tool"), 1);
 
         state.picker_state.set_query("user");
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
         assert_eq!(
             buffer_count(&buf, "user-tool"),
             1,
-            "search must flatten collapsed groups"
+            "search must keep the direct plugin row visible"
         );
     }
 
@@ -7102,7 +7204,7 @@ mod tests {
         let mut state = plugins_modal_state(vec![direct, mp, plain]);
         let buf = render_plugins_into_buffer(&mut state, 100, 40);
 
-        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 1);
+        assert_eq!(buffer_count(&buf, "User (1 plugin)"), 0);
         assert_eq!(buffer_count(&buf, "xAI Official (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "Direct installs (1 plugin)"), 1);
     }
@@ -7126,7 +7228,7 @@ mod tests {
         );
         assert_eq!(buffer_count(&buf, "User (Claude) (1 plugin)"), 1);
         assert_eq!(buffer_count(&buf, "off-tool"), 1);
-        assert_eq!(buffer_count(&buf, "[disabled]"), 1);
+        assert_eq!(buffer_count(&buf, "[Enable]"), 1);
     }
 
     #[test]
@@ -7379,18 +7481,10 @@ mod tests {
         let _buf = render_plugins_into_buffer(&mut state, 100, 40);
         assert_eq!(
             state.entry_labels_cache,
-            vec![
-                "User (3 plugins)".to_string(),
-                "alpha".to_string(),
-                "MID".to_string(),
-                "Zebra".to_string(),
-            ]
+            vec!["alpha".to_string(), "MID".to_string(), "Zebra".to_string(),]
         );
         // Display order is A–Z; indices still point at original data slots.
-        assert_eq!(
-            state.entry_data_indices,
-            vec![None, Some(1), Some(2), Some(0)]
-        );
+        assert_eq!(state.entry_data_indices, vec![Some(1), Some(2), Some(0)]);
     }
 
     #[test]

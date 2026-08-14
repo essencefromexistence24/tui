@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use super::manifest::{load_manifest, name_from_dirname, ManifestLoadResult, PluginManifest};
+use super::manifest::{ManifestLoadResult, PluginManifest, load_manifest, name_from_dirname};
 use super::trust::TrustStore;
 
 // ── Public types ──────────────────────────────────────────────────────
@@ -74,6 +74,8 @@ pub enum PluginOrigin {
     ProjectClaude,
     /// `$GROK_HOME/plugins/`.
     UserGrok,
+    /// Codex-compatible plugins discovered from `$CODEX_HOME`.
+    UserCodex,
     /// `~/.claude/plugins/`.
     UserClaude,
     /// A compat marketplace clone (project `extraKnownMarketplaces`
@@ -226,6 +228,28 @@ fn user_plugin_dirs(home: Option<&Path>, grok: Option<&Path>) -> Vec<(PathBuf, P
         // OpenAI Agent Plugins use the shared ~/.agents/plugins directory.
         // They are still governed by DX's existing user-plugin trust policy.
         dirs.push((h.join(".agents").join("plugins"), PluginOrigin::UserGrok));
+        // Codex marketplace and bundled plugin roots. These are scanned as
+        // manifests, not copied or executed through Codex, so DX retains its
+        // own trust, registry, and lifecycle semantics.
+        dirs.push((
+            h.join(".codex")
+                .join(".tmp")
+                .join("plugins")
+                .join("plugins"),
+            PluginOrigin::UserCodex,
+        ));
+        dirs.push((
+            h.join(".codex")
+                .join(".tmp")
+                .join("bundled-marketplaces")
+                .join("openai-bundled")
+                .join("plugins"),
+            PluginOrigin::UserCodex,
+        ));
+        dirs.push((
+            h.join(".codex").join("plugins").join("cache"),
+            PluginOrigin::UserCodex,
+        ));
     }
     dirs
 }
@@ -351,15 +375,25 @@ pub fn discover_plugins(
     let plugin_dirs = user_plugin_dirs(dirs::home_dir().as_deref(), grok.as_deref());
     for (plugins_dir, origin) in plugin_dirs {
         if plugins_dir.is_dir() {
-            scan_plugin_dir(
-                &plugins_dir,
-                PluginScope::User,
-                origin,
-                trust_store,
-                project_trusted,
-                &mut seen_paths,
-                &mut candidates,
-            );
+            if matches!(origin, PluginOrigin::UserCodex) {
+                scan_codex_plugin_tree(
+                    &plugins_dir,
+                    trust_store,
+                    project_trusted,
+                    &mut seen_paths,
+                    &mut candidates,
+                );
+            } else {
+                scan_plugin_dir(
+                    &plugins_dir,
+                    PluginScope::User,
+                    origin,
+                    trust_store,
+                    project_trusted,
+                    &mut seen_paths,
+                    &mut candidates,
+                );
+            }
         }
     }
 
@@ -496,6 +530,39 @@ pub fn discover_plugins(
 
 /// Scan a plugins parent directory (e.g. `~/.grok/plugins/`) and collect
 /// each subdirectory as a plugin candidate.
+/// Recursively discover Codex manifests. Codex's cache contains nested
+/// marketplace/version directories, unlike DX's direct plugin layout.
+fn scan_codex_plugin_tree(
+    root: &Path,
+    trust_store: &TrustStore,
+    project_trusted: bool,
+    seen_paths: &mut HashSet<PathBuf>,
+    candidates: &mut Vec<DiscoveredPlugin>,
+) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if path.join(".codex-plugin").join("plugin.json").is_file() {
+            collect_plugin(
+                &path,
+                PluginScope::User,
+                PluginOrigin::UserCodex,
+                trust_store,
+                project_trusted,
+                seen_paths,
+                candidates,
+            );
+        } else {
+            scan_codex_plugin_tree(&path, trust_store, project_trusted, seen_paths, candidates);
+        }
+    }
+}
+
 fn scan_plugin_dir(
     plugins_dir: &Path,
     scope: PluginScope,
@@ -927,9 +994,11 @@ mod tests {
             PluginOrigin::UserClaude
         )));
         // Plugins are not discovered from the legacy ~/.grok tree.
-        assert!(!dirs
-            .iter()
-            .any(|(p, _)| p == &home.join(".grok").join("plugins")));
+        assert!(
+            !dirs
+                .iter()
+                .any(|(p, _)| p == &home.join(".grok").join("plugins"))
+        );
     }
 
     #[test]

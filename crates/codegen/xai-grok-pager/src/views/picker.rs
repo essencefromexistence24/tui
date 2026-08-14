@@ -1163,6 +1163,24 @@ pub fn render_picker_row(
                 break;
             }
             let fy = y + rows;
+            if field.label == "logo" {
+                for logo_line in field.value.lines() {
+                    if rows >= max_rows {
+                        break;
+                    }
+                    let logo_width = logo_line.width() as u16;
+                    let left_pad = width.saturating_sub(logo_width) / 2;
+                    let line = Line::from(Span::styled(logo_line, field_value_style));
+                    buf.set_line(
+                        x + indent + left_pad,
+                        y + rows,
+                        &line,
+                        width.saturating_sub(left_pad),
+                    );
+                    rows += 1;
+                }
+                continue;
+            }
             if field.label.is_empty() {
                 // Loading indicator or similar \u{2014} no label column.
                 let line = Line::from(Span::styled(

@@ -193,9 +193,9 @@ pub const SLASH_COMMANDS: &[SlashSpec] = &[
 	},
 	// ── Provider ─────────────────────────────────────────────
 	SlashSpec {
-		name: "/connect",
+		name: "/providers",
 		aliases: &[],
-		description: "Connect a provider / runtime",
+		description: "Browse and connect AI providers",
 		always_visible: true,
 	},
 	SlashSpec {
@@ -727,7 +727,7 @@ impl ChatState {
 			}
 
 			// ── Provider ─────────────────────────────────────
-			"/connect" => {
+			"/providers" => {
 				// Open models.dev provider connect menu (75+ providers when catalog loads).
 				if self.provider.models_catalog.provider_count() == 0 {
 					self.reload_models_catalog();

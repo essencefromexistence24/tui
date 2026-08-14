@@ -168,7 +168,7 @@ pub fn build_production_model_menu(
 	));
 	let local = crate::flow_backend::discover_local_models();
 	for m in local {
-		if m.is_local {
+		if m.is_local && m.available {
 			out.push(m);
 		}
 	}

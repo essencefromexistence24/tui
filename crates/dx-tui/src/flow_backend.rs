@@ -99,7 +99,10 @@ mod inner {
 		}
 	}
 
-	/// Canonical on-disk model library for dx-flow (Windows default: `G:\Dx\flow\models`).
+	/// Canonical on-disk model library for dx-flow.
+	///
+	/// This uses the platform's local-data directory (`%LOCALAPPDATA%` on
+	/// Windows), with `DX_FLOW_MODELS_DIR` as an explicit override.
 	pub fn flow_models_dir() -> std::path::PathBuf {
 		if let Ok(p) = std::env::var("DX_FLOW_MODELS_DIR") {
 			let path = std::path::PathBuf::from(p.trim());
@@ -107,25 +110,22 @@ mod inner {
 				return path;
 			}
 		}
-		// Prefer sibling checkout / known monorepo path
-		for cand in [
-			std::path::PathBuf::from(r"G:\Dx\flow\models"),
-			std::path::PathBuf::from("G:/Dx/flow/models"),
-			std::path::PathBuf::from("../flow/models"),
-			std::path::PathBuf::from("../../flow/models"),
-		] {
-			if cand.is_dir() || cand.parent().is_some_and(|p| p.is_dir()) {
-				return cand;
-			}
-		}
-		std::path::PathBuf::from(r"G:\Dx\flow\models")
+		dirs::data_local_dir()
+			.or_else(dirs::data_dir)
+			.or_else(dirs::home_dir)
+			.unwrap_or_else(|| std::path::PathBuf::from("."))
+			.join("dx")
+			.join("flow")
+			.join("models")
 	}
 
 	/// Discover local models for the AI models menu (normal path).
 	///
 	/// 1. dx-flow runtime / CLI catalog  
-	/// 2. GGUF under `G:\Dx\flow\models` + configured dirs  
-	/// 3. If **flow models dir has no GGUF**, automatic all-drives scan (C–Z)  
+	/// 2. GGUF under the canonical local-data cache + configured dirs.
+	///
+	/// Normal discovery is deliberately bounded to local cache directories.
+	/// Use [`discover_local_models_full_scan`] for the explicit all-drives scan.
 	///
 	/// Use [`discover_local_models_full_scan`] for an explicit full-drive scan
 	/// even when models already exist.
@@ -147,23 +147,27 @@ mod inner {
 			push_local_unique(&mut out, entry);
 		}
 
-		// Optional: merge flow CLI keys that match a file we already found (don't invent STT/TTS).
-		if let Ok(list) = discover_via_cli() {
+		// The CLI probe is useful for an explicit diagnostic, but it can start
+		// another process and must never make opening the picker slow. It only
+		// marks a model that already has a local weight; it never creates rows.
+		if std::env::var_os("DX_FLOW_DISCOVER_CLI").is_some()
+			&& let Ok(list) = discover_via_cli()
+		{
 			for entry in list {
-				if out.iter().any(|m| m.model_id.eq_ignore_ascii_case(&entry.model_id)) {
-					// Prefer CLI "available" flag if it marks ready
-					if entry.available
-						&& let Some(slot) =
-							out.iter_mut().find(|m| m.model_id.eq_ignore_ascii_case(&entry.model_id))
-					{
-						slot.available = true;
-					}
+				if entry.available
+					&& let Some(slot) =
+						out.iter_mut().find(|m| m.model_id.eq_ignore_ascii_case(&entry.model_id))
+				{
+					slot.available = true;
 				}
 			}
 		}
 
 		let flow_empty = out.is_empty();
-		if force_full_drive_scan || flow_empty {
+		// Never scan every mounted drive during an ordinary picker refresh. The
+		// old empty-cache fallback made suggestions lag and surfaced unrelated
+		// GGUFs. Full-drive discovery is opt-in only.
+		if force_full_drive_scan {
 			let found = discover_gguf_all_drives();
 			if flow_empty && !found.is_empty() {
 				relocate_gguf_paths_to_flow_models(&found);
@@ -188,7 +192,7 @@ mod inner {
 
 		if out.is_empty() {
 			out.push(ModelEntry::local(
-				"No local GGUF · put .gguf files in G:\\Dx\\flow\\models\\llm",
+				"No local GGUF · put .gguf files in LOCALDATA\\dx\\flow\\models\\llm",
 				"dx-flow-pending",
 				false,
 			));
@@ -897,7 +901,19 @@ mod stub {
 	}
 
 	pub fn flow_models_dir() -> std::path::PathBuf {
-		std::path::PathBuf::from(r"G:\Dx\flow\models")
+		if let Ok(p) = std::env::var("DX_FLOW_MODELS_DIR") {
+			let path = std::path::PathBuf::from(p.trim());
+			if !path.as_os_str().is_empty() {
+				return path;
+			}
+		}
+		dirs::data_local_dir()
+			.or_else(dirs::data_dir)
+			.or_else(dirs::home_dir)
+			.unwrap_or_else(|| std::path::PathBuf::from("."))
+			.join("dx")
+			.join("flow")
+			.join("models")
 	}
 
 	pub fn discover_local_models() -> Vec<ModelEntry> {

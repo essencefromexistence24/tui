@@ -8,9 +8,11 @@ pub mod announcements;
 pub mod auto;
 pub mod btw;
 pub mod cd;
+pub mod channels;
 pub mod compact;
 pub mod compact_mode;
 pub mod config_agents;
+pub mod connect;
 pub mod context;
 pub mod copy;
 pub mod dashboard;
@@ -48,8 +50,6 @@ pub mod plan;
 pub mod plugin;
 pub mod privacy;
 pub mod provider_connect;
-pub mod channels;
-pub mod connect;
 pub mod queue;
 pub mod recap;
 pub mod release_notes;
@@ -146,7 +146,7 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(privacy::PrivacyCommand),
         Arc::new(provider_connect::ProvidersCommand),
         Arc::new(channels::ChannelsCommand),
-        Arc::new(connect::ConnectCommand),
+        Arc::new(connect::ConnectsCommand),
         Arc::new(rewind::RewindCommand),
         Arc::new(jump::JumpCommand),
         Arc::new(login::LoginCommand),
@@ -231,7 +231,7 @@ mod tests {
             reg.triggers().iter().any(|trigger| {
                 trigger.canonical == "video"
                     && trigger.display == "/video"
-                    && trigger.usage == "/video <local-path>"
+                    && trigger.usage == "/video <path|showcase>"
             }),
             "/video should appear in autocomplete and command help metadata"
         );

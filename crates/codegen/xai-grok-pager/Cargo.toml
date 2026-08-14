@@ -127,6 +127,7 @@ xai-grok-config = { workspace = true }
 # (cpal is target-gated to non-Linux inside xai-grok-voice).
 xai-grok-voice = { path = "../xai-grok-voice", default-features = false, features = ["audio"] }
 xai-grok-shell = { workspace = true }
+dx-connect = { workspace = true }
 zeroclaw-providers.workspace = true
 zeroclaw-config.workspace = true
 zeroclaw-api.workspace = true
@@ -203,6 +204,7 @@ core-foundation = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
     "Win32_System_Console",
     "Win32_UI_WindowsAndMessaging",
 ] }

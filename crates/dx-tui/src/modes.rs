@@ -272,6 +272,29 @@ impl ModelEntry {
 			"missing"
 		}
 	}
+
+	/// Compact source badge used by the model picker.
+	///
+	/// The badge is derived from the actual source. Local weights are
+	/// `dx-flow`; XAI/Grok entries are `xai`; other providers keep their name.
+	pub fn provider_badge(&self) -> String {
+		if self.is_local {
+			return "dx-flow".to_string();
+		}
+		let provider = self.provider.trim();
+		let normalized = provider.to_ascii_lowercase();
+		if normalized == "xai"
+			|| normalized == "x.ai"
+			|| normalized.contains("xai")
+			|| normalized.contains("grok")
+		{
+			"xai".to_string()
+		} else if normalized.contains("opencode zen") {
+			"zen".to_string()
+		} else {
+			provider.to_string()
+		}
+	}
 }
 
 /// Catalog of remote OpenCode Zen free models (6). Default is Big Pickle.
@@ -296,4 +319,27 @@ pub fn default_remote_selection() -> ModelEntry {
 		crate::zen::DEFAULT_MODEL,
 		crate::zen::DEFAULT_PROVIDER,
 	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn local_model_badge_is_dx_flow() {
+		let model = ModelEntry::local("MiniCPM", "minicpm", true);
+		assert_eq!(model.provider_badge(), "dx-flow");
+	}
+
+	#[test]
+	fn xai_model_badge_is_xai() {
+		let model = ModelEntry::remote("Grok", "grok-4", "xAI");
+		assert_eq!(model.provider_badge(), "xai");
+	}
+
+	#[test]
+	fn zen_model_badge_is_zen() {
+		let model = ModelEntry::remote("Big Pickle", "big-pickle", "OpenCode Zen");
+		assert_eq!(model.provider_badge(), "zen");
+	}
 }

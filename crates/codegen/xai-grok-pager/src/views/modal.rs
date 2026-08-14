@@ -284,7 +284,7 @@ pub enum ActiveModal {
     MemoryBrowser {
         state: Box<crate::views::memory_modal::MemoryModalState>,
     },
-    /// Provider connect modal (/connect).
+    /// Provider connect modal (/providers).
     ProviderConnect {
         state: Box<crate::views::provider_connect::ProviderConnectState>,
     },

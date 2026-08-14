@@ -1631,7 +1631,7 @@ impl ChatState {
 						.provider
 						.model_catalog
 						.iter()
-						.filter(|m| m.is_local && m.is_selectable_model())
+						.filter(|m| m.is_local && m.is_selectable_model() && m.available)
 						.count();
 					let title = format!("Models · {} · Flow {flow_n} · key 0", self.runtime_mode.label());
 					(
@@ -1648,7 +1648,7 @@ impl ChatState {
 								} else if m.provider.is_empty() {
 									(m.display_name.clone(), m.status_label().to_string())
 								} else {
-									(format!("{} · {}", m.display_name, m.provider), m.status_label().to_string())
+										(format!("{} · {}", m.display_name, m.provider_badge()), m.status_label().to_string())
 								}
 							})
 							.collect(),
@@ -1684,7 +1684,7 @@ impl ChatState {
 				});
 				(
 					format!(
-						"Connect · {} providers · /connect",
+						"Providers · {} providers · /providers",
 						self.provider.models_catalog.provider_count()
 					),
 					providers

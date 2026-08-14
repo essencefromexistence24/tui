@@ -644,7 +644,11 @@ impl AgentView {
                 args_query,
                 items,
                 ..
-            }) => (command.clone(), !args_query.is_empty(), items.len()),
+            }) => (
+                command.clone(),
+                matches!(command.as_str(), "model" | "m") && !args_query.is_empty(),
+                items.len(),
+            ),
             _ => return InputOutcome::Changed,
         };
 
@@ -964,8 +968,10 @@ impl AgentView {
                                     return InputOutcome::Action(Action::FetchSessionList);
                                 }
 
-                                let is_picker =
-                                    matches!(trimmed.as_str(), "model" | "m" | "theme" | "t");
+                                let is_picker = matches!(
+                                    trimmed.as_str(),
+                                    "model" | "m" | "theme" | "t" | "video"
+                                );
                                 if is_picker
                                     && let Some(command) =
                                         self.prompt.slash_controller.registry().get(&trimmed)

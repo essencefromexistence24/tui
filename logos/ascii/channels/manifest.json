@@ -1,0 +1,157 @@
+[
+  {
+    "ok": true,
+    "name": "bluesky",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "dingtalk",
+    "visible": 290
+  },
+  {
+    "ok": true,
+    "name": "discord",
+    "visible": 432
+  },
+  {
+    "ok": true,
+    "name": "email",
+    "visible": 524
+  },
+  {
+    "ok": true,
+    "name": "filesystem",
+    "visible": 254
+  },
+  {
+    "ok": true,
+    "name": "git",
+    "visible": 168
+  },
+  {
+    "ok": true,
+    "name": "gmail-push",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "irc",
+    "visible": 318
+  },
+  {
+    "ok": true,
+    "name": "lark",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "line",
+    "visible": 482
+  },
+  {
+    "ok": true,
+    "name": "linq",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "matrix",
+    "visible": 176
+  },
+  {
+    "ok": true,
+    "name": "mattermost",
+    "visible": 263
+  },
+  {
+    "ok": true,
+    "name": "mqtt",
+    "visible": 402
+  },
+  {
+    "ok": true,
+    "name": "nextcloud-talk",
+    "visible": 556
+  },
+  {
+    "ok": true,
+    "name": "nostr",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "notion",
+    "visible": 308
+  },
+  {
+    "ok": true,
+    "name": "qq-official",
+    "visible": 557
+  },
+  {
+    "ok": true,
+    "name": "reddit",
+    "visible": 502
+  },
+  {
+    "ok": true,
+    "name": "signal",
+    "visible": 474
+  },
+  {
+    "ok": true,
+    "name": "slack",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "telegram",
+    "visible": 532
+  },
+  {
+    "ok": true,
+    "name": "twitch",
+    "visible": 547
+  },
+  {
+    "ok": true,
+    "name": "voice-call",
+    "visible": 136
+  },
+  {
+    "ok": true,
+    "name": "wati",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "webhook",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "wechat",
+    "visible": 414
+  },
+  {
+    "ok": true,
+    "name": "wecom",
+    "visible": 196
+  },
+  {
+    "ok": true,
+    "name": "wecom-websocket",
+    "visible": 576
+  },
+  {
+    "ok": true,
+    "name": "whatsapp",
+    "visible": 554
+  },
+  {
+    "ok": true,
+    "name": "whatsapp-web",
+    "visible": 554
+  }
+]

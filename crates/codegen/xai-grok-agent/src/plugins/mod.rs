@@ -11,8 +11,8 @@
 //! - `trust` — project-plugin trust management
 //! - `registry` — in-memory registry of active plugins
 
-pub mod discovery;
 mod codex_manifest;
+pub mod discovery;
 pub mod git_install;
 pub mod hooks_adapter;
 pub mod install_registry;

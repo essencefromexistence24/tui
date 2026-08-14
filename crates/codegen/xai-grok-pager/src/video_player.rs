@@ -12,6 +12,22 @@ use std::time::{Duration, Instant};
 
 const PLAYER_ENV: &str = "DX_VIDEO_PLAYER";
 const RUNTIME_MANIFEST: &str = "runtime-manifest.txt";
+const SHOWCASE_PLAYLIST: &str = "dx-showcase.m3u8";
+const SHOWCASE_CACHE_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const SHOWCASE_CACHE_MIN_BYTES: u64 = 512 * 1024 * 1024;
+const SHOWCASE_CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+
+const SHOWCASE_VIDEOS: &[(&str, &str)] = &[
+    (
+        "Spiderman Into The SpiderVerse",
+        "https://files.catbox.moe/wfyf2z.mp4",
+    ),
+    ("One Piece", "https://files.catbox.moe/ff8oz1.mp4"),
+    (
+        "Frieren Beyond Journey's End",
+        "https://files.catbox.moe/6rtwwl.mp4",
+    ),
+];
 
 #[cfg(windows)]
 const WINDOWS_RUNTIME_FILES: &[&str] = &[
@@ -71,12 +87,16 @@ pub enum VideoPlayerError {
         status: std::process::ExitStatus,
     },
     WindowDidNotOpen(PathBuf),
+    PlaylistWrite {
+        path: PathBuf,
+        error: std::io::Error,
+    },
 }
 
 impl fmt::Display for VideoPlayerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Usage => write!(f, "Usage: /video <local-path>"),
+            Self::Usage => write!(f, "Usage: /video <path|showcase>"),
             Self::UnsupportedPlatform(platform) => {
                 write!(f, "Video Player is not available for {platform}")
             }
@@ -133,6 +153,13 @@ impl fmt::Display for VideoPlayerError {
                 "Video Player started but did not open a window: {}. Reinstall the complete player runtime.",
                 executable.display()
             ),
+            Self::PlaylistWrite { path, error } => {
+                write!(
+                    f,
+                    "Failed to write video playlist {}: {error}",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -148,6 +175,9 @@ pub struct VideoLaunch {
 /// Launch one local media path or online URL in the detached native player.
 pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlayerError> {
     validate_graphical_session()?;
+    if raw_path.trim().eq_ignore_ascii_case("dx-showcase") {
+        return launch_showcase();
+    }
     let media = resolve_media_source(raw_path, workspace)?;
     let player = resolve_player()?;
 
@@ -173,6 +203,150 @@ pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlay
         media,
         executable: player.executable,
     })
+}
+
+fn launch_showcase() -> Result<VideoLaunch, VideoPlayerError> {
+    validate_graphical_session()?;
+    let base = dirs::data_local_dir()
+        .ok_or_else(|| VideoPlayerError::UnsupportedPlatform("no local data directory".into()))?;
+    let directory = base.join("dx").join("video");
+    std::fs::create_dir_all(&directory).map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: directory.clone(),
+        error,
+    })?;
+    let cache_directory = directory.join("cache");
+    std::fs::create_dir_all(&cache_directory).map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: cache_directory.clone(),
+        error,
+    })?;
+
+    let mut playlist_entries = Vec::with_capacity(SHOWCASE_VIDEOS.len());
+    for (title, url) in SHOWCASE_VIDEOS {
+        playlist_entries.push((*title, (*url).to_owned()));
+    }
+    let playlist = directory.join(SHOWCASE_PLAYLIST);
+    let mut contents = String::from("#EXTM3U\n");
+    for (title, source) in &playlist_entries {
+        contents.push_str(&format!("#EXTINF:-1,{title}\n{source}\n"));
+    }
+    std::fs::write(&playlist, contents).map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: playlist.clone(),
+        error,
+    })?;
+    let player = resolve_player()?;
+    let cache_max_bytes = showcase_cache_max_bytes();
+    let mut command = Command::new(&player.executable);
+    command
+        // dx-video-player follows mpv's `--option=value` form for playlist
+        // options. Passing the path as a separate argv item makes the player
+        // treat it as the positional media argument and exit before opening.
+        .arg(format!("--playlist={}", playlist.display()))
+        // Open the native window before Catbox responds. Without this, the
+        // launch verification can mistake slow network startup for a failed
+        // player and terminate the process before the first frame arrives.
+        .arg("--force-window=immediate")
+        .arg("--loop-playlist=inf")
+        .arg("--cache=yes")
+        .arg("--cache-on-disk=yes")
+        .arg(format!("--demuxer-cache-dir={}", cache_directory.display()))
+        .arg("--cache-pause=yes")
+        .arg("--cache-pause-initial=yes")
+        .arg("--cache-pause-wait=3")
+        .arg("--demuxer-cache-unlink-files=whendone")
+        .arg("--cache-secs=60")
+        .arg("--demuxer-readahead-secs=60")
+        .arg(format!(
+            "--demuxer-max-bytes={}MiB",
+            cache_max_bytes / (1024 * 1024)
+        ))
+        .arg("--stream-buffer-size=32MiB")
+        .current_dir(player.executable.parent().unwrap_or_else(|| Path::new(".")))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    #[cfg(not(windows))]
+    xai_grok_tools::util::detach_std_command(&mut command);
+    let mut child = command.spawn().map_err(|error| VideoPlayerError::Spawn {
+        executable: player.executable.clone(),
+        error,
+    })?;
+    verify_player_started(&mut child, &player.executable)?;
+    Ok(VideoLaunch {
+        media: playlist,
+        executable: player.executable,
+    })
+}
+
+/// Human-readable state for the `/video` showcase playlist suggestion.
+///
+/// This is intentionally static: opening the suggestions must never start a
+/// network request or a download worker.
+pub(crate) fn showcase_playlist_status() -> String {
+    format!(
+        "Streams from Catbox · {} videos · player cache enabled",
+        SHOWCASE_VIDEOS.len()
+    )
+}
+
+/// Human-readable state for one showcase video suggestion.
+pub(crate) fn showcase_video_status(_selector: &str) -> String {
+    "Streams from Catbox · buffered on demand · no download".to_string()
+}
+
+fn showcase_cache_max_bytes() -> u64 {
+    let fallback = SHOWCASE_CACHE_MIN_BYTES;
+    let Some(free_bytes) = free_space_bytes(system_volume_path()) else {
+        return fallback;
+    };
+    free_bytes
+        .saturating_sub(SHOWCASE_CACHE_RESERVE_BYTES)
+        .clamp(SHOWCASE_CACHE_MIN_BYTES, SHOWCASE_CACHE_MAX_BYTES)
+}
+
+#[cfg(windows)]
+fn system_volume_path() -> &'static Path {
+    Path::new(r"C:\")
+}
+
+#[cfg(not(windows))]
+fn system_volume_path() -> &'static Path {
+    Path::new("/")
+}
+
+#[cfg(windows)]
+fn free_space_bytes(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+    wide.push(0);
+    let mut available = 0u64;
+    let mut total = 0u64;
+    let mut free = 0u64;
+    let result =
+        unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) };
+    (result != 0).then_some(available)
+}
+
+#[cfg(unix)]
+fn free_space_bytes(path: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let bytes = path.as_os_str().as_bytes();
+    let mut c_path = bytes.to_vec();
+    c_path.push(0);
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let result = unsafe { libc::statvfs(c_path.as_ptr().cast(), stats.as_mut_ptr()) };
+    if result != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    Some(u64::from(stats.f_bavail).saturating_mul(u64::from(stats.f_frsize)))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn free_space_bytes(_path: &Path) -> Option<u64> {
+    None
 }
 
 #[cfg(windows)]

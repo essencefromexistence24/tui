@@ -169,10 +169,12 @@ mod tests {
 
         let manifest = load(root.path()).unwrap().unwrap();
         assert_eq!(manifest.name, "example.tools");
-        assert!(manifest
-            .skill_dirs(root.path())
-            .iter()
-            .any(|path| path.ends_with("skills")));
+        assert!(
+            manifest
+                .skill_dirs(root.path())
+                .iter()
+                .any(|path| path.ends_with("skills"))
+        );
         assert!(manifest.inline_mcp_servers().is_some());
     }
 }

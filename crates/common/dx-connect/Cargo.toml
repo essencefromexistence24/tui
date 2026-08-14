@@ -1,0 +1,12 @@
+[package]
+name = "dx-connect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "DX Connect node catalog and safe native execution bridge"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+
