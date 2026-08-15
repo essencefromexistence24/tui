@@ -1083,29 +1083,22 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Plugins have a visible right-aligned Enable/Disable control. Handle
-        // that hit target before the generic picker row click, otherwise the
-        // picker would only select/expand the row and the control would look
-        // clickable without changing the plugin state.
+        // Row-level controls are handled before the generic picker row click,
+        // otherwise the picker would only select/expand the row and the
+        // control would look clickable without dispatching its action.
         if matches!(
             mouse.kind,
             MouseEventKind::Down(crossterm::event::MouseButton::Left)
         ) {
             let pos = ratatui::layout::Position::new(mouse.column, mouse.row);
-            let plugin_button = self
-                .extensions_modal
-                .as_ref()
-                .filter(|state| {
-                    state.active_tab == crate::views::extensions_modal::ExtensionsTab::Plugins
-                })
-                .and_then(|state| {
-                    state
-                        .button_areas
-                        .iter()
-                        .find(|button| button.rect.contains(pos))
-                        .map(|button| (button.entry_index, button.action.clone()))
-                });
-            if let Some((Some(entry_index), action)) = plugin_button {
+            let row_button = self.extensions_modal.as_ref().and_then(|state| {
+                state
+                    .button_areas
+                    .iter()
+                    .find(|button| button.rect.contains(pos))
+                    .map(|button| (button.entry_index, button.action.clone()))
+            });
+            if let Some((Some(entry_index), action)) = row_button {
                 if let Some(state) = self.extensions_modal.as_mut() {
                     state.picker_state.selected = entry_index;
                     state.picker_state.selection_hidden = false;
@@ -1436,21 +1429,6 @@ impl AgentView {
         &mut self,
         input_method: xai_grok_telemetry::events::ExtensionsInputMethod,
     ) -> InputOutcome {
-        if let Some((kind, alias)) = self.extensions_modal.as_ref().and_then(|state| {
-            (state.active_tab == crate::views::extensions_modal::ExtensionsTab::Connect)
-                .then(|| {
-                    state
-                        .selected_data_index()
-                        .and_then(|index| state.channel_connect.entries.get(index))
-                        .map(|entry| (entry.kind.to_string(), "default".to_string()))
-                })
-                .flatten()
-        }) {
-            self.log_extensions_modal_action("configure_channel", input_method);
-            return self.execute_modal_button_action(
-                crate::views::extensions_modal::ButtonAction::ConfigureChannel { kind, alias },
-            );
-        }
         if self
             .extensions_modal
             .as_ref()
@@ -2187,6 +2165,21 @@ impl AgentView {
                     refresh_agents_modal: None,
                 })
             }
+            ButtonAction::ConfigureSelectedChannel => {
+                let selected = self
+                    .extensions_modal
+                    .as_ref()
+                    .and_then(|state| state.selected_data_index())
+                    .and_then(|index| {
+                        self.extensions_modal
+                            .as_ref()
+                            .and_then(|state| state.channel_connect.entries.get(index))
+                    })
+                    .map(|entry| (entry.kind.to_string(), "default".to_string()));
+                selected.map_or(InputOutcome::Changed, |(kind, alias)| {
+                    self.execute_modal_button_action(ButtonAction::ConfigureChannel { kind, alias })
+                })
+            }
             ButtonAction::ConfigureChannel { kind, alias } => {
                 match crate::views::channel_connect::ChannelConnectState::setup_fields(
                     &kind, &alias,
@@ -2231,6 +2224,98 @@ impl AgentView {
                                 Some(crate::views::extensions_modal::ModalMessage::Error(
                                     error.to_string(),
                                 ));
+                        }
+                    }
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::ConfigureSelectedConnect => {
+                let selected = self
+                    .extensions_modal
+                    .as_ref()
+                    .and_then(|state| state.selected_data_index())
+                    .and_then(|index| {
+                        self.extensions_modal
+                            .as_ref()
+                            .and_then(|state| state.connect_nodes.get(index))
+                    })
+                    .map(|node| node.id.clone());
+                selected.map_or(InputOutcome::Changed, |node_id| {
+                    self.execute_modal_button_action(ButtonAction::ConfigureConnect { node_id })
+                })
+            }
+            ButtonAction::ConfigureConnect { node_id } => {
+                if dx_connect::find_node(&node_id).is_none() {
+                    if let Some(ref mut state) = self.extensions_modal {
+                        state.modal_message =
+                            Some(crate::views::extensions_modal::ModalMessage::Error(
+                                format!("Unknown connect node: {node_id}"),
+                            ));
+                    }
+                    return InputOutcome::Changed;
+                }
+                let specs = vec![
+                    crate::views::extensions_modal::FieldSpec {
+                        label: "Parameters JSON".into(),
+                        required: false,
+                        placeholder: Some("{}".into()),
+                    },
+                    crate::views::extensions_modal::FieldSpec {
+                        label: "Items JSON".into(),
+                        required: false,
+                        placeholder: Some("[]".into()),
+                    },
+                ];
+                if let Some(ref mut state) = self.extensions_modal {
+                    state.input = Some(
+                        crate::views::extensions_modal::ModalInput::from_specs_with_values(
+                            format!("connect_config:{node_id}"),
+                            specs,
+                            &["{}".to_string(), "[]".to_string()],
+                        ),
+                    );
+                    state.modal_message = None;
+                }
+                InputOutcome::Changed
+            }
+            ButtonAction::SaveConnectConfig {
+                node_id,
+                parameters,
+                items,
+            } => {
+                let validation = (|| {
+                    if dx_connect::find_node(&node_id).is_none() {
+                        return Err(format!("Unknown connect node: {node_id}"));
+                    }
+                    let parameters: serde_json::Map<String, serde_json::Value> =
+                        serde_json::from_str(&parameters)
+                            .map_err(|error| format!("Parameters JSON is invalid: {error}"))?;
+                    let items: Vec<dx_connect::NodeItem> = serde_json::from_str(&items)
+                        .map_err(|error| format!("Items JSON is invalid: {error}"))?;
+                    Ok((parameters.len(), items.len()))
+                })();
+                match validation {
+                    Ok((parameter_count, item_count)) => {
+                        if let Some(ref mut state) = self.extensions_modal {
+                            state.connect_configurations.insert(
+                                node_id.clone(),
+                                crate::views::extensions_modal::ConnectConfigurationState {
+                                    parameter_count,
+                                    item_count,
+                                },
+                            );
+                            state.input = None;
+                            state.modal_message = Some(
+                                crate::views::extensions_modal::ModalMessage::Info(format!(
+                                    "Configured {node_id} ({parameter_count} parameters, {item_count} items)"
+                                )),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(ref mut state) = self.extensions_modal {
+                            state.modal_message =
+                                Some(crate::views::extensions_modal::ModalMessage::Error(error));
                         }
                     }
                 }

@@ -671,11 +671,25 @@ pub enum ButtonAction {
         kind: String,
         alias: String,
     },
+    /// Resolve the selected channel and open its schema-driven setup form.
+    ConfigureSelectedChannel,
     /// Persist a schema-driven channel setup form.
     SaveChannelConfig {
         kind: String,
         alias: String,
         fields: Vec<(String, String)>,
+    },
+    /// Open the generic configuration form for one workflow connect node.
+    ConfigureConnect {
+        node_id: String,
+    },
+    /// Resolve the selected connect node and open its configuration form.
+    ConfigureSelectedConnect,
+    /// Validate and remember a connect node's JSON execution context.
+    SaveConnectConfig {
+        node_id: String,
+        parameters: String,
+        items: String,
     },
     SendChannelMessage {
         channel_id: String,
@@ -1118,6 +1132,15 @@ pub struct ButtonArea {
     pub entry_index: Option<usize>,
 }
 
+/// Safe display state retained after a Connect configuration is accepted.
+/// Raw JSON is intentionally not kept in the modal because node parameters
+/// can contain credentials or other sensitive values.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectConfigurationState {
+    pub parameter_count: usize,
+    pub item_count: usize,
+}
+
 /// Transient, non-covering feedback shown after an extensions action
 /// completes, so the list (the surface that actually changed — a bumped
 /// version, a refreshed list) stays visible. Auto-expires via a per-tick
@@ -1203,13 +1226,11 @@ pub fn extensions_action_keys(tab: ExtensionsTab) -> Vec<(char, &'static str)> {
         ExtensionsTab::Providers => vec![('f', "category")],
         ExtensionsTab::Connect => vec![
             ('r', "reload"),
-            ('e', "edit config"),
-            ('s', "start"),
-            ('x', "stop"),
+            ('e', "configure"),
             ('m', "message"),
             ('b', "bind session"),
         ],
-        ExtensionsTab::Connects => Vec::new(),
+        ExtensionsTab::Connects => vec![('e', "configure")],
     }
 }
 
@@ -1464,11 +1485,10 @@ pub fn resolve_key(tab: ExtensionsTab, ch: char) -> Option<ButtonAction> {
         (ExtensionsTab::McpServers, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::Providers, 'f') => Some(ButtonAction::CycleFilter),
         (ExtensionsTab::Connect, 'r') => Some(ButtonAction::RefreshChannels),
-        (ExtensionsTab::Connect, 'e') => Some(ButtonAction::OpenChannelConfig),
-        (ExtensionsTab::Connect, 's') => Some(ButtonAction::StartChannelSupervisor),
-        (ExtensionsTab::Connect, 'x') => Some(ButtonAction::StopChannelSupervisor),
+        (ExtensionsTab::Connect, 'e') => Some(ButtonAction::ConfigureSelectedChannel),
         (ExtensionsTab::Connect, 'm') => Some(ButtonAction::StartChannelMessage),
         (ExtensionsTab::Connect, 'b') => Some(ButtonAction::BindSelectedChannel),
+        (ExtensionsTab::Connects, 'e') => Some(ButtonAction::ConfigureSelectedConnect),
         _ => None,
     }
 }
@@ -1630,6 +1650,24 @@ pub fn build_action_from_input(
             kind: kind.to_string(),
             alias: alias.to_string(),
             fields,
+        });
+    }
+
+    if let Some(node_id) = command_prefix.strip_prefix("connect_config:") {
+        let parameters = field_texts
+            .first()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("{}");
+        let items = field_texts
+            .get(1)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("[]");
+        return Some(ButtonAction::SaveConnectConfig {
+            node_id: node_id.to_string(),
+            parameters: parameters.to_string(),
+            items: items.to_string(),
         });
     }
 
@@ -1877,6 +1915,8 @@ pub struct ExtensionsModalState {
     pub channel_connect: crate::views::channel_connect::ChannelConnectState,
     /// Source-aware Flow-Like, n8n, and DX node catalog rendered in Connects.
     pub connect_nodes: Vec<dx_connect::NodeDefinition>,
+    /// Validated Connect configuration summaries keyed by node id.
+    pub connect_configurations: std::collections::HashMap<String, ConnectConfigurationState>,
     /// Maps visible row offset to skill index (for mouse click).
     pub skills_visible_map: Vec<Option<usize>>,
     pub hooks_collapsed_groups: std::collections::HashSet<String>,
@@ -1977,6 +2017,7 @@ impl ExtensionsModalState {
             provider_connect: crate::views::provider_connect::ProviderConnectState::new(),
             channel_connect: crate::views::channel_connect::ChannelConnectState::new(),
             connect_nodes: dx_connect::catalog_limited(CONNECTS_INITIAL_LIMIT),
+            connect_configurations: std::collections::HashMap::new(),
             skills_visible_map: Vec::new(),
             skills_expanded: std::collections::HashSet::new(),
             skills_collapsed_groups: std::collections::HashSet::new(),
@@ -2839,65 +2880,29 @@ pub fn render_extensions_modal(
                 }
             }
             ExtensionsTab::Connect => {
-                let supervisor = &state.channel_connect.supervisor;
-                let supervisor_label = match supervisor.phase {
-                    crate::views::channel_connect::SupervisorPhase::Stopped => "Stopped",
-                    crate::views::channel_connect::SupervisorPhase::Starting => "Starting",
-                    crate::views::channel_connect::SupervisorPhase::Running => "Running",
-                    crate::views::channel_connect::SupervisorPhase::Failed => "Failed",
-                };
-                entry_labels.push("Channel supervisor".to_string());
-                entry_right_labels.push(supervisor_label.to_string());
-                entry_desc_lines.push(vec![
-                    supervisor
-                        .message
-                        .as_deref()
-                        .unwrap_or(if supervisor.qr_payload.is_some() {
-                            "QR pairing is ready below"
-                        } else {
-                            "Manages all configured DX messaging channels"
-                        })
-                        .to_string(),
-                ]);
-                let mut supervisor_summary = vec!["s start · x stop · r reload".to_string()];
-                if let Some(payload) = supervisor.qr_payload.as_deref() {
-                    supervisor_summary.push(format!(
-                        "QR {}: {}",
-                        supervisor.qr_channel.as_deref().unwrap_or("channel"),
-                        payload
-                    ));
-                }
-                if let Some(outbound) = state.channel_connect.outbound_status.as_deref() {
-                    supervisor_summary.push(outbound.to_string());
-                }
-                entry_summary_lines.push(supervisor_summary);
-                entry_fields.push(Vec::new());
-                // This is an informational row, not a section header. Header
-                // rendering draws a horizontal rule across the pane, which is
-                // especially noisy at the top of Connect.
-                entry_is_header.push(false);
-                entry_dimmed.push(false);
-                entry_indent.push(0);
-                entry_data_indices.push(None);
-                entry_group_keys.push(None);
-                entry_badge_text.push(String::new());
-                entry_badge_color.push(None);
                 for (idx, channel) in state.channel_connect.entries.iter().enumerate() {
                     let entry_index = entry_labels.len();
                     entry_labels.push(channel.name.to_string());
-                    entry_right_labels.push(if channel.configured {
-                        "Configured".to_string()
-                    } else {
-                        "Not configured".to_string()
-                    });
+                    entry_right_labels.push("[Configure]".to_string());
                     entry_desc_lines.push(vec![channel.description.to_string()]);
-                    // The channel kind is used by actions/configuration and
-                    // does not need to appear as a second accordion line.
                     entry_summary_lines.push(Vec::new());
                     let fields = if state.picker_state.expanded.contains(&entry_index) {
-                        crate::views::extension_assets::channel_ascii(channel)
-                            .map(|ascii| vec![("logo".to_string(), ascii)])
-                            .unwrap_or_default()
+                        let mut fields = vec![
+                            ("type".to_string(), channel.kind.to_string()),
+                            (
+                                "status".to_string(),
+                                if channel.configured {
+                                    "Configured".to_string()
+                                } else {
+                                    "Not configured".to_string()
+                                },
+                            ),
+                        ];
+                        if let Some(ascii) = crate::views::extension_assets::channel_ascii(channel)
+                        {
+                            fields.insert(0, ("logo".to_string(), ascii));
+                        }
+                        fields
                     } else {
                         Vec::new()
                     };
@@ -2949,27 +2954,45 @@ pub fn render_extensions_modal(
                 entry_group_keys.push(None);
                 entry_badge_text.push(String::new());
                 entry_badge_color.push(None);
-                for node in state.connect_nodes.iter().filter(|node| {
-                    query.is_empty()
-                        || fuzzy_matches(&node.id, query)
-                        || fuzzy_matches(&node.display_name, query)
-                }) {
+                for (node_index, node) in
+                    state.connect_nodes.iter().enumerate().filter(|(_, node)| {
+                        query.is_empty()
+                            || fuzzy_matches(&node.id, query)
+                            || fuzzy_matches(&node.display_name, query)
+                    })
+                {
                     let entry_index = entry_labels.len();
                     entry_labels.push(node.display_name.clone());
-                    entry_right_labels.push(match node.backend {
-                        dx_connect::NodeBackend::Native => "native".to_string(),
-                        dx_connect::NodeBackend::FlowLikeAdapter => "WASM runtime".to_string(),
-                        dx_connect::NodeBackend::N8nAdapter => "Node runtime".to_string(),
-                    });
+                    entry_right_labels.push("[Configure]".to_string());
                     entry_desc_lines.push(vec![node.description.clone()]);
                     entry_summary_lines.push(vec![format!(
                         "{} inputs · {} outputs",
                         node.inputs, node.outputs
                     )]);
                     let mut fields = vec![
+                        ("id".to_string(), node.id.clone()),
+                        (
+                            "runtime".to_string(),
+                            match node.backend {
+                                dx_connect::NodeBackend::Native => "native".to_string(),
+                                dx_connect::NodeBackend::FlowLikeAdapter => {
+                                    "WASM runtime".to_string()
+                                }
+                                dx_connect::NodeBackend::N8nAdapter => "Node runtime".to_string(),
+                            },
+                        ),
                         ("inputs".to_string(), node.inputs.to_string()),
                         ("outputs".to_string(), node.outputs.to_string()),
                     ];
+                    if let Some(configuration) = state.connect_configurations.get(&node.id) {
+                        fields.push((
+                            "configuration".to_string(),
+                            format!(
+                                "{} parameters · {} items",
+                                configuration.parameter_count, configuration.item_count
+                            ),
+                        ));
+                    }
                     if state.picker_state.expanded.contains(&entry_index)
                         && let Some(ascii) = crate::views::extension_assets::connect_ascii(node)
                     {
@@ -2979,7 +3002,7 @@ pub fn render_extensions_modal(
                     entry_is_header.push(false);
                     entry_dimmed.push(false);
                     entry_indent.push(1);
-                    entry_data_indices.push(None);
+                    entry_data_indices.push(Some(node_index));
                     entry_group_keys.push(None);
                     entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
@@ -4114,16 +4137,20 @@ pub fn render_extensions_modal(
         (content_hit.item_rects, content_hit.entry_indices)
     };
 
-    // The Plugins tab exposes a real row-level Enable/Disable control on the
-    // right side of every plugin row. Store its hit rectangle alongside the
-    // picker hit areas so mouse clicks dispatch the same action as Space.
+    // Plugins, Channels, and Connects expose real row-level controls on the
+    // right side of each selectable row. Store their hit rectangles alongside
+    // the picker hit areas so mouse clicks dispatch the same action as the
+    // keyboard shortcuts.
     state.button_areas.clear();
-    if state.active_tab == ExtensionsTab::Plugins {
+    if matches!(
+        state.active_tab,
+        ExtensionsTab::Plugins | ExtensionsTab::Connect | ExtensionsTab::Connects
+    ) {
         for (visible_index, rect) in item_rects.iter().enumerate() {
             let Some(&entry_index) = entry_indices.get(visible_index) else {
                 continue;
             };
-            let Some(Some(_plugin_index)) = state.entry_data_indices.get(entry_index) else {
+            let Some(Some(data_index)) = state.entry_data_indices.get(entry_index) else {
                 continue;
             };
             let Some(status) = entry_right_labels.get(entry_index) else {
@@ -4136,6 +4163,27 @@ pub fn render_extensions_modal(
             if width == 0 || rect.width <= width {
                 continue;
             }
+            let action = match state.active_tab {
+                ExtensionsTab::Plugins => ButtonAction::ToggleSelectedPlugin,
+                ExtensionsTab::Connect => {
+                    let Some(channel) = state.channel_connect.entries.get(*data_index) else {
+                        continue;
+                    };
+                    ButtonAction::ConfigureChannel {
+                        kind: channel.kind.to_string(),
+                        alias: "default".to_string(),
+                    }
+                }
+                ExtensionsTab::Connects => {
+                    let Some(node) = state.connect_nodes.get(*data_index) else {
+                        continue;
+                    };
+                    ButtonAction::ConfigureConnect {
+                        node_id: node.id.clone(),
+                    }
+                }
+                _ => continue,
+            };
             state.button_areas.push(ButtonArea {
                 rect: Rect::new(
                     rect.x + rect.width.saturating_sub(width + 1),
@@ -4143,8 +4191,12 @@ pub fn render_extensions_modal(
                     width,
                     1,
                 ),
-                action: ButtonAction::ToggleSelectedPlugin,
-                key: ' ',
+                action,
+                key: if state.active_tab == ExtensionsTab::Plugins {
+                    ' '
+                } else {
+                    'e'
+                },
                 entry_index: Some(entry_index),
             });
         }

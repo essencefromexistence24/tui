@@ -627,6 +627,16 @@ pub fn filter_skills(skills: Vec<SkillInfo>, ignore_paths: &[String]) -> Vec<Ski
     if ignore_paths.is_empty() {
         return skills;
     }
+    // `[skills].ignore` historically accepted both path prefixes and skill
+    // names. Treat a simple token such as `screenpipe-api` as a name, while
+    // preserving the existing path-prefix behavior for absolute/relative
+    // paths. This keeps compatibility imports from leaking named skills into
+    // the prompt merely because their on-disk path is different.
+    let ignored_names: Vec<String> = ignore_paths
+        .iter()
+        .filter(|raw| !raw.is_empty() && !raw.contains(['/', '\\']) && !raw.contains(['*', '?']))
+        .map(|raw| raw.to_ascii_lowercase())
+        .collect();
     let expanded: Vec<PathBuf> = ignore_paths
         .iter()
         .map(|p| {
@@ -637,10 +647,21 @@ pub fn filter_skills(skills: Vec<SkillInfo>, ignore_paths: &[String]) -> Vec<Ski
     skills
         .into_iter()
         .filter(|skill| {
+            let name_ignored = ignored_names.iter().any(|ignored| {
+                skill.name.eq_ignore_ascii_case(ignored)
+                    || skill
+                        .display_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(ignored))
+                    || skill
+                        .plugin_name
+                        .as_deref()
+                        .is_some_and(|name| name.eq_ignore_ascii_case(ignored))
+            });
             let canonical =
                 dunce::canonicalize(&skill.path).unwrap_or_else(|_| PathBuf::from(&skill.path));
             // >MAX_PATH caveat (see workspace clippy.toml) — fail-open here: over-long ignored skills stay included.
-            !expanded.iter().any(|ignore| canonical.starts_with(ignore))
+            !name_ignored && !expanded.iter().any(|ignore| canonical.starts_with(ignore))
         })
         .collect()
 }
@@ -1773,6 +1794,18 @@ mod tests {
         ];
         let ignore = vec![ignored_dir.to_str().unwrap().to_string()];
         let result = filter_skills(skills, &ignore);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "keeper");
+    }
+
+    #[test]
+    fn filter_skills_removes_simple_name_match() {
+        let skills = vec![
+            make_skill("screenpipe-api", "/external/screenpipe/SKILL.md"),
+            make_skill("keeper", "/other/keeper/SKILL.md"),
+        ];
+        let result = filter_skills(skills, &["screenpipe-api".to_string()]);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].name, "keeper");

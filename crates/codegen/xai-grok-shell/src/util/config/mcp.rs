@@ -151,6 +151,7 @@ pub(crate) fn load_mcp_servers_with_oauth(
     for (name, config) in load_mcp_json_servers_as_configs(cwd) {
         servers_map.entry(name).or_insert(config);
     }
+    servers_map.retain(|name, _| !is_dx_excluded_mcp_name(name));
 
     let mut oauth_configs = McpOAuthConfigMap::new();
     let mut acp_servers = Vec::new();
@@ -321,6 +322,11 @@ pub(crate) fn reload_mcp_servers_merged(
     for (name, config) in mcp_json_servers {
         servers.entry(name).or_insert(config);
     }
+
+    // Screenpipe is intentionally not part of Dx's agent surface. It may be
+    // present in imported Cursor/Windsurf compatibility files, so filter it
+    // after all source precedence has been resolved.
+    servers.retain(|name, _| !is_dx_excluded_mcp_name(name));
 
     let preferences = load_mcp_preferences().file();
     let sub = &crate::config::expand_env_vars_in_string;
@@ -1683,7 +1689,18 @@ pub fn load_mcp_server_configs_with_project(
         }
     }
 
+    servers.retain(|name, _| !is_dx_excluded_mcp_name(name));
+
     servers
+}
+
+/// MCP integrations intentionally excluded from the Dx agent surface.
+///
+/// Compatibility discovery imports several editor config files. Keeping this
+/// policy at the merged-registry boundary prevents an imported integration
+/// from reappearing in prompts or the Extensions → MCP list.
+pub(crate) fn is_dx_excluded_mcp_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("screenpipe")
 }
 
 /// MCP config problems across the same layers as
