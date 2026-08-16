@@ -3890,7 +3890,22 @@ impl DashboardState {
                 let on_scrollbar =
                     has_scrollbar && mouse.column >= dd_area.x + dd_area.width.saturating_sub(2);
 
-                if on_scrollbar {
+                if let Some((_, item_idx)) = self
+                    .slash_dropdown_hit
+                    .tag_areas
+                    .iter()
+                    .find(|(area, _)| area.contains((mouse.column, mouse.row).into()))
+                    && let Some(item) = snap.matches.get(*item_idx)
+                    && let Some(selector) =
+                        crate::slash::commands::video::download_selector_for_suggestion(
+                            self.dispatch.text(),
+                            item,
+                        )
+                {
+                    self.dispatch.slash_close();
+                    self.set_list_focused(false);
+                    return InputOutcome::Action(Action::DownloadVideo { selector });
+                } else if on_scrollbar {
                     let click_frac = (mouse.row - dd_area.y) as f64 / dd_area.height.max(1) as f64;
                     let target = (click_frac * snap.matches.len() as f64) as usize;
                     let max = snap.matches.len().saturating_sub(1);
@@ -9195,6 +9210,7 @@ mod tests {
         });
         state.slash_dropdown_hit = crate::views::slash_dropdown::RenderedDropdown {
             row_items: vec![0, 1, 2, 3],
+            tag_areas: Vec::new(),
             has_scrollbar: false,
         };
 
@@ -9269,6 +9285,7 @@ mod tests {
         });
         state.slash_dropdown_hit = crate::views::slash_dropdown::RenderedDropdown {
             row_items: vec![0, 1, 2, 3],
+            tag_areas: Vec::new(),
             has_scrollbar: false,
         };
         let model_id = acp::ModelId::new("hover-model");

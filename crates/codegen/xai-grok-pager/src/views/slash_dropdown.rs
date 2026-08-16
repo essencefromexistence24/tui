@@ -51,31 +51,24 @@ fn tag_suffix(row: &SuggestionRow) -> Option<String> {
 }
 
 /// Rendered width of a row's `" [tag]"` suffix (0 when untagged). Measured
-/// without allocating: space + `[` + tag + `]` = tag width + 3. The tag shares
-/// the label column so descriptions stay aligned across tagged/untagged rows.
+/// without allocating: space + `[` + tag + `]` = tag width + 3.
 fn tag_suffix_width(row: &SuggestionRow) -> usize {
     row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0)
 }
 
 /// Compute the aligned label column width from all visible items.
 ///
-/// The label column gets up to 60% of the available width (capped at `LABEL_CAP`).
-/// This prioritises showing the full command name over the description. The tag
-/// suffix is folded in so a `/cmd [tag]` row and a plain `/cmd` row share the
-/// same description column. Untagged rows keep origin/main behavior (overlong
-/// commands are ignored); tagged rows always contribute a `LABEL_CAP`-clamped
-/// width so a long tag can never zero out the column.
+/// The label column gets up to 60% of the available width (capped at
+/// `LABEL_CAP`). Tagged rows measure only their title: their `[tag]` button is
+/// positioned at the far right of the row instead of consuming title-column
+/// space.
 fn compute_label_column_w(items: &[SuggestionRow], content_w: usize) -> usize {
     let budget = (content_w * 3 / 5).min(LABEL_CAP);
     let max_display_w = items
         .iter()
         .filter_map(|r| {
             let base = r.display.width();
-            if r.tag.is_none() {
-                (base <= LABEL_CAP).then_some(base)
-            } else {
-                Some((base + tag_suffix_width(r)).min(LABEL_CAP))
-            }
+            (base <= LABEL_CAP).then_some(base)
         })
         .max()
         .unwrap_or(0);
@@ -241,8 +234,38 @@ pub fn render_dropdown(
         }
     }
 
+    let mut tag_areas = Vec::new();
+    for vis_row in 0..row_items.len() {
+        let line_idx = scroll + vis_row;
+        let Some(&item_idx) = row_items.get(vis_row) else {
+            continue;
+        };
+        let is_item_first_line = item_starts.get(item_idx).copied() == Some(line_idx);
+        let Some(item) = items.get(item_idx) else {
+            continue;
+        };
+        if !is_item_first_line || item.tag.is_none() {
+            continue;
+        }
+        let tag_w = tag_suffix_width(item).min(row_w as usize) as u16;
+        if tag_w == 0 {
+            continue;
+        }
+        let tag_x_offset = row_w.saturating_sub(tag_w as usize).min(u16::MAX as usize) as u16;
+        tag_areas.push((
+            Rect {
+                x: area.x.saturating_add(tag_x_offset),
+                y: area.y + vis_row as u16,
+                width: tag_w,
+                height: 1,
+            },
+            item_idx,
+        ));
+    }
+
     RenderedDropdown {
         row_items,
+        tag_areas,
         has_scrollbar: needs_scrollbar,
     }
 }
@@ -253,6 +276,10 @@ pub struct RenderedDropdown {
     /// Item index shown on each visible row (top to bottom). Shorter than the
     /// area height when the content ends early.
     pub row_items: Vec<usize>,
+    /// Screen rectangles for right-aligned row tags, mapped to their item
+    /// indices. The slash dropdown mouse handler uses this to distinguish a
+    /// button click from an ordinary row selection.
+    pub tag_areas: Vec<(Rect, usize)>,
     /// Whether the right 2 columns of the area are the scrollbar gutter.
     pub has_scrollbar: bool,
 }
@@ -290,10 +317,19 @@ fn flat_line_count(items: &[SuggestionRow], row_w: usize, cap: usize) -> usize {
     let mut lines = 0usize;
     for item in items {
         let desc_w = BadgeLayout::compute(item, row_w, desc_indent).desc_w;
-        lines += if item.description.is_empty() {
-            1
+        let description_lines = if item.description.is_empty() {
+            0
         } else {
             simple_word_wrap(&item.description, desc_w).len()
+        };
+        // Tagged rows reserve their first line for the title and right-side
+        // button, so descriptions always begin on the following line.
+        lines += if item.tag.is_some() {
+            1 + description_lines
+        } else if description_lines == 0 {
+            1
+        } else {
+            description_lines
         };
         if lines >= cap {
             return cap;
@@ -348,23 +384,65 @@ fn build_item_lines(
         if is_selected { normal_style } else { bg_style },
     );
 
-    // Optional " [tag]" suffix, right-aligned at the end of the label column
-    // (just left of the description). Truncated/reserved so the name never
-    // overruns it at narrow widths. Leading space in the suffix separates
-    // label and tag when padding is 0 (longest command+tag row).
-    let tag_text = tag_suffix(item).map(|s| truncate_str(&s, label_col_w));
-    let tag_w = tag_text.as_deref().map(|s| s.width()).unwrap_or(0);
+    // Tagged argument rows have a distinct two-column layout: the title stays
+    // on the left and the action tag is a button at the far right.
+    if let Some(tag_text) = tag_suffix(item) {
+        let tag_text = truncate_str(&tag_text, total_w.saturating_sub(PREFIX_W));
+        let tag_w = tag_text.width();
+        let title_limit = label_col_w.min(
+            total_w
+                .saturating_sub(PREFIX_W)
+                .saturating_sub(tag_w)
+                .saturating_sub(1),
+        );
+        let label = truncate_str(&item.display, title_limit);
+        let label_w = label.width();
+        let gap = total_w.saturating_sub(PREFIX_W + label_w + tag_w);
+        let label_spans = build_highlighted_spans(&label, &item.indices, normal_style, match_style);
 
-    let label = truncate_str(&item.display, label_col_w.saturating_sub(tag_w));
+        let mut spans = vec![prefix_span];
+        spans.extend(label_spans);
+        if gap > 0 {
+            spans.push(Span::styled(" ".repeat(gap), bg_style));
+        }
+        spans.push(Span::styled(tag_text, tag_style));
+        out.push(Line::from(spans).style(bg_style));
+
+        let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
+        let layout = BadgeLayout::compute(item, total_w, desc_indent);
+        let desc_lines = if item.description.is_empty() {
+            Vec::new()
+        } else {
+            simple_word_wrap(&item.description, layout.desc_w)
+        };
+        for (line_idx, desc_line) in desc_lines.iter().enumerate() {
+            let mut spans = vec![
+                Span::styled(" ".repeat(desc_indent), bg_style),
+                Span::styled(desc_line.clone(), desc_style),
+            ];
+            if line_idx == 0
+                && let Some(badge) = &layout.badge
+            {
+                let used = desc_indent + desc_line.width();
+                let gap = total_w.saturating_sub(used).saturating_sub(badge.width());
+                if gap > 0 {
+                    spans.push(Span::styled(" ".repeat(gap), bg_style));
+                }
+                spans.push(Span::styled(badge.clone(), desc_style));
+            }
+            out.push(Line::from(spans).style(bg_style));
+        }
+        return;
+    }
+
+    let label = truncate_str(&item.display, label_col_w);
     let label_w = label.width();
-    let padding = label_col_w.saturating_sub(label_w + tag_w);
+    let padding = label_col_w.saturating_sub(label_w);
 
     // Build per-character spans for the label with fuzzy highlight.
     let label_spans = build_highlighted_spans(&label, &item.indices, normal_style, match_style);
 
-    // Description column indent (prefix + label + gap). `label_col_w` already
-    // includes the tag suffix, so descriptions align across tagged/untagged
-    // rows.
+    // Description column indent (prefix + label + gap).
     let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
     let layout = BadgeLayout::compute(item, total_w, desc_indent);
 
@@ -381,9 +459,6 @@ fn build_item_lines(
         spans.extend(label_spans);
         if padding > 0 {
             spans.push(Span::styled(" ".repeat(padding), bg_style));
-        }
-        if let Some(tag_text) = tag_text {
-            spans.push(Span::styled(tag_text, tag_style));
         }
         let first_desc = desc_lines.first().map(String::as_str).unwrap_or("");
         if !first_desc.is_empty() {
@@ -773,8 +848,8 @@ mod tests {
         assert_eq!(rendered.row_items[0], 0, "scroll starts at the top");
     }
 
-    /// A tagged row renders "[tag]" (system-accent) between the command name and
-    /// the description; untagged rows and arg rows render no bracket.
+    /// A tagged row renders its title on the left and a right-aligned
+    /// "[tag]" button on the first line; the description starts below it.
     #[test]
     fn tagged_command_row_renders_bracketed_tag() {
         use ratatui::buffer::Buffer;
@@ -783,20 +858,17 @@ mod tests {
         let theme = Theme::default();
         let mut tagged = row("/tagged", "does work");
         tagged.tag = Some("new".to_string());
-        let untagged = row("/plain", "no tag here");
-        let arg = row("argrow", "an argument"); // arg rows always have tag = None
 
         let width: u16 = 60;
         let snap = SlashSnapshot {
             open: true,
-            // Select row 1 so the tagged + arg rows stay unselected.
-            matches: vec![tagged, untagged, arg],
-            selected: 1,
+            matches: vec![tagged],
+            selected: 0,
             ..Default::default()
         };
-        let mut buf = Buffer::empty(Rect::new(0, 0, width, 3));
-        let area = Rect::new(0, 0, width, 3);
-        render_dropdown(&mut buf, area, &snap, None, &theme);
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 2));
+        let area = Rect::new(0, 0, width, 2);
+        let rendered = render_dropdown(&mut buf, area, &snap, None, &theme);
 
         let row_text = |y: u16| -> String {
             (0..width)
@@ -822,7 +894,7 @@ mod tests {
                 .unwrap_or_else(|| panic!("row {y} missing {needle:?}: {}", row_text(y)))
         };
 
-        // Row 0 (tagged): "[new]" present, and the open-bracket cell uses accent.
+        // The tag is on the title line, and the description is on its own line.
         assert!(
             row_text(0).contains("[new]"),
             "tagged row shows [new]: {}",
@@ -836,45 +908,32 @@ mod tests {
             theme.accent_system,
             "tag renders in the system accent"
         );
-
-        // Row 1 (untagged) and row 2 (arg): no bracket at all.
         assert!(
-            !row_text(1).contains('['),
-            "untagged row has no bracket: {}",
-            row_text(1)
-        );
-        assert!(
-            !row_text(2).contains('['),
-            "arg row has no bracket: {}",
-            row_text(2)
+            row_text(1).contains("does work"),
+            "description is below title"
         );
 
-        // Shared-column invariant: the description starts at the same buffer
-        // column on the tagged row and the untagged row (the tag folds into
-        // the label column, so it never shifts the description).
-        let desc0_x = desc_col(0, "does work");
-        let desc1_x = desc_col(1, "no tag here");
-        assert_eq!(
-            desc0_x,
-            desc1_x,
-            "tagged and untagged descriptions must share the same column (row0={}, row1={})",
-            row_text(0),
-            row_text(1)
-        );
-
-        // Tag is right-aligned: closing `]` sits at the label-column right edge,
-        // immediately before the first-line gap space and then the description.
-        // First-line gap is one space (see build_item_lines), so `]` column ==
-        // desc_col - 1 - 1. (Do not use str::find — multi-byte selected prefix.)
+        // The button is flush with the right edge of the content area.
         let close_bracket_x = (0..width)
             .rev()
             .find(|&x| buf.cell((x, 0)).map(|c| c.symbol()) == Some("]"))
             .expect("closing ] on tagged row");
         assert_eq!(
             close_bracket_x,
-            desc0_x - 1 - 1,
-            "tag right-aligned: ] should sit just left of the desc gap (row0={})",
+            width - 1,
+            "tag right-aligned at the row edge (row0={})",
             row_text(0)
+        );
+        assert_eq!(rendered.tag_areas.len(), 1);
+        assert_eq!(rendered.tag_areas[0].0.y, 0);
+        assert_eq!(rendered.tag_areas[0].0.right(), width);
+        assert_eq!(rendered.tag_areas[0].1, 0);
+
+        // The description helper is still exercised so this test catches an
+        // accidental regression where tagged rows lose their tooltip text.
+        assert_eq!(
+            desc_col(1, "does work"),
+            (PREFIX_W + "/tagged".width() + LABEL_DESC_GAP) as u16
         );
 
         // A long tag at narrow widths must truncate without panicking (zero-width

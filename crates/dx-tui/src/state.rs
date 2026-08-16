@@ -1056,7 +1056,9 @@ impl ChatState {
 
 		let prefer_agent = self.agent_mode.prefers_dx_agent();
 		let use_tool_loop = crate::agent_loop::mode_uses_tool_loop(self.agent_mode);
-		let omni_url = crate::omniroute::chat_completions_url();
+		let omni_url = crate::omniroute::chat_completions_url().or_else(|| {
+			crate::provider_registry::model_chat_endpoint(&self.provider.models_catalog, &model)
+		});
 		let session_id = self.session.chat_id.clone();
 		let system_for_remote = system.clone();
 		let agent_mode = self.agent_mode;
@@ -1754,7 +1756,11 @@ impl ChatState {
 		}
 		self.apply_model_entry(&entry);
 		let state = if entry.is_local { "ready · local" } else { "ready" };
-		self.show_toast(format!("Model: {} ({}) · {state}", entry.display_name, entry.provider_badge()));
+		self.show_toast(format!(
+			"Model: {} ({}) · {state}",
+			entry.display_name,
+			entry.provider_badge()
+		));
 	}
 
 	pub fn open_popup(&mut self, popup: BottomPopup) {
@@ -1777,7 +1783,7 @@ impl ChatState {
 			self.provider.models_catalog = cat;
 		}
 		self.refresh_model_catalog();
-		// Themes-style full rows: Flow GGUFs → Zen 6 → models.dev (by catalog order).
+		// Themes-style full rows: Flow GGUFs → verified Zen → authenticated providers.
 		// Sections render as non-selectable headers (empty payload).
 		let mut items: Vec<(String, String)> = Vec::new();
 		items.push(("Connect provider…".into(), crate::modes::model_menu::ACT_CONNECT.into()));
@@ -3037,7 +3043,9 @@ impl ChatState {
 
 		let tx = Sender::clone(&self.agent_tx);
 		let model = self.provider.selected_model.clone();
-		let omni_url = crate::omniroute::chat_completions_url();
+		let omni_url = crate::omniroute::chat_completions_url().or_else(|| {
+			crate::provider_registry::model_chat_endpoint(&self.provider.models_catalog, &model)
+		});
 		let system_for_remote = system.clone();
 		let agent_mode = self.agent_mode;
 		let plan_allow_shell = self.plan_options.allow_shell;

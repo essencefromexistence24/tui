@@ -329,6 +329,34 @@ pub struct PluginGroup {
     pub label: String,
 }
 
+/// Turn a plugin identifier into a readable UI title without changing the
+/// identifier used by plugin actions or persistence.
+pub fn pretty_plugin_name(raw: &str) -> String {
+    raw.split(['-', '_', '.'])
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "ai" => "AI".to_string(),
+            "api" => "API".to_string(),
+            "cli" => "CLI".to_string(),
+            "codex" => "Codex".to_string(),
+            "github" => "GitHub".to_string(),
+            "grok" => "Grok".to_string(),
+            "mcp" => "MCP".to_string(),
+            "openai" => "OpenAI".to_string(),
+            "slack" => "Slack".to_string(),
+            "vscode" => "VS Code".to_string(),
+            value => {
+                let mut chars = value.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl PluginGroup {
     fn new(rank: u8, key: &str, label: &str) -> Self {
         Self {
@@ -3333,7 +3361,7 @@ pub fn render_extensions_modal(
                             continue;
                         }
                         for &(pi, plugin) in plugins {
-                            entry_labels.push(plugin.name.clone());
+                            entry_labels.push(pretty_plugin_name(&plugin.name));
                             // This is both a visible status control and the
                             // mouse hit target created after picker rendering.
                             entry_right_labels.push(if plugin.enabled {

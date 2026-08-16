@@ -208,13 +208,9 @@ fn normalize_for_connects_ui(mut node: NodeDefinition) -> Option<NodeDefinition>
 
     if node.source == NodeSource::N8n {
         let operation = n8n_operation_name(&node);
-        let is_langchain = node.id.to_ascii_lowercase().contains("langchain")
-            || node.display_name.to_ascii_lowercase().contains("langchain");
-        node.display_name = if is_langchain {
-            format!("Langchain {operation}")
-        } else {
-            operation.clone()
-        };
+        // The provider/runtime slug is an implementation detail. Connects
+        // are first-class DX items, so show only the actual operation name.
+        node.display_name = operation.clone();
         // Imported metadata is presented as a DX Connect, not as an n8n
         // package/runtime implementation detail.
         node.description =
@@ -859,7 +855,7 @@ mod tests {
             outputs: 1,
         };
         let normalized = normalize_for_connects_ui(langchain).expect("visible node");
-        assert_eq!(normalized.display_name, "Langchain Agent");
+        assert_eq!(normalized.display_name, "Agent");
         assert_eq!(
             normalized.description,
             "Workflow execution for Agent; uses the isolated node runtime"

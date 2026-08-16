@@ -3,9 +3,71 @@
 use crate::{
 	modes::ModelEntry,
 	omniroute,
-	providers::{ModelsDevCatalog, ProviderStore},
+	providers::{CatalogProvider, ModelsDevCatalog, ProviderStore},
 	zen,
 };
+
+/// OpenAI-compatible endpoints for providers whose models.dev record may omit
+/// `api`. These are only used when the corresponding credential is present.
+pub fn compatible_provider_endpoint(id: &str) -> Option<&'static str> {
+	match id {
+		"cerebras" => Some("https://api.cerebras.ai/v1"),
+		"cohere" => Some("https://api.cohere.com/compatibility/v1"),
+		"deepseek" => Some("https://api.deepseek.com"),
+		"github-models" => Some("https://models.github.ai/inference"),
+		"google" => Some("https://generativelanguage.googleapis.com/v1beta/openai"),
+		"groq" => Some("https://api.groq.com/openai/v1"),
+		"huggingface" => Some("https://router.huggingface.co/v1"),
+		"mistral" => Some("https://api.mistral.ai/v1"),
+		"openrouter" => Some("https://openrouter.ai/api/v1"),
+		"sambanova" => Some("https://api.sambanova.ai/v1"),
+		"togetherai" => Some("https://api.together.xyz/v1"),
+		_ => None,
+	}
+}
+
+fn compatible_env_names(provider: &CatalogProvider) -> Vec<&str> {
+	let fallbacks: &[&str] = match provider.id.as_str() {
+		"github-models" => &["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"],
+		"google" => &["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
+		"huggingface" => &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
+		"replicate" => &["REPLICATE_API_TOKEN"],
+		"sambanova" => &["SAMBANOVA_API_KEY"],
+		_ => &[],
+	};
+	let mut names: Vec<&str> = provider.env.iter().map(String::as_str).collect();
+	names.extend(fallbacks.iter().copied());
+	names
+}
+
+fn provider_is_configured(provider: &CatalogProvider) -> bool {
+	compatible_env_names(provider)
+		.into_iter()
+		.any(|name| std::env::var(name).ok().is_some_and(|value| !value.trim().is_empty()))
+}
+
+fn chat_completions_url(base: &str) -> String {
+	let base = base.trim_end_matches('/');
+	if base.ends_with("/chat/completions") {
+		base.to_owned()
+	} else {
+		format!("{base}/chat/completions")
+	}
+}
+
+/// Resolve the request endpoint for a catalog model only when its provider is
+/// configured in this process. The model id is namespaced in the menu, so
+/// duplicate ids from different providers cannot select the wrong endpoint.
+pub fn model_chat_endpoint(catalog: &ModelsDevCatalog, model_id: &str) -> Option<String> {
+	let (provider_id, raw_id) = model_id.split_once('/').unwrap_or(("", model_id));
+	let provider = catalog.providers.iter().find(|provider| {
+		(provider_id.is_empty() || provider.id == provider_id)
+			&& provider.models.iter().any(|model| model.id == raw_id || model.id == model_id)
+			&& provider_is_configured(provider)
+	})?;
+	let base = provider.api.as_deref().or_else(|| compatible_provider_endpoint(&provider.id))?;
+	Some(chat_completions_url(base))
+}
 
 /// One provider row for menus / doctor.
 #[derive(Debug, Clone)]
@@ -148,7 +210,7 @@ pub fn unified_remote_models(catalog: &ModelsDevCatalog, store: &ProviderStore) 
 	models
 }
 
-/// Production model catalog: **Flow (real GGUFs) → Zen (6 free) → models.dev (75+ providers)**.
+/// Production model catalog: **Flow (real GGUFs) → Zen (verified free) → authenticated providers**.
 ///
 /// Used by key `0` / model picker. Flow never includes STT/TTS/Vosk/wake-word assets.
 pub fn build_production_model_menu(
@@ -173,7 +235,7 @@ pub fn build_production_model_menu(
 		}
 	}
 
-	// ── OpenCode Zen free (exactly 6) ────────────────────────────────────
+	// ── OpenCode Zen free (verified allowlist) ────────────────────────────
 	out.push(ModelEntry::section("OpenCode Zen · free"));
 	for m in crate::modes::remote_models() {
 		out.push(m);
@@ -218,54 +280,26 @@ pub fn build_production_model_menu(
 	// This makes providers such as OpenRouter, Groq, DeepSeek, and Together
 	// visible without requiring a second manual connection entry.
 	for provider in &catalog.providers {
-		if provider.api.is_none()
-			|| provider.env.is_empty()
-			|| !provider.env.iter().any(|name| {
-				std::env::var_os(name).is_some_and(|value| !value.is_empty())
-			})
-		{
+		if !provider_is_configured(provider) {
+			continue;
+		}
+		// A key without a known endpoint would silently route to Zen and produce
+		// misleading provider/auth errors. Only expose routable providers.
+		if provider.api.is_none() && compatible_provider_endpoint(&provider.id).is_none() {
 			continue;
 		}
 		if connected.iter().any(|conn| conn.id == provider.id) {
 			continue;
 		}
 		for model in provider.models.iter().take(12) {
-			if out.iter().any(|entry| entry.model_id == model.id) {
+			let model_id = format!("{}/{}", provider.id, model.id);
+			if out
+				.iter()
+				.any(|entry| entry.model_id == model.id || entry.model_id == model_id)
+			{
 				continue;
 			}
-			out.push(ModelEntry::remote(&model.name, &model.id, &provider.name));
-		}
-	}
-
-	// ── models.dev: 75+ providers (real remote catalog) ──────────────────
-	if catalog.provider_count() > 0 {
-		// out.push(ModelEntry::section(format!(
-		// 	"models.dev · {} providers",
-		// 	catalog.provider_count()
-		// ).as_str()));
-		// All providers; a few models each so the menu stays usable
-		let mut providers: Vec<_> = catalog.providers.iter().collect();
-		providers.sort_by_key(|a| a.name.to_ascii_lowercase());
-		const PER_PROVIDER: usize = 3;
-		const MAX_CATALOG: usize = 240;
-		let mut added = 0usize;
-		for p in providers {
-			if p.name.to_ascii_lowercase().contains("opencode zen") {
-				continue;
-			}
-			for m in p.models.iter().take(PER_PROVIDER) {
-				if out.iter().any(|x| x.model_id == m.id) {
-					continue;
-				}
-				out.push(ModelEntry::remote(&m.name, &m.id, &p.name));
-				added += 1;
-				if added >= MAX_CATALOG {
-					break;
-				}
-			}
-			if added >= MAX_CATALOG {
-				break;
-			}
+			out.push(ModelEntry::remote(&model.name, &model_id, &provider.name));
 		}
 	}
 
@@ -304,7 +338,7 @@ mod tests {
 		let cat = ModelsDevCatalog::default();
 		let store = ProviderStore::default();
 		let menu = build_production_model_menu(&cat, &store);
-		assert!(menu.len() >= 8, "menu too thin: {}", menu.len());
+		assert!(menu.len() >= 5, "menu too thin: {}", menu.len());
 
 		let flow_sec = menu
 			.iter()

@@ -1,6 +1,7 @@
 //! Launch videos in the separate native Video Player window.
 
 use crate::app::actions::Action;
+use crate::slash::SuggestionRow;
 use crate::slash::command::{AppCtx, ArgItem, CommandExecCtx, CommandResult, SlashCommand};
 
 pub const SHOWCASE_VIDEO_ARGS: &[(&str, &str, &str)] = &[
@@ -55,17 +56,13 @@ impl SlashCommand for VideoCommand {
                         || title.to_ascii_lowercase().contains(&query)
                 })
                 .map(|(arg, title, _description)| ArgItem {
-                    // The dropdown renderer places this suffix in a right-
-                    // aligned tag column. Selecting the row performs the
-                    // download; playback remains available with `/video <name>`
-                    // and automatically prefers the downloaded file.
+                    // The dropdown renderer turns this suffix into a
+                    // right-aligned, clickable download button. Selecting
+                    // the title itself remains a normal playback completion.
                     display: format!("{title} [Download]"),
                     match_text: format!("download {arg} {title} EssenceFromExistence Showcase"),
-                    insert_text: format!("download {arg}"),
-                    description: format!(
-                        "Download to the OS Downloads folder · {}",
-                        crate::video_player::showcase_video_status(arg)
-                    ),
+                    insert_text: (*arg).to_owned(),
+                    description: String::new(),
                 })
                 .collect(),
         )
@@ -97,6 +94,24 @@ impl SlashCommand for VideoCommand {
             CommandResult::Action(Action::PlayVideo(raw.to_string()))
         }
     }
+}
+
+/// Resolve the action behind a video's right-aligned `[Download]` button.
+///
+/// This is deliberately separate from `ArgItem::insert_text`: selecting the
+/// row inserts the selector for playback, while clicking the tag dispatches a
+/// download immediately. Keeping the distinction here prevents every mouse
+/// surface from having to duplicate video validation rules.
+pub(crate) fn download_selector_for_suggestion(
+    prompt_text: &str,
+    item: &SuggestionRow,
+) -> Option<String> {
+    let invocation = crate::slash::parse_invocation(prompt_text)?;
+    if !invocation.token.eq_ignore_ascii_case("video") || item.tag.as_deref() != Some("Download") {
+        return None;
+    }
+    let selector = item.insert_text.trim();
+    crate::video_player::showcase_video(selector).map(|_| selector.to_owned())
 }
 
 #[cfg(test)]
@@ -163,8 +178,30 @@ mod tests {
             .expect("video suggestions");
 
         assert_eq!(items.len(), 3, "one download row per showcase video");
-        assert!(items.iter().all(|item| !item.description.trim().is_empty()));
-        assert!(items.iter().all(|item| item.display.ends_with(" [Download]")));
-        assert!(items.iter().any(|item| item.insert_text == "download spiderman"));
+        assert!(items.iter().all(|item| item.description.is_empty()));
+        assert!(
+            items
+                .iter()
+                .all(|item| item.display.ends_with(" [Download]"))
+        );
+        assert!(items.iter().any(|item| item.insert_text == "spiderman"));
+    }
+
+    #[test]
+    fn download_button_action_is_separate_from_playback_completion() {
+        let item = crate::slash::SuggestionRow {
+            display: "Spiderman Into The SpiderVerse".to_owned(),
+            description: String::new(),
+            insert_text: "spiderman".to_owned(),
+            indices: Vec::new(),
+            tag: Some("Download".to_owned()),
+            provenance: None,
+        };
+
+        assert_eq!(item.insert_text, "spiderman");
+        assert_eq!(
+            download_selector_for_suggestion("/video ", &item).as_deref(),
+            Some("spiderman")
+        );
     }
 }

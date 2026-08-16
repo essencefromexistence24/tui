@@ -10,18 +10,16 @@ use serde_json::Value;
 
 use crate::tools::ToolCall;
 
-/// OpenCode Zen free models currently usable with the public bearer header.
-pub const MODELS: &[(&str, &str)] = &[
-	("Big Pickle", "big-pickle"),
-	("DeepSeek V4 Flash", "deepseek-v4-flash-free"),
-	("MiMo-V2.5", "mimo-v2.5-free"),
-	("Hy3 Free", "hy3-free"),
-	("Nemotron 3 Ultra", "nemotron-3-ultra-free"),
-];
+/// OpenCode Zen free models currently allowed in the picker.
+///
+/// The public `/models` endpoint advertises many paid or account-gated lanes;
+/// those are deliberately not treated as usable free models here.
+pub const MODELS: &[(&str, &str)] =
+	&[("Hy3 Free", "hy3-free"), ("Nemotron 3 Ultra", "nemotron-3-ultra-free")];
 
-/// Default remote model: OpenCode Zen Big Pickle.
-pub const DEFAULT_MODEL: &str = "big-pickle";
-pub const DEFAULT_MODEL_DISPLAY: &str = "Big Pickle";
+/// Default remote model: OpenCode Zen Hy3 Free.
+pub const DEFAULT_MODEL: &str = "hy3-free";
+pub const DEFAULT_MODEL_DISPLAY: &str = "Hy3 Free";
 pub const DEFAULT_PROVIDER: &str = "OpenCode Zen";
 pub const ZEN_URL: &str = "https://opencode.ai/zen/v1/chat/completions";
 
@@ -119,7 +117,69 @@ pub struct ChatTurn {
 }
 
 fn strip_model_id(model: &str) -> &str {
-	model.strip_prefix("zen/").or_else(|| model.strip_prefix("omniroute/")).unwrap_or(model)
+	model
+		.strip_prefix("zen/")
+		.or_else(|| model.strip_prefix("omniroute/"))
+		.or_else(|| model.split_once('/').map(|(_, id)| id))
+		.unwrap_or(model)
+}
+
+fn first_nonempty_env(names: &[&str]) -> Option<String> {
+	names.iter().find_map(|name| {
+		std::env::var(name)
+			.ok()
+			.map(|value| value.trim().to_owned())
+			.filter(|value| !value.is_empty())
+	})
+}
+
+fn api_key_for_url(model: &str, url: &str) -> Option<String> {
+	// Namespaced model IDs are authoritative when multiple providers expose
+	// the same model name or use a custom/shared endpoint.
+	if let Some(provider) = model.split_once('/').map(|(provider, _)| provider) {
+		let names: &[&str] = match provider {
+			"github-models" => &["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"],
+			"google" => &["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"],
+			"huggingface" => &["HUGGINGFACE_API_KEY", "HF_TOKEN"],
+			"togetherai" => &["TOGETHER_API_KEY", "TOGETHERAI_API_KEY"],
+			"replicate" => &["REPLICATE_API_TOKEN"],
+			_ => &[],
+		};
+		if let Some(key) = first_nonempty_env(names) {
+			return Some(key);
+		}
+		let generated = format!("{}_API_KEY", provider.replace('-', "_").to_ascii_uppercase());
+		if let Some(key) = first_nonempty_env(&[generated.as_str()]) {
+			return Some(key);
+		}
+	}
+
+	let names: &[&str] = if url.contains("cerebras.ai") {
+		&["CEREBRAS_API_KEY"]
+	} else if url.contains("cohere.com") {
+		&["COHERE_API_KEY"]
+	} else if url.contains("deepseek.com") {
+		&["DEEPSEEK_API_KEY"]
+	} else if url.contains("models.github.ai") {
+		&["GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"]
+	} else if url.contains("generativelanguage.googleapis.com") {
+		&["GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_API_KEY", "GEMINI_API_KEY"]
+	} else if url.contains("groq.com") {
+		&["GROQ_API_KEY"]
+	} else if url.contains("huggingface.co") {
+		&["HUGGINGFACE_API_KEY", "HF_TOKEN"]
+	} else if url.contains("mistral.ai") {
+		&["MISTRAL_API_KEY"]
+	} else if url.contains("openrouter.ai") {
+		&["OPENROUTER_API_KEY"]
+	} else if url.contains("sambanova.ai") {
+		&["SAMBANOVA_API_KEY"]
+	} else if url.contains("together.xyz") {
+		&["TOGETHER_API_KEY", "TOGETHERAI_API_KEY"]
+	} else {
+		&[]
+	};
+	first_nonempty_env(names)
 }
 
 // ── Wire format ─────────────────────────────────────────────────────────
@@ -317,12 +377,12 @@ pub async fn stream_chat_messages(
 		.build()
 		.context("Failed to build HTTP client")?;
 
-	let mut response = client
-		.post(url)
-		.json(&body)
-		.send()
-		.await
-		.with_context(|| format!("Failed to send request to {url}"))?;
+	let mut request = client.post(url).json(&body);
+	if let Some(api_key) = api_key_for_url(model, url) {
+		request = request.bearer_auth(api_key);
+	}
+	let mut response =
+		request.send().await.with_context(|| format!("Failed to send request to {url}"))?;
 
 	if !response.status().is_success() {
 		let status = response.status();

@@ -306,7 +306,7 @@ impl ModelEntry {
 	}
 }
 
-/// Catalog of currently usable OpenCode Zen free models. Default is Big Pickle.
+/// Catalog of currently usable OpenCode Zen free models. Default is Hy3 Free.
 pub fn remote_models() -> Vec<ModelEntry> {
 	crate::zen::MODELS
 		.iter()
@@ -320,7 +320,7 @@ pub fn local_models() -> Vec<ModelEntry> {
 	crate::flow_backend::discover_local_models()
 }
 
-/// Default selection at startup: Remote + Big Pickle + OpenCode Zen.
+/// Default selection at startup: Remote + Hy3 Free + OpenCode Zen.
 #[allow(dead_code)]
 pub fn default_remote_selection() -> ModelEntry {
 	ModelEntry::remote(

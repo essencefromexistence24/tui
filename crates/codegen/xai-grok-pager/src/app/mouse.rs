@@ -453,7 +453,22 @@ impl AgentView {
                     let has_scrollbar = self.slash_dropdown_hit.has_scrollbar;
                     let on_scrollbar = has_scrollbar
                         && mouse.column >= dd_area.x + dd_area.width.saturating_sub(2);
-                    if on_scrollbar {
+                    if let Some((_, item_idx)) = self
+                        .slash_dropdown_hit
+                        .tag_areas
+                        .iter()
+                        .find(|(area, _)| area.contains((mouse.column, mouse.row).into()))
+                        && let Some(item) = snap.matches.get(*item_idx)
+                        && let Some(selector) =
+                            crate::slash::commands::video::download_selector_for_suggestion(
+                                self.prompt.text(),
+                                item,
+                            )
+                    {
+                        self.prompt.slash_close();
+                        self.set_active_pane(AgentPane::Prompt, false);
+                        return InputOutcome::Action(Action::DownloadVideo { selector });
+                    } else if on_scrollbar {
                         let click_frac =
                             (mouse.row - dd_area.y) as f64 / dd_area.height.max(1) as f64;
                         let target = (click_frac * snap.matches.len() as f64) as usize;

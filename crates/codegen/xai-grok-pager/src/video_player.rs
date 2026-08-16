@@ -382,11 +382,6 @@ pub(crate) fn showcase_assets_dir() -> Result<PathBuf, String> {
         .ok_or_else(|| "the OS Downloads directory is unavailable".to_owned())
 }
 
-pub(crate) fn showcase_cached_path(selector: &str) -> Option<PathBuf> {
-    let video = showcase_video(selector)?;
-    Some(showcase_assets_dir().ok()?.join(video.filename))
-}
-
 /// Download a built-in showcase video into the user's OS Downloads directory.
 ///
 /// The final file is never exposed until the complete response has been
@@ -468,16 +463,6 @@ pub(crate) async fn download_showcase_video(
     }
     progress(downloaded, total.or(Some(downloaded)));
     Ok(final_path)
-}
-
-/// Human-readable state for one showcase video suggestion.
-pub(crate) fn showcase_video_status(selector: &str) -> String {
-    if let Some(path) = showcase_cached_path(selector)
-        && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
-    {
-        return "Local cache ready · click to play".to_owned();
-    }
-    "Remote Catbox stream · disk cache on demand".to_owned()
 }
 
 fn showcase_cache_max_bytes() -> u64 {

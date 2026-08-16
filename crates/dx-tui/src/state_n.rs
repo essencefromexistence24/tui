@@ -1018,7 +1018,9 @@ impl ChatState {
 
 		let prefer_agent = self.agent_mode.prefers_dx_agent();
 		let use_tool_loop = crate::agent_loop::mode_uses_tool_loop(self.agent_mode);
-		let omni_url = crate::omniroute::chat_completions_url();
+		let omni_url = crate::omniroute::chat_completions_url().or_else(|| {
+			crate::provider_registry::model_chat_endpoint(&self.provider.models_catalog, &model)
+		});
 		let session_id = self.session.chat_id.clone();
 		let system_for_remote = system.clone();
 		let agent_mode = self.agent_mode;
@@ -1519,7 +1521,7 @@ impl ChatState {
 			let recent: Vec<String> =
 				self.messages.iter().rev().take(10).map(|m| m.content.clone()).collect();
 			let model = self.provider.selected_model.clone();
-			let api_url = crate::omniroute::chat_completions_url();
+		let api_url = crate::omniroute::chat_completions_url();
 			let tx = self.agent_tx.clone();
 			crate::background_review::spawn_llm_review(recent, model, api_url, tx);
 		}
@@ -1717,7 +1719,7 @@ impl ChatState {
 				self.provider.models_catalog = cat;
 			}
 		self.refresh_model_catalog();
-		// Themes-style full rows: Flow GGUFs → Zen 6 → models.dev (by catalog order).
+		// Themes-style full rows: Flow GGUFs → verified Zen → authenticated providers.
 		// Sections render as non-selectable headers (empty payload).
 		let mut items: Vec<(String, String)> = Vec::new();
 		items.push(("Connect provider…".into(), crate::modes::model_menu::ACT_CONNECT.into()));
@@ -2952,7 +2954,9 @@ fn format_token_count(n: usize) -> String {
 
 		let tx = Sender::clone(&self.agent_tx);
 		let model = self.provider.selected_model.clone();
-		let omni_url = crate::omniroute::chat_completions_url();
+		let omni_url = crate::omniroute::chat_completions_url().or_else(|| {
+			crate::provider_registry::model_chat_endpoint(&self.provider.models_catalog, &model)
+		});
 		let system_for_remote = system.clone();
 		let agent_mode = self.agent_mode;
 		let plan_allow_shell = self.plan_options.allow_shell;

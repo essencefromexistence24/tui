@@ -75,27 +75,6 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
 
     let models = [
         ModelSpec {
-            key: "big-pickle",
-            name: "Big Pickle",
-            model_id: "big-pickle",
-            ctx: 200_000,
-            title_header: Some("opencode"),
-        },
-        ModelSpec {
-            key: "deepseek-v4-flash-free",
-            name: "DeepSeek V4 Flash Free",
-            model_id: "deepseek-v4-flash-free",
-            ctx: 200_000,
-            title_header: None,
-        },
-        ModelSpec {
-            key: "mimo-v2.5-free",
-            name: "MiMo V2.5 Free",
-            model_id: "mimo-v2.5-free",
-            ctx: 131_000,
-            title_header: None,
-        },
-        ModelSpec {
             key: "hy3-free",
             name: "HY3 Free",
             model_id: "hy3-free",
@@ -162,54 +141,6 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
         );
     }
 
-    // ChatGPT Sign-in / Codex Responses provider.  The credential is resolved
-    // just before each request from ZeroClaw's encrypted OAuth profile; no
-    // token is embedded in the catalog or copied into xAI auth state.
-    let mut codex_headers = IndexMap::new();
-    codex_headers.insert(
-        "OpenAI-Beta".to_string(),
-        "responses=experimental".to_string(),
-    );
-    codex_headers.insert("originator".to_string(), "pi".to_string());
-    map.insert(
-        "gpt-5.6-luna".to_string(),
-        ModelEntryConfig {
-            id: Some("gpt-5.6-luna".to_string()),
-            model: "gpt-5.6-luna".to_string(),
-            base_url: crate::auth::codex::CODEX_RESPONSES_URL.to_string(),
-            api_base_url: None,
-            name: Some("GPT-5.6 Luna · ChatGPT/Codex".to_string()),
-            description: Some("OpenAI Codex Responses model via ChatGPT sign-in".to_string()),
-            max_completion_tokens: None,
-            temperature: None,
-            top_p: None,
-            api_key: None,
-            env_key: None,
-            api_backend: ApiBackend::Responses,
-            auth_scheme: None,
-            reasoning_effort: None,
-            supports_reasoning_effort: true,
-            reasoning_efforts: vec![],
-            extra_headers: codex_headers,
-            context_window: NonZeroU64::new(200_000).unwrap(),
-            auto_compact_threshold_percent: None,
-            system_prompt_label: Some("codex".to_string()),
-            use_concise: false,
-            agent_type: "codex".to_string(),
-            inference_idle_timeout_secs: Some(300),
-            max_retries: None,
-            hidden: false,
-            supported_in_api: true,
-            supports_backend_search: false,
-            compactions_remaining: None,
-            compaction_at_tokens: None,
-            show_model_fingerprint: false,
-            stream_tool_calls: None,
-            local_model_path: None,
-            laziness_detector: LazinessDetectorPerModelConfig::default(),
-        },
-    );
-
     map
 }
 
@@ -234,11 +165,11 @@ fn configured_catalog_model_entries_from(
 ) -> IndexMap<String, ModelEntryConfig> {
     let mut entries = IndexMap::new();
     for provider in cache.providers {
-        let Some(env_key) = provider
-            .env
+        let env_names = provider_env_names(&provider);
+        let Some(env_key) = env_names
             .iter()
             .find(|name| is_env_configured(name))
-            .map(|_| EnvKeys::new(provider.env.clone()))
+            .map(|_| EnvKeys::new(env_names.clone()))
         else {
             continue;
         };
@@ -337,6 +268,23 @@ fn provider_display_name(id: &str, catalog_name: Option<&str>) -> String {
     }
 }
 
+fn provider_env_names(provider: &ModelsDevProvider) -> Vec<String> {
+    let fallback = match provider.id.as_str() {
+        "github-models" => Some("GITHUB_MODELS_API_KEY"),
+        "huggingface" => Some("HUGGINGFACE_API_KEY"),
+        "replicate" => Some("REPLICATE_API_TOKEN"),
+        "sambanova" => Some("SAMBANOVA_API_KEY"),
+        _ => None,
+    };
+    let mut names = provider.env.clone();
+    if let Some(name) = fallback
+        && !names.iter().any(|existing| existing == name)
+    {
+        names.push(name.to_owned());
+    }
+    names
+}
+
 fn load_models_dev_cache() -> Option<ModelsDevCache> {
     for path in models_dev_cache_paths() {
         let Ok(contents) = std::fs::read_to_string(path) else {
@@ -368,6 +316,12 @@ fn models_dev_cache_paths() -> Vec<PathBuf> {
     }
     if let Some(home) = dirs::home_dir() {
         paths.push(home.join(".dx").join("cache").join(MODELS_DEV_CACHE_FILE));
+        paths.push(
+            home.join(".config")
+                .join("dx")
+                .join("cache")
+                .join(MODELS_DEV_CACHE_FILE),
+        );
     }
     paths.sort();
     paths.dedup();
