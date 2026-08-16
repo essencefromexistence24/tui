@@ -568,6 +568,35 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::VideoDownloadProgress {
+            title,
+            downloaded,
+            total,
+        } => {
+            let status = total
+                .filter(|total| *total > 0)
+                .map(|total| {
+                    let percent = downloaded.saturating_mul(100) / total;
+                    format!("Downloading {title}: {percent}%")
+                })
+                .unwrap_or_else(|| format!("Downloading {title}: {} bytes", downloaded));
+            if let Some(agent) = get_active_agent_mut(app) {
+                agent.show_toast(&status);
+            }
+            vec![]
+        }
+        TaskResult::VideoDownloadComplete { title, result } => {
+            let message = match result {
+                Ok(path) => format!("Downloaded {title} to {}", path.display()),
+                Err(error) => format!("Video download failed for {title}: {error}"),
+            };
+            if let Some(agent) = get_active_agent_mut(app) {
+                agent.show_toast(&message);
+            } else if let Some(dashboard) = app.dashboard.as_mut() {
+                dashboard.error_toast = Some(message);
+            }
+            vec![]
+        }
         TaskResult::CancelComplete => {
             tracing::trace!("Cancel notification sent successfully");
             vec![]

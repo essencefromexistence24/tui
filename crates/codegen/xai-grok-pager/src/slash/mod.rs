@@ -78,12 +78,17 @@ impl SuggestionRow {
     }
 
     fn from_arg(item: &ArgItem) -> Self {
+        let (display, tag) = item
+            .display
+            .strip_suffix(" [Download]")
+            .map(|display| (display.to_string(), Some("Download".to_string())))
+            .unwrap_or_else(|| (item.display.clone(), None));
         Self {
-            display: item.display.clone(),
+            display,
             description: item.description.clone(),
             insert_text: item.insert_text.clone(),
             indices: Vec::new(),
-            tag: None,
+            tag,
             provenance: None,
         }
     }

@@ -255,12 +255,16 @@ impl ChannelConnectState {
             .filter(|field| field.name.starts_with(&format!("{prefix}.")))
             .map(|field| ChannelSetupField {
                 path: field.name.clone(),
+                // These are environment-style configuration keys. Keep the
+                // persisted dotted path unchanged, but render the field key
+                // in the conventional uppercase ENV form.
                 label: field
                     .name
                     .rsplit('.')
                     .next()
-                    .unwrap_or("value")
-                    .replace('_', "-"),
+                    .unwrap_or("VALUE")
+                    .replace('-', "_")
+                    .to_ascii_uppercase(),
                 description: field.description.to_string(),
                 secret: field.is_secret,
                 initial_value: if field.is_secret {

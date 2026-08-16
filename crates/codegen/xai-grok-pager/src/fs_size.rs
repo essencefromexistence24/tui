@@ -40,11 +40,6 @@ impl Volume {
         Self(device_id(path))
     }
 
-    #[cfg(test)]
-    pub(crate) fn other_device_for_test(self) -> Self {
-        Self(Some(self.0.unwrap_or_default().wrapping_add(1)))
-    }
-
     /// False only on a proven mismatch: an unknown device is not a crossing.
     pub(crate) fn holds(self, path: &Path) -> bool {
         let Some(anchor) = self.0 else {

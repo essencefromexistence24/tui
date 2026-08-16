@@ -181,6 +181,81 @@ pub fn catalog_limited(limit: usize) -> Vec<NodeDefinition> {
         limit.saturating_sub(nodes.len()),
     ));
     nodes
+        .into_iter()
+        .filter_map(normalize_for_connects_ui)
+        .take(limit)
+        .collect()
+}
+
+/// Return the complete catalog prepared for the Extensions → Connects view.
+///
+/// The execution catalog intentionally keeps the native control nodes and
+/// their original IDs because workflows may still reference them. The UI
+/// catalog is a separate projection: internal control nodes are not useful as
+/// user-facing Connects, and imported provider metadata is normalized without
+/// changing the IDs used by configuration or execution.
+pub fn catalog_for_connects_ui() -> Vec<NodeDefinition> {
+    catalog()
+        .into_iter()
+        .filter_map(normalize_for_connects_ui)
+        .collect()
+}
+
+fn normalize_for_connects_ui(mut node: NodeDefinition) -> Option<NodeDefinition> {
+    if is_hidden_connect_node(&node) {
+        return None;
+    }
+
+    if node.source == NodeSource::N8n {
+        let operation = n8n_operation_name(&node);
+        let is_langchain = node.id.to_ascii_lowercase().contains("langchain")
+            || node.display_name.to_ascii_lowercase().contains("langchain");
+        node.display_name = if is_langchain {
+            format!("Langchain {operation}")
+        } else {
+            operation.clone()
+        };
+        // Imported metadata is presented as a DX Connect, not as an n8n
+        // package/runtime implementation detail.
+        node.description =
+            format!("Workflow execution for {operation}; uses the isolated node runtime");
+    }
+
+    Some(node)
+}
+
+fn is_hidden_connect_node(node: &NodeDefinition) -> bool {
+    let leaf = node
+        .id
+        .rsplit(['.', '/', ':'])
+        .next()
+        .unwrap_or(&node.display_name)
+        .to_ascii_lowercase()
+        .replace(['-', '_', ' '], "");
+    matches!(
+        leaf.as_str(),
+        "set" | "if" | "merge" | "noop" | "loop" | "loopoveritems"
+    )
+}
+
+fn n8n_operation_name(node: &NodeDefinition) -> String {
+    let raw = node
+        .id
+        .rsplit(['.', '/', ':'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(&node.display_name);
+    let display = node.display_name.trim();
+    let display = display
+        .rsplit_once('.')
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(display);
+    let name = if raw.is_empty() { display } else { raw };
+    name.trim_start_matches('@')
+        .rsplit_once('/')
+        .map(|(_, suffix)| suffix)
+        .unwrap_or(name)
+        .to_string()
 }
 
 pub fn find_node(id: &str) -> Option<NodeDefinition> {
@@ -759,5 +834,36 @@ mod tests {
         .unwrap();
         assert_eq!(output[0].len(), 1);
         assert!(output[1].is_empty());
+    }
+
+    #[test]
+    fn connects_ui_projection_hides_internal_controls_and_normalizes_n8n() {
+        let hidden = NodeDefinition {
+            id: "dx.noop".into(),
+            display_name: "No Op".into(),
+            source: NodeSource::DxNative,
+            backend: NodeBackend::Native,
+            description: "Pass items through unchanged".into(),
+            inputs: 1,
+            outputs: 1,
+        };
+        assert!(normalize_for_connects_ui(hidden).is_none());
+
+        let langchain = NodeDefinition {
+            id: "@n8n/n8n-nodes-langchain.Agent".into(),
+            display_name: "@n8n/n8n-nodes-langchain.Agent".into(),
+            source: NodeSource::N8n,
+            backend: NodeBackend::N8nAdapter,
+            description: "n8n adapter metadata".into(),
+            inputs: 1,
+            outputs: 1,
+        };
+        let normalized = normalize_for_connects_ui(langchain).expect("visible node");
+        assert_eq!(normalized.display_name, "Langchain Agent");
+        assert_eq!(
+            normalized.description,
+            "Workflow execution for Agent; uses the isolated node runtime"
+        );
+        assert_eq!(normalized.id, "@n8n/n8n-nodes-langchain.Agent");
     }
 }

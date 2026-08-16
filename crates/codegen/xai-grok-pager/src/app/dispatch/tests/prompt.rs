@@ -6,7 +6,6 @@ use super::*;
 fn first_message_from_splash_arms_the_two_second_intro() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.mark_project_picker_done();
 
     assert_eq!(app.agents[&id].dx_ui.view, crate::dx::DxView::Animation);
     assert!(app.agents[&id].dx_ui.intro_deadline.is_none());
@@ -22,7 +21,6 @@ fn first_message_from_splash_arms_the_two_second_intro() {
 fn slash_command_from_splash_does_not_open_chat_or_arm_intro() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
-    app.mark_project_picker_done();
 
     let _ = dispatch(Action::SendPrompt("/compact".into()), &mut app);
 

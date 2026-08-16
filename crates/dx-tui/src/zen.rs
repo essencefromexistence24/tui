@@ -10,13 +10,12 @@ use serde_json::Value;
 
 use crate::tools::ToolCall;
 
-/// OpenCode Zen free models (6). Default is Big Pickle.
+/// OpenCode Zen free models currently usable with the public bearer header.
 pub const MODELS: &[(&str, &str)] = &[
 	("Big Pickle", "big-pickle"),
 	("DeepSeek V4 Flash", "deepseek-v4-flash-free"),
 	("MiMo-V2.5", "mimo-v2.5-free"),
 	("Hy3 Free", "hy3-free"),
-	("North Mini Code", "north-mini-code-free"),
 	("Nemotron 3 Ultra", "nemotron-3-ultra-free"),
 ];
 
@@ -26,7 +25,7 @@ pub const DEFAULT_MODEL_DISPLAY: &str = "Big Pickle";
 pub const DEFAULT_PROVIDER: &str = "OpenCode Zen";
 pub const ZEN_URL: &str = "https://opencode.ai/zen/v1/chat/completions";
 
-/// Bottom-bar provider label. All six free remote models are served via OpenCode Zen.
+/// Bottom-bar provider label. All listed free remote models are served via OpenCode Zen.
 #[allow(dead_code)]
 pub fn provider_for_model(model_id: &str) -> &'static str {
 	if model_id.contains("qwen")

@@ -3531,6 +3531,7 @@ pub(crate) fn resolve_model_list(
     prefetched: Option<IndexMap<String, ModelEntry>>,
 ) -> IndexMap<String, ModelEntry> {
     let mut resolved: IndexMap<String, ModelEntry> = IndexMap::new();
+    let had_prefetched_models = prefetched.is_some();
     if cfg.endpoints.has_custom_endpoint() {
         tracing::info!(
             models_base_url = ?cfg.endpoints.models_base_url,
@@ -3544,6 +3545,14 @@ pub(crate) fn resolve_model_list(
     }
     if let Some(mut prefetched) = prefetched {
         tracing::debug!(count = prefetched.len(), "loaded prefetched models");
+        prefetched.retain(|key, entry| {
+            let keep =
+                !super::community_models::is_stale_bundled_local_model(key, &entry.info.model);
+            if !keep {
+                tracing::debug!(model_key = %key, "removed obsolete bundled local model entry");
+            }
+            keep
+        });
         let default_cw = DEFAULT_CONTEXT_WINDOW;
         for (key, entry) in prefetched.iter_mut() {
             let donor = resolved.get(key);
@@ -3588,6 +3597,18 @@ pub(crate) fn resolve_model_list(
         for (key, entry) in super::community_models::cached_local_model_entries() {
             resolved.insert(key, ModelEntry::from_config_entry(&entry));
         }
+    }
+    // Environment-backed provider models are local catalog data, not part of
+    // the xAI prefetch response. Inject them after both default and prefetched
+    // assembly so a remote refresh cannot hide an already configured provider.
+    // Environment-backed providers must be visible on the first `/model`
+    // request too; waiting for a remote prefetch or custom endpoint made
+    // already-configured OpenRouter/Groq/etc. providers disappear from the
+    // suggestion box.
+    for (key, entry) in super::community_models::configured_catalog_model_entries() {
+        resolved
+            .entry(key)
+            .or_insert_with(|| ModelEntry::from_config_entry(&entry));
     }
     for (key, model_override) in &cfg.config_models {
         let had_base = resolved.contains_key(key);
@@ -3900,6 +3921,9 @@ fn default_models(endpoints: &EndpointsConfig) -> IndexMap<String, ModelEntryCon
         map.insert(key, entry);
     }
     for (key, entry) in super::community_models::cached_local_model_entries() {
+        map.insert(key, entry);
+    }
+    for (key, entry) in super::community_models::configured_catalog_model_entries() {
         map.insert(key, entry);
     }
 
@@ -5484,6 +5508,23 @@ fn model_provider_label(entry: &ModelEntry) -> Option<String> {
     }
     if lower.contains("openrouter.ai") {
         return Some("OpenRouter".to_string());
+    }
+    for (needle, label) in [
+        ("cerebras", "Cerebras"),
+        ("cohere", "Cohere"),
+        ("deepseek", "DeepSeek"),
+        ("github.ai", "GitHub Models"),
+        ("generativelanguage.googleapis.com", "Google Gemini"),
+        ("groq", "Groq"),
+        ("huggingface", "Hugging Face"),
+        ("mistral", "Mistral"),
+        ("api.openai.com", "OpenAI"),
+        ("sambanova", "SambaNova"),
+        ("together", "Together AI"),
+    ] {
+        if lower.contains(needle) {
+            return Some(label.to_string());
+        }
     }
     if lower.contains("x.ai") || lower.contains("grok.com") {
         return Some("xAI Grok".to_string());

@@ -39,13 +39,15 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
 /// Convert canonical definitions into compact native registrations.
 ///
 /// Built-in schemas are represented by the prompt-side Dx Serializer Compact
-/// catalog to avoid sending the full native JSON payload. Unknown definitions,
-/// including MCP tools, remain intact.
+/// catalog to avoid sending the full native JSON payload. `{}` is a valid,
+/// permissive JSON Schema and keeps provider adapters on the native JSON path;
+/// the compact catalog carries the parameter contract. Unknown definitions,
+/// including MCP tools, remain intact and retain their real schemas.
 pub fn compact_native_definitions(mut definitions: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
     definitions.retain_mut(|definition| {
         if BUILTIN_TOOL_NAMES.contains(&definition.function.name.as_str()) {
             definition.function.description = None;
-            definition.function.parameters = json!({"type": "object"});
+            definition.function.parameters = json!({});
         }
         true
     });
@@ -80,7 +82,7 @@ mod tests {
         )];
 
         let output = compact_native_definitions(definitions);
-        assert_eq!(output[0].function.parameters, json!({"type": "object"}));
+        assert_eq!(output[0].function.parameters, json!({}));
         assert_eq!(output[0].function.description, None);
     }
 }

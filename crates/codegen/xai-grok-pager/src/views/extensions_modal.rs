@@ -303,6 +303,7 @@ pub(crate) fn test_plugin_info(
         enabled: true,
         version: None,
         description: None,
+        logo_ascii: None,
         skill_count: 0,
         skill_names: vec![],
         agent_count: 0,
@@ -1913,8 +1914,20 @@ pub struct ExtensionsModalState {
     pub provider_connect: crate::views::provider_connect::ProviderConnectState,
     /// ZeroClaw's real messaging-channel inventory and readiness state.
     pub channel_connect: crate::views::channel_connect::ChannelConnectState,
-    /// Source-aware Flow-Like, n8n, and DX node catalog rendered in Connects.
+    /// The currently visible page from the Connects catalog.
     pub connect_nodes: Vec<dx_connect::NodeDefinition>,
+    /// Full Connects catalog, loaded off the UI thread when Connects opens.
+    pub connect_catalog: Vec<dx_connect::NodeDefinition>,
+    /// Full-catalog indices matching the current search query.
+    pub connect_matches: Vec<usize>,
+    /// Number of matching rows currently materialized into `connect_nodes`.
+    pub connect_loaded_count: usize,
+    /// Query used to build `connect_matches`.
+    pub connect_query: String,
+    /// Completion channel for the background catalog scan.
+    pub connect_catalog_rx: Option<std::sync::mpsc::Receiver<Vec<dx_connect::NodeDefinition>>>,
+    /// Whether the background catalog scan is in progress.
+    pub connect_catalog_loading: bool,
     /// Validated Connect configuration summaries keyed by node id.
     pub connect_configurations: std::collections::HashMap<String, ConnectConfigurationState>,
     /// Maps visible row offset to skill index (for mouse click).
@@ -1964,7 +1977,8 @@ pub struct ExtensionsModalState {
     pub entry_non_selectable_clickable: Vec<bool>,
 }
 
-const CONNECTS_INITIAL_LIMIT: usize = 160;
+const CONNECTS_INITIAL_BATCH_SIZE: usize = 160;
+const CONNECTS_BATCH_SIZE: usize = 150;
 
 impl Default for ExtensionsModalState {
     fn default() -> Self {
@@ -1976,7 +1990,7 @@ impl ExtensionsModalState {
     /// Create a new modal state with the given initial tab.
     pub fn new(tab: ExtensionsTab) -> Self {
         let provider_tab = tab == ExtensionsTab::Providers;
-        Self {
+        let mut state = Self {
             window: ModalWindowState::with_tabs(ExtensionsTab::ALL.len()),
             active_tab: tab,
             session_team_id: None,
@@ -2016,7 +2030,13 @@ impl ExtensionsModalState {
             mcps_section_collapse_initialized: false,
             provider_connect: crate::views::provider_connect::ProviderConnectState::new(),
             channel_connect: crate::views::channel_connect::ChannelConnectState::new(),
-            connect_nodes: dx_connect::catalog_limited(CONNECTS_INITIAL_LIMIT),
+            connect_nodes: Vec::new(),
+            connect_catalog: Vec::new(),
+            connect_matches: Vec::new(),
+            connect_loaded_count: 0,
+            connect_query: String::new(),
+            connect_catalog_rx: None,
+            connect_catalog_loading: false,
             connect_configurations: std::collections::HashMap::new(),
             skills_visible_map: Vec::new(),
             skills_expanded: std::collections::HashSet::new(),
@@ -2044,7 +2064,116 @@ impl ExtensionsModalState {
             entry_group_keys: Vec::new(),
             entry_non_selectable: Vec::new(),
             entry_non_selectable_clickable: Vec::new(),
+        };
+        if tab == ExtensionsTab::Connects {
+            state.start_connect_catalog_load();
         }
+        state
+    }
+
+    /// Start the full Connects catalog scan without blocking the TUI thread.
+    pub fn start_connect_catalog_load(&mut self) {
+        if !self.connect_catalog.is_empty() || self.connect_catalog_loading {
+            return;
+        }
+        // Put the first page on screen immediately. The complete catalog is
+        // still scanned in the worker below, but Connects must never open as
+        // an empty surface while that scan is in progress.
+        if self.connect_nodes.is_empty() {
+            self.connect_nodes = dx_connect::catalog_limited(CONNECTS_INITIAL_BATCH_SIZE);
+            self.connect_loaded_count = self.connect_nodes.len();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.connect_catalog_loading = true;
+        self.connect_catalog_rx = Some(rx);
+        let spawned = std::thread::Builder::new()
+            .name("dx-connect-catalog".to_string())
+            .spawn(move || {
+                let _ = tx.send(dx_connect::catalog_for_connects_ui());
+            });
+        if spawned.is_err() {
+            self.connect_catalog_loading = false;
+            self.connect_catalog_rx = None;
+        }
+    }
+
+    /// Install a completed background scan, if one is ready.
+    pub fn poll_connect_catalog(&mut self) -> bool {
+        let result = self
+            .connect_catalog_rx
+            .as_ref()
+            .map(std::sync::mpsc::Receiver::try_recv);
+        match result {
+            Some(Ok(catalog)) => {
+                self.connect_catalog_rx = None;
+                self.connect_catalog_loading = false;
+                self.connect_catalog = catalog;
+                let query = self.picker_state.query().to_string();
+                self.rebuild_connect_page(&query);
+                true
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Disconnected)) => {
+                self.connect_catalog_rx = None;
+                self.connect_catalog_loading = false;
+                false
+            }
+            Some(Err(std::sync::mpsc::TryRecvError::Empty)) | None => false,
+        }
+    }
+
+    /// Rebuild the first visible page from the complete catalog.
+    pub fn rebuild_connect_page(&mut self, query: &str) {
+        self.connect_query = query.to_string();
+        self.connect_matches = self
+            .connect_catalog
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                query.is_empty()
+                    || fuzzy_matches(&node.id, query)
+                    || fuzzy_matches(&node.display_name, query)
+                    || fuzzy_matches(&node.description, query)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        self.connect_loaded_count = self.connect_matches.len().min(CONNECTS_INITIAL_BATCH_SIZE);
+        self.refresh_visible_connect_nodes();
+        self.picker_state.selected = 0;
+        self.picker_state.scroll_offset = None;
+        self.picker_state.expanded.clear();
+    }
+
+    /// Materialize the next Connects page when the current one is exhausted.
+    pub fn load_more_connects(&mut self) -> bool {
+        let next =
+            (self.connect_loaded_count + CONNECTS_BATCH_SIZE).min(self.connect_matches.len());
+        if next == self.connect_loaded_count {
+            return false;
+        }
+        self.connect_loaded_count = next;
+        self.refresh_visible_connect_nodes();
+        true
+    }
+
+    fn refresh_visible_connect_nodes(&mut self) {
+        self.connect_nodes = self
+            .connect_matches
+            .iter()
+            .take(self.connect_loaded_count)
+            .filter_map(|&index| self.connect_catalog.get(index).cloned())
+            .collect();
+    }
+
+    /// Apply a changed picker query to the full catalog, when it is available.
+    pub fn sync_connect_query(&mut self) {
+        if self.active_tab != ExtensionsTab::Connects
+            || self.connect_catalog.is_empty()
+            || self.connect_query == self.picker_state.query()
+        {
+            return;
+        }
+        let query = self.picker_state.query().to_string();
+        self.rebuild_connect_page(&query);
     }
 
     /// Advance the result-notice countdown by one animation tick. Returns
@@ -2079,7 +2208,7 @@ impl ExtensionsModalState {
         if self.active_tab == ExtensionsTab::Connect {
             self.channel_connect.refresh();
         } else if self.active_tab == ExtensionsTab::Connects {
-            self.connect_nodes = dx_connect::catalog_limited(CONNECTS_INITIAL_LIMIT);
+            self.start_connect_catalog_load();
         }
         // Clear modal flow state from the previous tab.
         self.input = None;
@@ -2749,6 +2878,9 @@ pub fn render_extensions_modal(
 
     if state.active_tab == ExtensionsTab::Connect {
         state.channel_connect.supervisor = crate::views::channel_connect::supervisor_status();
+    } else if state.active_tab == ExtensionsTab::Connects {
+        state.poll_connect_catalog();
+        state.sync_connect_query();
     }
 
     // Guard: if terminal is too small, bail.
@@ -2882,27 +3014,20 @@ pub fn render_extensions_modal(
             ExtensionsTab::Connect => {
                 for (idx, channel) in state.channel_connect.entries.iter().enumerate() {
                     let entry_index = entry_labels.len();
+                    let expanded = state.picker_state.expanded.contains(&entry_index);
                     entry_labels.push(channel.name.to_string());
                     entry_right_labels.push("[Configure]".to_string());
-                    entry_desc_lines.push(vec![channel.description.to_string()]);
+                    entry_desc_lines.push(if expanded {
+                        vec![channel.description.to_string()]
+                    } else {
+                        Vec::new()
+                    });
                     entry_summary_lines.push(Vec::new());
-                    let fields = if state.picker_state.expanded.contains(&entry_index) {
-                        let mut fields = vec![
-                            ("type".to_string(), channel.kind.to_string()),
-                            (
-                                "status".to_string(),
-                                if channel.configured {
-                                    "Configured".to_string()
-                                } else {
-                                    "Not configured".to_string()
-                                },
-                            ),
-                        ];
-                        if let Some(ascii) = crate::views::extension_assets::channel_ascii(channel)
-                        {
-                            fields.insert(0, ("logo".to_string(), ascii));
-                        }
-                        fields
+                    let fields = if expanded {
+                        vec![(
+                            "logo".to_string(),
+                            crate::views::extension_assets::channel_ascii(channel),
+                        )]
                     } else {
                         Vec::new()
                     };
@@ -2912,11 +3037,7 @@ pub fn render_extensions_modal(
                     entry_indent.push(0);
                     entry_data_indices.push(Some(idx));
                     entry_group_keys.push(None);
-                    entry_badge_text.push(if channel.configured {
-                        "Ready".to_string()
-                    } else {
-                        "Setup".to_string()
-                    });
+                    entry_badge_text.push(String::new());
                     entry_badge_color.push(None);
                 }
                 if let Some(error) = &state.channel_connect.error {
@@ -2935,76 +3056,42 @@ pub fn render_extensions_modal(
                 }
             }
             ExtensionsTab::Connects => {
-                let query = state.picker_state.query();
-                entry_labels.push(format!(
-                    "Connect nodes (showing {} of full catalog)",
-                    state.connect_nodes.len()
-                ));
-                entry_right_labels.push("Workflow nodes".to_string());
-                entry_desc_lines.push(vec![
-                    "Initial node set loaded for responsiveness; search and execution remain available through the connect runtime".to_string(),
-                ]);
-                entry_summary_lines
-                    .push(vec!["/connects run <node-id> <json-context>".to_string()]);
-                entry_fields.push(Vec::new());
-                entry_is_header.push(false);
-                entry_dimmed.push(false);
-                entry_indent.push(0);
-                entry_data_indices.push(None);
-                entry_group_keys.push(None);
-                entry_badge_text.push(String::new());
-                entry_badge_color.push(None);
-                for (node_index, node) in
-                    state.connect_nodes.iter().enumerate().filter(|(_, node)| {
-                        query.is_empty()
-                            || fuzzy_matches(&node.id, query)
-                            || fuzzy_matches(&node.display_name, query)
-                    })
-                {
+                for (node_index, node) in state.connect_nodes.iter().enumerate() {
                     let entry_index = entry_labels.len();
+                    let expanded = state.picker_state.expanded.contains(&entry_index);
                     entry_labels.push(node.display_name.clone());
                     entry_right_labels.push("[Configure]".to_string());
-                    entry_desc_lines.push(vec![node.description.clone()]);
-                    entry_summary_lines.push(vec![format!(
-                        "{} inputs · {} outputs",
-                        node.inputs, node.outputs
-                    )]);
-                    let mut fields = vec![
-                        ("id".to_string(), node.id.clone()),
-                        (
-                            "runtime".to_string(),
-                            match node.backend {
-                                dx_connect::NodeBackend::Native => "native".to_string(),
-                                dx_connect::NodeBackend::FlowLikeAdapter => {
-                                    "WASM runtime".to_string()
-                                }
-                                dx_connect::NodeBackend::N8nAdapter => "Node runtime".to_string(),
-                            },
-                        ),
-                        ("inputs".to_string(), node.inputs.to_string()),
-                        ("outputs".to_string(), node.outputs.to_string()),
-                    ];
-                    if let Some(configuration) = state.connect_configurations.get(&node.id) {
-                        fields.push((
-                            "configuration".to_string(),
-                            format!(
-                                "{} parameters · {} items",
-                                configuration.parameter_count, configuration.item_count
-                            ),
-                        ));
-                    }
-                    if state.picker_state.expanded.contains(&entry_index)
-                        && let Some(ascii) = crate::views::extension_assets::connect_ascii(node)
-                    {
-                        fields.insert(0, ("logo".to_string(), ascii));
-                    }
+                    entry_desc_lines.push(if expanded {
+                        vec![node.description.clone()]
+                    } else {
+                        Vec::new()
+                    });
+                    // Keep the collapsed row compact and the expanded row
+                    // visual: description above, logo art below. Runtime
+                    // metadata belongs in configuration/execution surfaces,
+                    // not beneath the logo in this accordion.
+                    entry_summary_lines.push(Vec::new());
+                    let fields = if expanded {
+                        vec![(
+                            "logo".to_string(),
+                            crate::views::extension_assets::connect_ascii(node),
+                        )]
+                    } else {
+                        Vec::new()
+                    };
                     entry_fields.push(fields);
                     entry_is_header.push(false);
                     entry_dimmed.push(false);
                     entry_indent.push(1);
                     entry_data_indices.push(Some(node_index));
                     entry_group_keys.push(None);
-                    entry_badge_text.push(String::new());
+                    entry_badge_text.push(
+                        state
+                            .connect_configurations
+                            .contains_key(&node.id)
+                            .then(|| "Configured".to_string())
+                            .unwrap_or_default(),
+                    );
                     entry_badge_color.push(None);
                 }
             }
@@ -3246,12 +3333,7 @@ pub fn render_extensions_modal(
                             continue;
                         }
                         for &(pi, plugin) in plugins {
-                            let version_str = plugin
-                                .version
-                                .as_ref()
-                                .map(|v| format!(" v{v}"))
-                                .unwrap_or_default();
-                            entry_labels.push(format!("{}{}", plugin.name, version_str));
+                            entry_labels.push(plugin.name.clone());
                             // This is both a visible status control and the
                             // mouse hit target created after picker rendering.
                             entry_right_labels.push(if plugin.enabled {
@@ -4069,16 +4151,19 @@ pub fn render_extensions_modal(
                 }
             } else {
                 let group_key = entry_group_keys.get(i).and_then(|k| k.as_ref());
-                let is_collapsible = group_key.is_some();
+                let is_connect_item = matches!(
+                    state.active_tab,
+                    ExtensionsTab::Connect | ExtensionsTab::Connects
+                ) && entry_data_indices.get(i).is_some_and(Option::is_some);
+                let is_collapsible = group_key.is_some() || is_connect_item;
                 // For collapsible group headers, `expanded` reflects
                 // whether the group's children are visible (not in the
                 // collapsed set). For regular items, it reflects the
                 // picker's per-row detail expansion.
-                let is_expanded = if is_collapsible {
-                    state.is_group_expanded(i, group_key.unwrap())
-                } else {
-                    state.picker_state.expanded.contains(&i)
-                };
+                let is_expanded = group_key.map_or_else(
+                    || state.picker_state.expanded.contains(&i),
+                    |group_key| state.is_group_expanded(i, group_key),
+                );
                 picker::PickerEntry::Row(picker::PickerRow {
                     label: label.as_str(),
                     right_label: entry_right_labels[i].as_str(),

@@ -581,6 +581,12 @@ pub enum Action {
         display_name: String,
         url: String,
     },
+    /// Download one of the built-in DX showcase videos into the local asset
+    /// cache. The video command keeps playback and download as separate
+    /// actions so selecting the title never performs an unexpected download.
+    DownloadVideo {
+        selector: String,
+    },
     /// Clear the persisted default model (`cfg.models.default = None`).
     /// Active session's model is unchanged; next session resolves
     /// via the shell's default-resolution chain.
@@ -1598,6 +1604,9 @@ pub enum Effect {
         display_name: String,
         url: String,
     },
+    /// Download one of the built-in DX showcase videos to the local asset
+    /// cache without blocking the TUI render loop.
+    DownloadVideo { selector: String },
     /// Switch active model.
     SwitchModel {
         agent_id: AgentId,
@@ -2499,6 +2508,20 @@ pub enum TaskResult {
     /// was attempted.
     ModelDownloadComplete {
         display_name: String,
+        result: Result<std::path::PathBuf, String>,
+    },
+    /// Progress for a showcase-video download. This travels over the same
+    /// bounded UI progress path used by session restore, so the render thread
+    /// never waits on network I/O.
+    VideoDownloadProgress {
+        title: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
+    /// A showcase-video download completed and was atomically moved into the
+    /// DX asset cache.
+    VideoDownloadComplete {
+        title: String,
         result: Result<std::path::PathBuf, String>,
     },
     /// Manual `/compact` command completed.

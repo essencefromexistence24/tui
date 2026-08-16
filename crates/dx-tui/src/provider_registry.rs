@@ -211,6 +211,32 @@ pub fn build_production_model_menu(
 		}
 	}
 
+	// ── Environment-backed providers ─────────────────────────────────────
+	// A key declared by models.dev is enough to make a provider usable: the
+	// request layer resolves the actual secret from the named environment
+	// variable. Never copy the value into the catalog or persistence layer.
+	// This makes providers such as OpenRouter, Groq, DeepSeek, and Together
+	// visible without requiring a second manual connection entry.
+	for provider in &catalog.providers {
+		if provider.api.is_none()
+			|| provider.env.is_empty()
+			|| !provider.env.iter().any(|name| {
+				std::env::var_os(name).is_some_and(|value| !value.is_empty())
+			})
+		{
+			continue;
+		}
+		if connected.iter().any(|conn| conn.id == provider.id) {
+			continue;
+		}
+		for model in provider.models.iter().take(12) {
+			if out.iter().any(|entry| entry.model_id == model.id) {
+				continue;
+			}
+			out.push(ModelEntry::remote(&model.name, &model.id, &provider.name));
+		}
+	}
+
 	// ── models.dev: 75+ providers (real remote catalog) ──────────────────
 	if catalog.provider_count() > 0 {
 		// out.push(ModelEntry::section(format!(
@@ -295,7 +321,7 @@ mod tests {
 		assert!(flow_sec < zen_sec, "Flow must come before Zen");
 		assert!(zen_sec < connect, "Zen must come before Connect action");
 
-		// All six free Zen models present
+		// Every currently advertised free Zen model is present
 		for (_, id) in crate::zen::MODELS {
 			assert!(menu.iter().any(|m| m.model_id == *id), "missing zen model {id}");
 		}

@@ -10,23 +10,38 @@ use std::sync::{Mutex, OnceLock};
 
 use super::channel_connect::ChannelEntry;
 
-/// Read the generated ASCII art for a connect node, if the installed asset
-/// bundle contains it.
-pub fn connect_ascii(node: &dx_connect::NodeDefinition) -> Option<String> {
+/// Read the generated ASCII art for a connect node.
+///
+/// The checked-in/local asset bundle currently covers every discovered node.
+/// The deterministic fallback keeps the accordion renderable when a user has
+/// an older or incomplete asset bundle; network work never runs on the TUI
+/// render thread.
+pub fn connect_ascii(node: &dx_connect::NodeDefinition) -> String {
     let mut stems = Vec::new();
     if let Some(last) = node.id.rsplit('.').next() {
         push_stem_variants(&mut stems, last);
     }
     push_stem_variants(&mut stems, &node.display_name);
-    read_asset("connects", &stems)
+    read_asset("connects", &stems).unwrap_or_else(|| fallback_ascii(&node.display_name))
 }
 
-/// Read the generated ASCII art for a messaging channel, if available.
-pub fn channel_ascii(channel: &ChannelEntry) -> Option<String> {
+/// Read the generated ASCII art for a messaging channel.
+pub fn channel_ascii(channel: &ChannelEntry) -> String {
     let mut stems = Vec::new();
     push_stem_variants(&mut stems, channel.name);
     push_stem_variants(&mut stems, channel.kind);
-    read_asset("channels", &stems)
+    read_asset("channels", &stems).unwrap_or_else(|| fallback_ascii(channel.name))
+}
+
+fn fallback_ascii(raw: &str) -> String {
+    let label: String = raw
+        .trim()
+        .chars()
+        .filter(|character| !character.is_control())
+        .take(18)
+        .collect();
+    let rule = "-".repeat(20);
+    format!("+{rule}+\n| {label:^18} |\n+{rule}+")
 }
 
 fn push_stem_variants(stems: &mut Vec<String>, raw: &str) {

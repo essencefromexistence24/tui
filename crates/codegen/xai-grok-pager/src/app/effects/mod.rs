@@ -15,7 +15,7 @@ pub(super) use helpers::{
     parse_session_load_running_prompt_id, parse_session_scheduler_background_loops,
 };
 pub(crate) use helpers::{
-    EffectMeta, RestoreProgressMsg, SessionFlags, is_disk_full_error,
+    EffectMeta, ProgressMsg, RestoreProgressMsg, SessionFlags, is_disk_full_error,
     persist_permission_mode_and_notify, persist_setting, sanitize_user_error,
 };
 #[cfg(feature = "local-workspace")]
@@ -43,7 +43,7 @@ pub(crate) fn execute(
     acp_tx: &AcpAgentTx,
     cwd: &Path,
     session_flags: &SessionFlags,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<RestoreProgressMsg>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<ProgressMsg>,
 ) -> (bool, EffectMeta) {
     let mut meta = EffectMeta::default();
     let effect_is_send_now = matches!(effect, Effect::SendPromptNow { .. });
@@ -999,10 +999,10 @@ pub(crate) fn execute(
                                 };
                                 if let Some(text) = msg {
                                     let _ = ptx
-                                        .send(RestoreProgressMsg {
+                                        .send(ProgressMsg::Restore(RestoreProgressMsg {
                                             agent_id,
                                             message: text,
-                                        });
+                                        }));
                                 }
                             }),
                         )
@@ -1744,6 +1744,43 @@ pub(crate) fn execute(
                     display_name,
                     result,
                 }
+            });
+        }
+        Effect::DownloadVideo { selector } => {
+            let progress_tx = progress_tx.clone();
+            tasks.spawn(async move {
+                let Some(video) = crate::video_player::showcase_video(&selector) else {
+                    return TaskResult::VideoDownloadComplete {
+                        title: selector,
+                        result: Err("Unknown DX showcase video".to_string()),
+                    };
+                };
+                let title = video.title.to_string();
+                let progress_title = title.clone();
+                let mut last_reported_percent = None;
+                let result = crate::video_player::download_showcase_video(
+                    &selector,
+                    |downloaded, total| {
+                        let percent = total.and_then(|total| {
+                            (total > 0).then(|| downloaded.saturating_mul(100) / total)
+                        });
+                        let should_report = match (percent, last_reported_percent) {
+                            (Some(current), Some(previous)) => current >= previous + 5,
+                            (Some(_), None) => true,
+                            (None, _) => downloaded == 0,
+                        };
+                        if should_report {
+                            last_reported_percent = percent;
+                            let _ = progress_tx.send(ProgressMsg::Video {
+                                title: progress_title.clone(),
+                                downloaded,
+                                total,
+                            });
+                        }
+                    },
+                )
+                .await;
+                TaskResult::VideoDownloadComplete { title, result }
             });
         }
         Effect::SwitchModel {

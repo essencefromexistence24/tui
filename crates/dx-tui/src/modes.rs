@@ -278,7 +278,16 @@ impl ModelEntry {
 	/// The badge is derived from the actual source. Local weights are
 	/// `dx-flow`; XAI/Grok entries are `xai`; other providers keep their name.
 	pub fn provider_badge(&self) -> String {
-		if self.is_local {
+		// Local entries can arrive from a persisted/remote catalog with an
+		// incorrect provider hint.  The model id is authoritative for the two
+		// legacy local models, so never render them as xAI/Grok.
+		let model_id = self.model_id.to_ascii_lowercase();
+		let local_id = model_id == "minicpm5-1b-tooluse"
+			|| model_id == "qwen2.5-coder-1.5b-local"
+			|| model_id.starts_with("local-")
+			|| model_id.ends_with(".gguf")
+			|| model_id.ends_with(".ggml");
+		if self.is_local || local_id {
 			return "dx-flow".to_string();
 		}
 		let provider = self.provider.trim();
@@ -297,7 +306,7 @@ impl ModelEntry {
 	}
 }
 
-/// Catalog of remote OpenCode Zen free models (6). Default is Big Pickle.
+/// Catalog of currently usable OpenCode Zen free models. Default is Big Pickle.
 pub fn remote_models() -> Vec<ModelEntry> {
 	crate::zen::MODELS
 		.iter()
@@ -329,6 +338,14 @@ mod tests {
 	fn local_model_badge_is_dx_flow() {
 		let model = ModelEntry::local("MiniCPM", "minicpm", true);
 		assert_eq!(model.provider_badge(), "dx-flow");
+	}
+
+	#[test]
+	fn legacy_local_ids_cannot_inherit_remote_badges() {
+		for id in ["minicpm5-1b-tooluse", "qwen2.5-coder-1.5b-local"] {
+			let model = ModelEntry::remote("Local model", id, "xAI Grok");
+			assert_eq!(model.provider_badge(), "dx-flow");
+		}
 	}
 
 	#[test]

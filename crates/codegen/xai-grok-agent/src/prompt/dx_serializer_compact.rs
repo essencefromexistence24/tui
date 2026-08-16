@@ -2,6 +2,7 @@
 
 /// Complete built-in tool catalog and its decoding rule.
 pub const TOOL_CATALOG: &str = include_str!("../../templates/dx_serializer_compact_tools.md");
+const CATALOG_MARKER: &str = "Dx Serializer Compact: 26 tools.";
 
 /// Attach the compact tool contract to the canonical system prompt.
 ///
@@ -9,7 +10,7 @@ pub const TOOL_CATALOG: &str = include_str!("../../templates/dx_serializer_compa
 /// conversion (Responses, Chat Completions, and Messages). It is deliberately
 /// idempotent so rebuilds and model switches cannot duplicate the catalog.
 pub fn append_to_system_prompt(prompt: &str) -> String {
-    if prompt.contains("26[name description parameters(required type properties)]") {
+    if prompt.contains(CATALOG_MARKER) {
         prompt.to_owned()
     } else {
         format!("{prompt}\n\n{TOOL_CATALOG}")
@@ -18,12 +19,12 @@ pub fn append_to_system_prompt(prompt: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TOOL_CATALOG, append_to_system_prompt};
+    use super::{CATALOG_MARKER, TOOL_CATALOG, append_to_system_prompt};
 
     #[test]
     fn catalog_is_present_and_complete() {
         assert!(TOOL_CATALOG.contains("Dx Serializer Compact"));
-        assert!(TOOL_CATALOG.contains("26[name description parameters"));
+        assert!(TOOL_CATALOG.contains("Dx Serializer Compact: 26 tools."));
         assert!(TOOL_CATALOG.contains("run_terminal_command"));
         assert!(TOOL_CATALOG.contains("reference_to_video"));
     }
@@ -33,10 +34,6 @@ mod tests {
         let once = append_to_system_prompt("base");
         let twice = append_to_system_prompt(&once);
         assert_eq!(once, twice);
-        assert_eq!(
-            once.matches("26[name description parameters(required type properties)]")
-                .count(),
-            2
-        );
+        assert_eq!(once.matches(CATALOG_MARKER).count(), 1);
     }
 }

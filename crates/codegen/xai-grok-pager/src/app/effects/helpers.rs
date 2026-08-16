@@ -52,9 +52,23 @@ where
 }
 /// Typed progress message for session restore.
 /// Keeps the progress channel from accepting arbitrary `TaskResult` variants.
+#[derive(Debug)]
 pub(crate) struct RestoreProgressMsg {
     pub agent_id: AgentId,
     pub message: String,
+}
+
+/// Progress messages that can arrive without waiting for a JoinSet task to
+/// finish. Keeping the variants typed prevents unrelated effects from
+/// injecting arbitrary actions into the event loop.
+#[derive(Debug)]
+pub(crate) enum ProgressMsg {
+    Restore(RestoreProgressMsg),
+    Video {
+        title: String,
+        downloaded: u64,
+        total: Option<u64>,
+    },
 }
 pub(super) fn log_prompt_result(
     session_id: &acp::SessionId,

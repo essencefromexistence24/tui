@@ -736,6 +736,17 @@ impl AgentView {
             &config,
         );
 
+        // Connects is a paged catalog. Keep the picker responsive by adding
+        // the next 150 matches only when the current page reaches its end.
+        if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Connects
+            && !state.connect_catalog.is_empty()
+            && (state.picker_state.selected + 1 >= state.connect_nodes.len()
+                || state.picker_state.scroll_offset.unwrap_or(0)
+                    >= state.connect_nodes.len().saturating_sub(40))
+        {
+            state.load_more_connects();
+        }
+
         // Search state now lives directly in picker_state (no sync needed).
 
         match outcome {
@@ -1214,6 +1225,17 @@ impl AgentView {
             entry_count,
             &config,
         );
+
+        // Mouse-wheel scrolling does not move the selected row, so use the
+        // picker scroll offset as the second bottom-of-page signal.
+        if state.active_tab == crate::views::extensions_modal::ExtensionsTab::Connects
+            && !state.connect_catalog.is_empty()
+            && (state.picker_state.selected + 1 >= state.connect_nodes.len()
+                || state.picker_state.scroll_offset.unwrap_or(0)
+                    >= state.connect_nodes.len().saturating_sub(40))
+        {
+            state.load_more_connects();
+        }
 
         // Open the connectors URL on mouse-down (parity with Ctrl+O). A section-row
         // click routes as Selected or NonSelectableClick, so intercept both here.
@@ -2716,6 +2738,7 @@ mod extensions_action_target_tests {
             enabled,
             version: None,
             description: None,
+            logo_ascii: None,
             skill_count: 0,
             skill_names: Vec::new(),
             agent_count: 0,
@@ -3474,6 +3497,7 @@ mod extensions_modal_confirmation_tests {
             enabled: true,
             version: None,
             description: None,
+            logo_ascii: None,
             skill_count: 0,
             skill_names: Vec::new(),
             agent_count: 0,

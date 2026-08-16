@@ -4961,6 +4961,7 @@ mod dx_modal_layering_tests {
             crate::app::agent_view::BannerSlotParams::none(),
             &BundleState::default(),
             false,
+            false,
             &mut Vec::new(),
             super::AppRenderParams::default(),
         );

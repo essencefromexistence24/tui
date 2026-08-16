@@ -380,9 +380,9 @@ pub fn external_catalog() -> Vec<NodeDefinition> {
 /// Small deterministic subset used by interactive surfaces that must not
 /// scan the checked-out Flow-Like tree or parse the full n8n inventories.
 pub fn external_catalog_limited(limit: usize) -> Vec<NodeDefinition> {
-    let local = discover_dx_local_nodes();
+    let local = discover_dx_local_nodes_limited(limit);
     if !local.is_empty() {
-        return local.into_iter().take(limit).collect();
+        return local;
     }
 
     let mut nodes = Vec::new();
@@ -407,6 +407,17 @@ pub fn external_catalog_limited(limit: usize) -> Vec<NodeDefinition> {
 /// malformed or incomplete folder is skipped, so one damaged node cannot make
 /// the Extensions modal fail to open.
 fn discover_dx_local_nodes() -> Vec<NodeDefinition> {
+    discover_dx_local_nodes_with_limit(None)
+}
+
+/// Bounded local discovery for interactive surfaces. Directory enumeration is
+/// cheap, but parsing thousands of `node.json` files is not; sort the folder
+/// paths first and parse only the requested page.
+fn discover_dx_local_nodes_limited(limit: usize) -> Vec<NodeDefinition> {
+    discover_dx_local_nodes_with_limit(Some(limit))
+}
+
+fn discover_dx_local_nodes_with_limit(limit: Option<usize>) -> Vec<NodeDefinition> {
     let Some(root) = connects_root() else {
         return Vec::new();
     };
@@ -414,25 +425,31 @@ fn discover_dx_local_nodes() -> Vec<NodeDefinition> {
         return Vec::new();
     };
 
-    let mut nodes = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir()
-            || !path.join("implementation").is_dir()
-            || !path.join("node.json").is_file()
-        {
-            continue;
-        }
+    let mut paths: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path.join("implementation").is_dir()
+                && path.join("node.json").is_file()
+        })
+        .collect();
+    paths.sort();
+    if let Some(limit) = limit {
+        paths.truncate(limit);
+    }
+
+    let mut nodes = Vec::with_capacity(paths.len());
+    for path in paths {
         let Ok(text) = fs::read_to_string(path.join("node.json")) else {
             continue;
         };
         let Ok(node) = serde_json::from_str::<NodeDefinition>(&text) else {
             continue;
         };
-        if node.id.is_empty() || node.display_name.is_empty() {
-            continue;
+        if !node.id.is_empty() && !node.display_name.is_empty() {
+            nodes.push(node);
         }
-        nodes.push(node);
     }
     nodes.sort_by(|a, b| a.id.cmp(&b.id));
     nodes

@@ -175,6 +175,7 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
             .and_then(|meta| meta.get("dxProvider"))
             .and_then(serde_json::Value::as_str)
             .filter(|provider| !provider.is_empty());
+        let provider = inferred_provider(&id.0).or(provider);
         let labeled_name = provider
             .map(|provider| format!("{} ({provider})", info.name))
             .unwrap_or_else(|| info.name.clone());
@@ -203,6 +204,32 @@ fn build_model_items(models: &ModelState) -> Vec<ArgItem> {
         });
     }
     items
+}
+
+/// Fallback provider labels for model metadata produced by older shells or
+/// persisted sessions. The model id remains authoritative for local and Zen
+/// entries, so stale `xAI Grok` metadata cannot leak into `/model`.
+fn inferred_provider(model_id: &str) -> Option<&'static str> {
+    let id = model_id.to_ascii_lowercase();
+    if id == "minicpm5-1b-tooluse"
+        || id == "qwen2.5-coder-1.5b-local"
+        || id.starts_with("local-")
+        || id.ends_with(".gguf")
+        || id.ends_with(".ggml")
+    {
+        return Some("Local");
+    }
+    if matches!(
+        id.as_str(),
+        "big-pickle"
+            | "deepseek-v4-flash-free"
+            | "mimo-v2.5-free"
+            | "hy3-free"
+            | "nemotron-3-ultra-free"
+    ) {
+        return Some("OpenCode Zen");
+    }
+    None
 }
 
 /// One row per effort level for the `/model` chained effort phase.
@@ -245,6 +272,13 @@ mod tests {
         let id = acp::ModelId::new(Arc::from(id));
         let info = acp::ModelInfo::new(id.clone(), name.to_string());
         (id, info)
+    }
+
+    #[test]
+    fn stale_provider_metadata_cannot_mislabel_local_or_zen_models() {
+        assert_eq!(inferred_provider("minicpm5-1b-tooluse"), Some("Local"));
+        assert_eq!(inferred_provider("qwen2.5-coder-1.5b-local"), Some("Local"));
+        assert_eq!(inferred_provider("mimo-v2.5-free"), Some("OpenCode Zen"));
     }
 
     static EMPTY_BUNDLE: crate::app::bundle::BundleState = crate::app::bundle::BundleState {

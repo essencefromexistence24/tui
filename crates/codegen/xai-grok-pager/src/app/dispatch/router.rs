@@ -1116,6 +1116,7 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
             display_name,
             url,
         }],
+        Action::DownloadVideo { selector } => vec![Effect::DownloadVideo { selector }],
         Action::ClearDefaultModel => clear_default_model(app),
         Action::SetForkSecondaryModel(v) => set_fork_secondary_model(app, v),
         Action::ClearForkSecondaryModel => clear_fork_secondary_model(app),

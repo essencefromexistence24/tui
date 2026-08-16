@@ -1539,7 +1539,7 @@ pub(crate) async fn run(
     let mut session_load_barrier = SessionLoadBarrier::new();
     let mut acp_peek: Option<AcpClientMessage> = None;
     let (progress_tx, mut progress_rx) =
-        tokio::sync::mpsc::unbounded_channel::<effects::RestoreProgressMsg>();
+        tokio::sync::mpsc::unbounded_channel::<effects::ProgressMsg>();
     let mut channel_inbound_rx = crate::views::channel_connect::subscribe_inbound();
 
     // Voice STT pipeline is started lazily on first successful `/voice` (see
@@ -2294,9 +2294,22 @@ pub(crate) async fn run(
             }
 
             Some(msg) = progress_rx.recv() => {
-                let result = TaskResult::SessionRestoreProgress {
-                    agent_id: msg.agent_id,
-                    message: msg.message,
+                let result = match msg {
+                    effects::ProgressMsg::Restore(msg) => {
+                        TaskResult::SessionRestoreProgress {
+                            agent_id: msg.agent_id,
+                            message: msg.message,
+                        }
+                    }
+                    effects::ProgressMsg::Video {
+                        title,
+                        downloaded,
+                        total,
+                    } => TaskResult::VideoDownloadProgress {
+                        title,
+                        downloaded,
+                        total,
+                    },
                 };
                 let effs = dispatch::dispatch(Action::TaskComplete(result), &mut app);
                 if process_effects(effs, &mut tasks, &mut app, &progress_tx) {
@@ -3225,7 +3238,7 @@ async fn drain_and_process(
     input_rx: &mut tokio::sync::mpsc::UnboundedReceiver<TimedInputEvent>,
     app: &mut AppView,
     tasks: &mut JoinSet<TaskResult>,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::ProgressMsg>,
     csi_filter: &mut super::csi_filter::CsiFragmentFilter,
     xt_filter: &mut super::xt_filter::XtversionFilter,
 ) -> DrainResult {
@@ -4029,7 +4042,7 @@ fn process_effects(
     effs: Vec<super::actions::Effect>,
     tasks: &mut JoinSet<TaskResult>,
     app: &mut AppView,
-    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::RestoreProgressMsg>,
+    progress_tx: &tokio::sync::mpsc::UnboundedSender<effects::ProgressMsg>,
 ) -> bool {
     let flags = session_flags_for_effects(app, &effs);
     for eff in effs {

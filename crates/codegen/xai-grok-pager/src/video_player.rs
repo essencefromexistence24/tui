@@ -10,23 +10,43 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tokio::io::AsyncWriteExt;
+
 const PLAYER_ENV: &str = "DX_VIDEO_PLAYER";
 const RUNTIME_MANIFEST: &str = "runtime-manifest.txt";
 const SHOWCASE_PLAYLIST: &str = "dx-showcase.m3u8";
 const SHOWCASE_CACHE_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SHOWCASE_CACHE_MIN_BYTES: u64 = 512 * 1024 * 1024;
 const SHOWCASE_CACHE_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
+const SHOWCASE_DOWNLOAD_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
-const SHOWCASE_VIDEOS: &[(&str, &str)] = &[
-    (
-        "Spiderman Into The SpiderVerse",
-        "https://files.catbox.moe/wfyf2z.mp4",
-    ),
-    ("One Piece", "https://files.catbox.moe/ff8oz1.mp4"),
-    (
-        "Frieren Beyond Journey's End",
-        "https://files.catbox.moe/6rtwwl.mp4",
-    ),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ShowcaseVideo {
+    pub selector: &'static str,
+    pub title: &'static str,
+    pub url: &'static str,
+    pub filename: &'static str,
+}
+
+const SHOWCASE_VIDEOS: &[ShowcaseVideo] = &[
+    ShowcaseVideo {
+        selector: "spiderman",
+        title: "Spiderman Into The SpiderVerse",
+        url: "https://files.catbox.moe/wfyf2z.mp4",
+        filename: "spiderman.mp4",
+    },
+    ShowcaseVideo {
+        selector: "one-piece",
+        title: "One Piece",
+        url: "https://files.catbox.moe/ff8oz1.mp4",
+        filename: "one-piece.mp4",
+    },
+    ShowcaseVideo {
+        selector: "frieren",
+        title: "Frieren Beyond Journey's End",
+        url: "https://files.catbox.moe/6rtwwl.mp4",
+        filename: "frieren.mp4",
+    },
 ];
 
 #[cfg(windows)]
@@ -178,6 +198,13 @@ pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlay
     if raw_path.trim().eq_ignore_ascii_case("dx-showcase") {
         return launch_showcase();
     }
+    if let Some(selector) = raw_path
+        .trim()
+        .strip_prefix("dx-showcase:")
+        .filter(|selector| !selector.trim().is_empty())
+    {
+        return launch_showcase_video(selector.trim());
+    }
     let media = resolve_media_source(raw_path, workspace)?;
     let player = resolve_player()?;
 
@@ -207,9 +234,10 @@ pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlay
 
 fn launch_showcase() -> Result<VideoLaunch, VideoPlayerError> {
     validate_graphical_session()?;
-    let base = dirs::data_local_dir()
-        .ok_or_else(|| VideoPlayerError::UnsupportedPlatform("no local data directory".into()))?;
-    let directory = base.join("dx").join("video");
+    let directory = showcase_assets_dir().map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: PathBuf::from("Downloads/Dx/Showcase Videos"),
+        error: std::io::Error::other(error),
+    })?;
     std::fs::create_dir_all(&directory).map_err(|error| VideoPlayerError::PlaylistWrite {
         path: directory.clone(),
         error,
@@ -221,13 +249,19 @@ fn launch_showcase() -> Result<VideoLaunch, VideoPlayerError> {
     })?;
 
     let mut playlist_entries = Vec::with_capacity(SHOWCASE_VIDEOS.len());
-    for (title, url) in SHOWCASE_VIDEOS {
-        playlist_entries.push((*title, (*url).to_owned()));
+    for video in SHOWCASE_VIDEOS {
+        let cached = directory.join(video.filename);
+        let source = if cached.is_file() {
+            cached.to_string_lossy().into_owned()
+        } else {
+            video.url.to_owned()
+        };
+        playlist_entries.push((video.title, source));
     }
     let playlist = directory.join(SHOWCASE_PLAYLIST);
     let mut contents = String::from("#EXTM3U\n");
     for (title, source) in &playlist_entries {
-        contents.push_str(&format!("#EXTINF:-1,{title}\n{source}\n"));
+        contents.push_str(&format!("#EXTINF:-1,{title} (Showcase)\n{source}\n"));
     }
     std::fs::write(&playlist, contents).map_err(|error| VideoPlayerError::PlaylistWrite {
         path: playlist.clone(),
@@ -277,20 +311,173 @@ fn launch_showcase() -> Result<VideoLaunch, VideoPlayerError> {
     })
 }
 
-/// Human-readable state for the `/video` showcase playlist suggestion.
+fn launch_showcase_video(selector: &str) -> Result<VideoLaunch, VideoPlayerError> {
+    let video = showcase_video(selector).ok_or(VideoPlayerError::Usage)?;
+    let assets = showcase_assets_dir().map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: PathBuf::from("dx/assets/video"),
+        error: std::io::Error::other(error),
+    })?;
+    std::fs::create_dir_all(&assets).map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: assets.clone(),
+        error,
+    })?;
+    let cached = assets.join(video.filename);
+    let media = if cached.is_file() {
+        cached
+    } else {
+        PathBuf::from(video.url)
+    };
+    let cache_directory = assets.join("cache");
+    std::fs::create_dir_all(&cache_directory).map_err(|error| VideoPlayerError::PlaylistWrite {
+        path: cache_directory.clone(),
+        error,
+    })?;
+    let player = resolve_player()?;
+    let cache_max_bytes = showcase_cache_max_bytes();
+    let mut command = Command::new(&player.executable);
+    command
+        .arg("--force-window=immediate")
+        .arg("--cache=yes")
+        .arg("--cache-on-disk=yes")
+        .arg(format!("--demuxer-cache-dir={}", cache_directory.display()))
+        .arg("--cache-pause=yes")
+        .arg("--cache-pause-initial=yes")
+        .arg("--cache-pause-wait=3")
+        .arg("--demuxer-cache-unlink-files=whendone")
+        .arg("--cache-secs=60")
+        .arg("--demuxer-readahead-secs=60")
+        .arg(format!(
+            "--demuxer-max-bytes={}MiB",
+            cache_max_bytes / (1024 * 1024)
+        ))
+        .arg("--stream-buffer-size=32MiB")
+        .arg(&media)
+        .current_dir(player.executable.parent().unwrap_or_else(|| Path::new(".")))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    #[cfg(not(windows))]
+    xai_grok_tools::util::detach_std_command(&mut command);
+    let mut child = command.spawn().map_err(|error| VideoPlayerError::Spawn {
+        executable: player.executable.clone(),
+        error,
+    })?;
+    verify_player_started(&mut child, &player.executable)?;
+    Ok(VideoLaunch {
+        media,
+        executable: player.executable,
+    })
+}
+
+pub(crate) fn showcase_video(selector: &str) -> Option<ShowcaseVideo> {
+    SHOWCASE_VIDEOS
+        .iter()
+        .copied()
+        .find(|video| video.selector.eq_ignore_ascii_case(selector.trim()))
+}
+
+pub(crate) fn showcase_assets_dir() -> Result<PathBuf, String> {
+    dirs::download_dir()
+        .map(|base| base.join("Dx").join("Showcase Videos"))
+        .ok_or_else(|| "the OS Downloads directory is unavailable".to_owned())
+}
+
+pub(crate) fn showcase_cached_path(selector: &str) -> Option<PathBuf> {
+    let video = showcase_video(selector)?;
+    Some(showcase_assets_dir().ok()?.join(video.filename))
+}
+
+/// Download a built-in showcase video into the user's OS Downloads directory.
 ///
-/// This is intentionally static: opening the suggestions must never start a
-/// network request or a download worker.
-pub(crate) fn showcase_playlist_status() -> String {
-    format!(
-        "Streams from Catbox · {} videos · player cache enabled",
-        SHOWCASE_VIDEOS.len()
-    )
+/// The final file is never exposed until the complete response has been
+/// flushed and atomically renamed from its `.part` sibling. This prevents an
+/// interrupted download from being mistaken for a playable local asset.
+pub(crate) async fn download_showcase_video(
+    selector: &str,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<PathBuf, String> {
+    let video = showcase_video(selector).ok_or_else(|| "unknown DX showcase video".to_owned())?;
+    let directory = showcase_assets_dir()?;
+    tokio::fs::create_dir_all(&directory)
+        .await
+        .map_err(|error| format!("create video cache {}: {error}", directory.display()))?;
+    let final_path = directory.join(video.filename);
+    if let Ok(metadata) = tokio::fs::metadata(&final_path).await
+        && metadata.is_file()
+        && metadata.len() > 0
+    {
+        progress(metadata.len(), Some(metadata.len()));
+        return Ok(final_path);
+    }
+
+    let partial_path = final_path.with_extension("mp4.part");
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(20))
+        .timeout(Duration::from_secs(900))
+        .build()
+        .map_err(|error| format!("create video download client: {error}"))?;
+    let response = client
+        .get(video.url)
+        .send()
+        .await
+        .map_err(|error| format!("request {}: {error}", video.title))?
+        .error_for_status()
+        .map_err(|error| format!("download {}: {error}", video.title))?;
+    let total = response.content_length();
+    if total.is_some_and(|size| size > SHOWCASE_DOWNLOAD_MAX_BYTES) {
+        return Err(format!("{} exceeds the 4 GiB download limit", video.title));
+    }
+    let mut file = tokio::fs::File::create(&partial_path)
+        .await
+        .map_err(|error| format!("create partial video cache: {error}"))?;
+    let mut downloaded = 0u64;
+    progress(0, total);
+    let mut response = response;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("read {}: {error}", video.title))?
+    {
+        downloaded = downloaded.saturating_add(chunk.len() as u64);
+        if downloaded > SHOWCASE_DOWNLOAD_MAX_BYTES {
+            drop(file);
+            let _ = tokio::fs::remove_file(&partial_path).await;
+            return Err(format!("{} exceeds the 4 GiB download limit", video.title));
+        }
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| format!("write video cache: {error}"))?;
+        progress(downloaded, total);
+    }
+    file.flush()
+        .await
+        .map_err(|error| format!("flush video cache: {error}"))?;
+    file.sync_all()
+        .await
+        .map_err(|error| format!("sync video cache: {error}"))?;
+    drop(file);
+    if let Err(error) = tokio::fs::rename(&partial_path, &final_path).await {
+        if tokio::fs::metadata(&final_path)
+            .await
+            .is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+        {
+            let _ = tokio::fs::remove_file(&partial_path).await;
+        } else {
+            return Err(format!("finalize video cache: {error}"));
+        }
+    }
+    progress(downloaded, total.or(Some(downloaded)));
+    Ok(final_path)
 }
 
 /// Human-readable state for one showcase video suggestion.
-pub(crate) fn showcase_video_status(_selector: &str) -> String {
-    "Streams from Catbox · buffered on demand · no download".to_string()
+pub(crate) fn showcase_video_status(selector: &str) -> String {
+    if let Some(path) = showcase_cached_path(selector)
+        && std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
+    {
+        return "Local cache ready · click to play".to_owned();
+    }
+    "Remote Catbox stream · disk cache on demand".to_owned()
 }
 
 fn showcase_cache_max_bytes() -> u64 {
