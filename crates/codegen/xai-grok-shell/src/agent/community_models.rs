@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 use serde::Deserialize;
@@ -10,6 +12,7 @@ use super::config::{EnvKeys, ModelEntryConfig};
 use xai_grok_config_types::LazinessDetectorPerModelConfig;
 
 const MODELS_DEV_CACHE_FILE: &str = "models-dev.json";
+const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
 
 /// Provider APIs that expose an OpenAI-compatible chat-completions surface.
 /// The models.dev catalog contains many native APIs; only these compatible
@@ -61,6 +64,24 @@ struct ModelsDevModel {
     #[serde(default)]
     context: Option<u64>,
 }
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterModelsResponse {
+    #[serde(default)]
+    data: Vec<OpenRouterModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OpenRouterModel {
+    id: String,
+}
+
+/// Live OpenRouter model IDs for this process. `models.dev` is intentionally
+/// cached for hours, while OpenRouter can remove free endpoints sooner. A
+/// successful live response therefore becomes the authority for OpenRouter;
+/// a failed response leaves the catalog usable offline instead of hiding every
+/// configured model.
+static OPENROUTER_LIVE_MODELS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
 
 pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     let mut map = IndexMap::new();
@@ -144,10 +165,52 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     map
 }
 
-/// Load API-key providers from DX's cached models.dev catalog. This is kept
-/// local and synchronous because it runs during model-map assembly; no network
-/// request is made during startup. A provider is included only when one of its
-/// declared environment variables contains a non-empty value.
+fn live_openrouter_models() -> Option<&'static HashSet<String>> {
+    OPENROUTER_LIVE_MODELS
+        .get_or_init(|| {
+            let key = ["OPENROUTER_API_KEY", "OPENROUTER_KEY"]
+                .into_iter()
+                .find_map(|name| {
+                    std::env::var(name)
+                        .ok()
+                        .map(|value| value.trim().to_owned())
+                        .filter(|value| !value.is_empty())
+                })?;
+            let client = reqwest::blocking::Client::builder()
+                .timeout(std::time::Duration::from_secs(8))
+                .user_agent("dx-tui/openrouter-models")
+                .build()
+                .ok()?;
+            let response = client
+                .get(OPENROUTER_MODELS_URL)
+                .bearer_auth(key)
+                .send()
+                .ok()?;
+            if !response.status().is_success() {
+                tracing::debug!(status = %response.status(), "OpenRouter live model catalog unavailable");
+                return None;
+            }
+            let payload = response.json::<OpenRouterModelsResponse>().ok()?;
+            let ids = payload
+                .data
+                .into_iter()
+                .map(|model| model.id)
+                .filter(|id| !id.trim().is_empty())
+                .collect::<HashSet<_>>();
+            (!ids.is_empty()).then_some(ids)
+        })
+        .as_ref()
+}
+
+fn include_openrouter_model(model_id: &str, live_ids: Option<&HashSet<String>>) -> bool {
+    live_ids.is_none_or(|ids| ids.contains(model_id))
+}
+
+/// Load API-key providers from DX's cached models.dev catalog. OpenRouter
+/// entries are additionally checked once against its live `/models` endpoint
+/// so removed endpoints do not remain selectable. If that check is unavailable,
+/// cached entries remain visible for offline use. A provider is included only
+/// when one of its declared environment variables contains a non-empty value.
 pub(crate) fn configured_catalog_model_entries() -> IndexMap<String, ModelEntryConfig> {
     let Some(cache) = load_models_dev_cache() else {
         return IndexMap::new();
@@ -176,10 +239,20 @@ fn configured_catalog_model_entries_from(
         let Some(base_url) = compatible_provider_endpoint(&provider).map(str::to_owned) else {
             continue;
         };
+        let live_ids = (provider.id == "openrouter")
+            .then(live_openrouter_models)
+            .flatten();
         let provider_name = provider_display_name(&provider.id, provider.name.as_deref());
         for model in provider.models {
             let model_id = model.id.trim();
             if model_id.is_empty() {
+                continue;
+            }
+            if provider.id == "openrouter" && !include_openrouter_model(model_id, live_ids) {
+                tracing::debug!(
+                    model = model_id,
+                    "skipping OpenRouter model absent from live catalog"
+                );
                 continue;
             }
             let key = format!("{}/{}", provider.id, model_id);

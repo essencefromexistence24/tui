@@ -469,13 +469,8 @@ impl AgentView {
                         self.set_active_pane(AgentPane::Prompt, false);
                         return InputOutcome::Action(Action::DownloadVideo { selector });
                     } else if on_scrollbar {
-                        let click_frac =
-                            (mouse.row - dd_area.y) as f64 / dd_area.height.max(1) as f64;
-                        let target = (click_frac * snap.matches.len() as f64) as usize;
-                        let max = snap.matches.len().saturating_sub(1);
-                        let delta = target.min(max) as isize - snap.selected as isize;
-                        self.prompt.slash_move_selection(delta);
-                        self.prompt.slash_preview_current_selection();
+                        self.slash_dropdown_scrollbar_dragging = true;
+                        self.apply_slash_dropdown_scrollbar(mouse.row);
                     } else if let Some(&item_idx) = self
                         .slash_dropdown_hit
                         .row_items
@@ -894,6 +889,10 @@ impl AgentView {
             }
             MouseEventKind::Drag(MouseButton::Left) => {
                 self.pending_link_click = None;
+                if self.slash_dropdown_scrollbar_dragging {
+                    self.apply_slash_dropdown_scrollbar(mouse.row);
+                    return InputOutcome::Changed;
+                }
                 if self.scrollbar_dragging {
                     self.apply_scrollbar_click(mouse.row);
                     return InputOutcome::Changed;
@@ -910,6 +909,10 @@ impl AgentView {
             }
             MouseEventKind::Up(MouseButton::Left) => {
                 self.left_mouse_down = false;
+                if self.slash_dropdown_scrollbar_dragging {
+                    self.slash_dropdown_scrollbar_dragging = false;
+                    return InputOutcome::Changed;
+                }
                 tracing::debug!(
                     event = "scrollback_mouse_up",
                     col = mouse.column,
@@ -1435,6 +1438,27 @@ impl AgentView {
                     .set_scroll_offset(offset.saturating_mul(scale));
             }
         }
+        true
+    }
+
+    /// Apply a slash-dropdown scrollbar click/drag using the dropdown's
+    /// rendered line geometry. Unlike the old one-shot click path, this can
+    /// be called for every mouse drag event, including after the pointer
+    /// leaves the dropdown rectangle.
+    fn apply_slash_dropdown_scrollbar(&mut self, screen_row: u16) -> bool {
+        let Some(area) = self.slash_dropdown_items_area else {
+            return false;
+        };
+        let snap = self.prompt.slash_snapshot();
+        let Some(target) =
+            self.slash_dropdown_hit
+                .scrollbar_target_item(screen_row, area, snap.matches.len())
+        else {
+            return false;
+        };
+        let delta = target as isize - snap.selected as isize;
+        self.prompt.slash_move_selection(delta);
+        self.prompt.slash_preview_current_selection();
         true
     }
 }

@@ -230,6 +230,7 @@ impl AgentView {
             dropdown_items_area: None,
             slash_dropdown_items_area: None,
             slash_dropdown_hit: Default::default(),
+            slash_dropdown_scrollbar_dragging: false,
             completion_dropdown_items_area: None,
             history_dropdown_area: None,
             last_prompt_click_ms: None,

@@ -1189,6 +1189,10 @@ pub struct AgentView {
     /// Slash dropdown hit-test state from the renderer (see
     /// [`crate::views::slash_dropdown::RenderedDropdown`]).
     pub(crate) slash_dropdown_hit: crate::views::slash_dropdown::RenderedDropdown,
+    /// Whether the slash dropdown scrollbar currently owns a left-button
+    /// drag. Kept separate from the scrollback scrollbar state because both
+    /// can receive drag events through this view's global mouse handler.
+    pub(crate) slash_dropdown_scrollbar_dragging: bool,
     /// Cached screen area of the completion dropdown items (for mouse hit-testing).
     pub(crate) completion_dropdown_items_area: Option<Rect>,
     /// Cached screen area of the history search dropdown items (for mouse hit-testing).

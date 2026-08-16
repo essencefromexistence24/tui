@@ -577,6 +577,9 @@ pub struct DashboardState {
     /// Slash dropdown hit-test state from the renderer (see
     /// [`crate::views::slash_dropdown::RenderedDropdown`]).
     pub slash_dropdown_hit: crate::views::slash_dropdown::RenderedDropdown,
+    /// Whether the dashboard slash dropdown scrollbar owns a left-button
+    /// drag. This is separate from agent-view scrollback dragging.
+    pub slash_dropdown_scrollbar_dragging: bool,
     /// Mirror of [`Self::slash_dropdown_items_area`] for the session-less
     /// `@` file-context picker dropdown (set by
     /// `render_file_search_dropdown`).
@@ -1383,6 +1386,7 @@ impl DashboardState {
             new_agent_button_hit: crate::app::agent_view::HitArea::default(),
             slash_dropdown_items_area: None,
             slash_dropdown_hit: Default::default(),
+            slash_dropdown_scrollbar_dragging: false,
             file_search_dropdown_items_area: None,
             list_focused: false,
             overlay_close_hit: crate::app::agent_view::HitArea::default(),
@@ -3681,6 +3685,26 @@ impl DashboardState {
         }
     }
 
+    /// Apply the dashboard slash dropdown scrollbar position to its current
+    /// selection. The rendered geometry accounts for wrapped descriptions,
+    /// so dragging remains aligned with the visible thumb.
+    fn apply_slash_dropdown_scrollbar(&mut self, screen_row: u16) -> bool {
+        let Some(area) = self.slash_dropdown_items_area else {
+            return false;
+        };
+        let snap = self.dispatch.slash_snapshot();
+        let Some(target) =
+            self.slash_dropdown_hit
+                .scrollbar_target_item(screen_row, area, snap.matches.len())
+        else {
+            return false;
+        };
+        let delta = target as isize - snap.selected as isize;
+        self.dispatch.slash_move_selection(delta);
+        self.dispatch.slash_preview_current_selection();
+        true
+    }
+
     fn handle_mouse(&mut self, mouse: &crossterm::event::MouseEvent) -> InputOutcome {
         use crossterm::event::{MouseButton, MouseEventKind};
 
@@ -3861,6 +3885,20 @@ impl DashboardState {
             }
         }
 
+        if self.slash_dropdown_scrollbar_dragging {
+            match mouse.kind {
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    self.apply_slash_dropdown_scrollbar(mouse.row);
+                    return InputOutcome::Changed;
+                }
+                MouseEventKind::Up(MouseButton::Left) => {
+                    self.slash_dropdown_scrollbar_dragging = false;
+                    return InputOutcome::Changed;
+                }
+                _ => {}
+            }
+        }
+
         // Same Drag/Up treatment for the dispatch box, gated off while a
         // peek is open (the dispatch input is hidden then) and in search
         // mode (the search line renders outside the textarea, matching
@@ -3906,12 +3944,8 @@ impl DashboardState {
                     self.set_list_focused(false);
                     return InputOutcome::Action(Action::DownloadVideo { selector });
                 } else if on_scrollbar {
-                    let click_frac = (mouse.row - dd_area.y) as f64 / dd_area.height.max(1) as f64;
-                    let target = (click_frac * snap.matches.len() as f64) as usize;
-                    let max = snap.matches.len().saturating_sub(1);
-                    let delta = target.min(max) as isize - snap.selected as isize;
-                    self.dispatch.slash_move_selection(delta);
-                    self.dispatch.slash_preview_current_selection();
+                    self.slash_dropdown_scrollbar_dragging = true;
+                    self.apply_slash_dropdown_scrollbar(mouse.row);
                 } else if let Some(&item_idx) = self
                     .slash_dropdown_hit
                     .row_items
@@ -9212,6 +9246,9 @@ mod tests {
             row_items: vec![0, 1, 2, 3],
             tag_areas: Vec::new(),
             has_scrollbar: false,
+            item_starts: vec![0, 1, 2, 3],
+            total_lines: 4,
+            visible_lines: 4,
         };
 
         // Seed a model catalog and open `/model ` so arg suggestions exist.
@@ -9287,6 +9324,9 @@ mod tests {
             row_items: vec![0, 1, 2, 3],
             tag_areas: Vec::new(),
             has_scrollbar: false,
+            item_starts: vec![0, 1, 2, 3],
+            total_lines: 4,
+            visible_lines: 4,
         };
         let model_id = acp::ModelId::new("hover-model");
         let mut available = IndexMap::new();

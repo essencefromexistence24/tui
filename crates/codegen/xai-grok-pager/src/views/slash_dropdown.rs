@@ -16,7 +16,9 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::render::SafeBuf;
 use crate::render::line_utils::truncate_str;
-use crate::render::scrollbar::render_scrollbar_styled;
+use crate::render::scrollbar::{
+    ScrollbarClickResult, render_scrollbar_styled, scrollbar_click_to_offset,
+};
 use crate::slash::{MAX_VISIBLE_SUGGESTIONS, SlashSnapshot, SuggestionRow};
 use crate::theme::Theme;
 
@@ -267,6 +269,9 @@ pub fn render_dropdown(
         row_items,
         tag_areas,
         has_scrollbar: needs_scrollbar,
+        item_starts,
+        total_lines,
+        visible_lines: visible_rows,
     }
 }
 
@@ -282,6 +287,55 @@ pub struct RenderedDropdown {
     pub tag_areas: Vec<(Rect, usize)>,
     /// Whether the right 2 columns of the area are the scrollbar gutter.
     pub has_scrollbar: bool,
+    /// Flat-line start offsets for each item. Used to translate a scrollbar
+    /// drag back to the nearest selectable item, including wrapped rows.
+    pub item_starts: Vec<usize>,
+    /// Total rendered lines represented by the scrollbar.
+    pub total_lines: usize,
+    /// Number of lines visible in the dropdown viewport.
+    pub visible_lines: usize,
+}
+
+impl RenderedDropdown {
+    /// Map a scrollbar press/drag to the item that owns the resulting content
+    /// line. This uses the same click math as the chat scrollbar, so the
+    /// dropdown thumb and mouse position stay in sync even when descriptions
+    /// wrap to multiple lines.
+    pub fn scrollbar_target_item(
+        &self,
+        screen_row: u16,
+        area: Rect,
+        item_count: usize,
+    ) -> Option<usize> {
+        if !self.has_scrollbar
+            || area.height == 0
+            || self.total_lines == 0
+            || self.visible_lines == 0
+            || item_count == 0
+        {
+            return None;
+        }
+
+        let cell_index = screen_row
+            .saturating_sub(area.y)
+            .min(area.height.saturating_sub(1));
+        let total_lines = self.total_lines.min(u16::MAX as usize) as u16;
+        let visible_lines = self.visible_lines.min(u16::MAX as usize) as u16;
+        let result = scrollbar_click_to_offset(cell_index, area.height, total_lines, visible_lines);
+        let line_offset = match result {
+            ScrollbarClickResult::Top => 0,
+            ScrollbarClickResult::Bottom => self.total_lines.saturating_sub(self.visible_lines),
+            ScrollbarClickResult::Offset(offset) => offset,
+        }
+        .min(self.total_lines.saturating_sub(1));
+
+        Some(
+            self.item_starts
+                .partition_point(|&start| start <= line_offset)
+                .saturating_sub(1)
+                .min(item_count.saturating_sub(1)),
+        )
+    }
 }
 
 /// Badge geometry shared by [`flat_line_count`] and [`build_item_lines`]
@@ -846,6 +900,33 @@ mod tests {
         assert!(rendered.has_scrollbar, "overflowing lines need a scrollbar");
         assert_eq!(rendered.row_items.len(), rows as usize);
         assert_eq!(rendered.row_items[0], 0, "scroll starts at the top");
+    }
+
+    #[test]
+    fn scrollbar_target_item_uses_wrapped_line_geometry() {
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let theme = Theme::current();
+        let long = "A deliberately verbose description that wraps across many lines so the scrollbar represents content lines, not merely item count.";
+        let matches: Vec<SuggestionRow> = (0..4).map(|i| row(&format!("/cmd{i}"), long)).collect();
+        let width: u16 = 60;
+        let rows = MAX_DROPDOWN_ROWS;
+        let snap = SlashSnapshot {
+            open: true,
+            matches,
+            selected: 0,
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, rows + 2));
+        let area = Rect::new(0, 0, width, rows);
+        let rendered = render_dropdown(&mut buf, area, &snap, None, &theme);
+
+        assert_eq!(rendered.scrollbar_target_item(0, area, 4), Some(0));
+        assert_eq!(
+            rendered.scrollbar_target_item(area.bottom().saturating_sub(1), area, 4),
+            Some(3)
+        );
     }
 
     /// A tagged row renders its title on the left and a right-aligned
