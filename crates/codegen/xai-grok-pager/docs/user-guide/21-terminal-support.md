@@ -1,6 +1,6 @@
 # Terminal Support and Troubleshooting
 
-Grok Build runs as a full-screen TUI. It relies on terminal support for color,
+Dx runs as a full-screen TUI. It relies on terminal support for color,
 clipboard, keyboard input, mouse input, and full-screen display. Terminals,
 multiplexers, containers, and SSH sessions can handle these features differently.
 

@@ -442,8 +442,8 @@ pub(in crate::app::dispatch) fn dispatch_new_session_inner_with_id(
                 crate::dx::DxView::Chat => {}
             }
             agent.dx_ui.view = view;
-            // Splash is the persistent home screen. The two-second intro is
-            // armed later, only when a message is actually submitted.
+            // Splash is the persistent home screen. Submitting a message
+            // opens Chat immediately instead of playing the Matrix intro.
             if view == crate::dx::DxView::Animation {
                 agent.dx_ui.animation.begin_splash();
                 agent.dx_ui.intro_deadline = None;

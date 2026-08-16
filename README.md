@@ -74,18 +74,18 @@ Requirements:
 
 ```sh
 cargo run -p xai-grok-pager-bin              # build + launch the TUI
-cargo build -p xai-grok-pager-bin --release  # release binary: target/release/xai-grok-pager
+cargo build -p xai-grok-pager-bin --release  # release binary: target/release/dx-tui
 cargo check -p xai-grok-pager-bin            # fast validation
 ```
 
-The binary artifact is named `xai-grok-pager`; official installs ship it as
-`grok`. On first launch it opens your browser to authenticate — see the
+The shipped binary is `dx-tui`. On first launch it opens your browser to
+authenticate — see the
 [authentication guide](crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md).
 
 ### DX video playback
 
 The full TUI supports `/video "<path>"`, which opens the media in the separate
-native DX video-player window and leaves Grok's terminal responsive. Relative
+native DX video-player window and leaves Dx's terminal responsive. Relative
 paths are resolved from the active session workspace, so generated video output
 can be played directly. Native-window embedding in a terminal is intentionally
 not supported.
@@ -134,7 +134,7 @@ MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 
 | Path | Contents |
 |------|----------|
-| `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `xai-grok-pager` binary |
+| `crates/codegen/xai-grok-pager-bin` | Composition-root package; builds the `dx-tui` binary |
 | `crates/codegen/xai-grok-pager` | The TUI: scrollback, prompt, modals, rendering |
 | `crates/codegen/xai-grok-shell` | Agent runtime + leader/stdio/headless entry points |
 | `crates/codegen/xai-grok-tools` | Tool implementations (terminal, file edit, search, ...) |

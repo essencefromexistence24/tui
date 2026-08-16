@@ -70,18 +70,17 @@ impl Default for DxUiState {
 }
 
 impl DxUiState {
-    /// Play the selected intro while a message submitted from the carousel is
-    /// being accepted, then reveal Chat after two seconds.
+    /// Leave the splash/carousel and open Chat immediately when a prompt is
+    /// submitted. The Matrix intro used to play for two seconds here and
+    /// covered the turn; prompts now go straight to the conversation.
     pub fn begin_message_intro(&mut self) -> bool {
-        if self.view != DxView::Animation || self.intro_deadline.is_some() {
+        if self.view != DxView::Animation {
             return false;
         }
         self.intro_seen = true;
-        self.animation.begin_intro();
-        self.intro_deadline = Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+        self.intro_deadline = None;
         self.sound.stop_animation_loop();
-        self.sound
-            .start_animation_loop(self.animation.current().sound());
+        self.view = DxView::Chat;
         true
     }
 
@@ -125,7 +124,8 @@ mod tests {
         assert!(state.intro_deadline.is_none());
 
         assert!(state.begin_message_intro());
-        assert!(state.intro_deadline.is_some());
+        assert_eq!(state.view, DxView::Chat);
+        assert!(state.intro_deadline.is_none());
         assert!(state.intro_seen);
     }
 

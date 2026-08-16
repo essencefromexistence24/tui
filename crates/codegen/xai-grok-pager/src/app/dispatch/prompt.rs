@@ -734,8 +734,8 @@ pub(super) fn dispatch_send_prompt_inner(
         }
         return dispatch(Action::Quit, app);
     } else {
-        // Splash remains the idle home screen. Only an accepted model message
-        // starts the selected two-second intro before Chat is revealed.
+        // Splash remains the idle home screen. An accepted model message
+        // opens Chat immediately — no Matrix intro overlay.
         agent.dx_ui.begin_message_intro();
         // ── Server-authoritative immediate send (plain prompt only) ──
         // A plain prompt typed while a turn is RUNNING is sent to the agent
@@ -1443,7 +1443,7 @@ pub(super) fn handle_prompt_response(
                 // title into the body automatically.
                 let notif_title = session_name
                     .map(|s| s.to_string())
-                    .unwrap_or_else(|| "Grok".into());
+                    .unwrap_or_else(|| "Dx".into());
 
                 app.deferred_notification = Some((
                     NotificationEvent {

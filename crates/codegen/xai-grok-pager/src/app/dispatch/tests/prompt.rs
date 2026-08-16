@@ -3,7 +3,7 @@
 use super::*;
 
 #[test]
-fn first_message_from_splash_arms_the_two_second_intro() {
+fn first_message_from_splash_opens_chat_without_intro() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
 
@@ -13,8 +13,8 @@ fn first_message_from_splash_arms_the_two_second_intro() {
     let effects = dispatch(Action::SendPrompt("hello".into()), &mut app);
 
     assert!(matches!(effects.as_slice(), [Effect::SendPrompt { .. }]));
-    assert_eq!(app.agents[&id].dx_ui.view, crate::dx::DxView::Animation);
-    assert!(app.agents[&id].dx_ui.intro_deadline.is_some());
+    assert_eq!(app.agents[&id].dx_ui.view, crate::dx::DxView::Chat);
+    assert!(app.agents[&id].dx_ui.intro_deadline.is_none());
 }
 
 #[test]

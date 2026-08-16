@@ -984,7 +984,8 @@ impl ChatState {
 		if self.animation.animation_mode {
 			self.animation.stop_animation_ambience();
 			self.animation.animation_mode = false;
-			self.play_intro_animation();
+			self.animation.playing_intro = false;
+			self.animation.transition_start_time = None;
 		}
 
 		self.ui.chat_scroll_offset = 0;
