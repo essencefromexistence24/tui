@@ -237,8 +237,11 @@ pub struct ChatRequestMessage {
     pub tool_calls: Vec<ToolCallRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    /// The model used for this message (typically set on assistant responses)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Internal conversation metadata (which model produced this assistant
+    /// turn). Never sent on the OpenAI Chat Completions wire — strict
+    /// providers (Groq, OpenRouter, Together, Fireworks, …) reject it with
+    /// `property 'model_id' is unsupported` on `role: assistant`.
+    #[serde(default, skip_serializing)]
     pub model_id: Option<String>,
     /// The reasoning/thinking content from the model (for models that support extended thinking)
     #[serde(default, skip_serializing_if = "Option::is_none")]

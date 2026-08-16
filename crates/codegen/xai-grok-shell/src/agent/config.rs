@@ -3718,10 +3718,30 @@ pub(crate) fn resolve_model_list(
     }
     apply_global_extra_headers(&mut resolved, &cfg.models);
     apply_global_scalar_defaults(&mut resolved, &cfg.models);
+    hide_provider_stub_entries(&mut resolved);
     for entry in resolved.values_mut() {
         entry.info.derive_reasoning_effort_fields();
     }
     resolved
+}
+
+/// Connecting a provider writes `[model.groq]` (or similar) as a credential
+/// holder. After we expand that provider into `groq/<model>` catalog rows,
+/// the stub key is not a valid wire model id — hide it from `/model`.
+fn hide_provider_stub_entries(resolved: &mut IndexMap<String, ModelEntry>) {
+    let parents: std::collections::HashSet<String> = resolved
+        .keys()
+        .filter_map(|key| key.split_once('/').map(|(provider, _)| provider.to_string()))
+        .collect();
+    if parents.is_empty() {
+        return;
+    }
+    for (key, entry) in resolved.iter_mut() {
+        if parents.contains(key) {
+            entry.info.hidden = true;
+            entry.info.user_selectable = false;
+        }
+    }
 }
 /// Layer 6 of [`resolve_model_list`]: fold the global `[models].extra_headers`
 /// into every model as a base. The presence check is case-insensitive because

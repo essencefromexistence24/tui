@@ -467,7 +467,8 @@ impl SessionActor {
             });
         let creds = self.chat_state_handle.get_credentials().await;
         let model_facts = self.model_auth_facts(cfg.model.as_str());
-        let codex_credentials = if crate::auth::codex::is_codex_endpoint(&cfg.base_url) {
+        let is_codex = crate::auth::codex::is_codex_endpoint(&cfg.base_url);
+        let codex_credentials = if is_codex {
             crate::auth::codex::resolve_credentials()
                 .await
                 .ok()
@@ -535,7 +536,11 @@ impl SessionActor {
             max_completion_tokens: cfg.max_completion_tokens,
             temperature: cfg.temperature,
             top_p: cfg.top_p,
-            api_backend: cfg.api_backend,
+            api_backend: if is_codex {
+                crate::sampling::ApiBackend::Responses
+            } else {
+                cfg.api_backend
+            },
             auth_scheme,
             extra_headers,
             query_params: cfg.query_params.clone(),

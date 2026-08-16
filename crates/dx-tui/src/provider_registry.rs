@@ -1,70 +1,11 @@
 //! Unified provider registry: models.dev ∪ Zen ∪ OmniRoute ∪ connected store.
 
-use std::collections::HashSet;
-use std::sync::OnceLock;
-
 use crate::{
 	modes::ModelEntry,
 	omniroute,
 	providers::{CatalogProvider, ModelsDevCatalog, ProviderStore},
 	zen,
 };
-
-const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
-
-#[derive(serde::Deserialize)]
-struct OpenRouterModelsResponse {
-	#[serde(default)]
-	data: Vec<OpenRouterModel>,
-}
-
-#[derive(serde::Deserialize)]
-struct OpenRouterModel {
-	id: String,
-}
-
-static OPENROUTER_LIVE_MODELS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
-
-fn live_openrouter_models() -> Option<&'static HashSet<String>> {
-	OPENROUTER_LIVE_MODELS
-		.get_or_init(|| {
-			let key = ["OPENROUTER_API_KEY", "OPENROUTER_KEY"]
-				.into_iter()
-				.find_map(|name| {
-					std::env::var(name)
-						.ok()
-						.map(|value| value.trim().to_owned())
-						.filter(|value| !value.is_empty())
-				})?;
-			let client = reqwest::blocking::Client::builder()
-				.timeout(std::time::Duration::from_secs(8))
-				.user_agent("dx-tui/openrouter-models")
-				.build()
-				.ok()?;
-			let response = client
-				.get(OPENROUTER_MODELS_URL)
-				.bearer_auth(key)
-				.send()
-				.ok()?;
-			if !response.status().is_success() {
-				tracing::debug!(status = %response.status(), "OpenRouter live model catalog unavailable");
-				return None;
-			}
-			let payload = response.json::<OpenRouterModelsResponse>().ok()?;
-			let ids = payload
-				.data
-				.into_iter()
-				.map(|model| model.id)
-				.filter(|id| !id.trim().is_empty())
-				.collect::<HashSet<_>>();
-			(!ids.is_empty()).then_some(ids)
-		})
-		.as_ref()
-}
-
-fn include_openrouter_model(model_id: &str, live_ids: Option<&HashSet<String>>) -> bool {
-	live_ids.is_none_or(|ids| ids.contains(model_id))
-}
 
 /// OpenAI-compatible endpoints for providers whose models.dev record may omit
 /// `api`. These are only used when the corresponding credential is present.
@@ -78,6 +19,7 @@ pub fn compatible_provider_endpoint(id: &str) -> Option<&'static str> {
 		"groq" => Some("https://api.groq.com/openai/v1"),
 		"huggingface" => Some("https://router.huggingface.co/v1"),
 		"mistral" => Some("https://api.mistral.ai/v1"),
+		"openai" => Some("https://api.openai.com/v1"),
 		"openrouter" => Some("https://openrouter.ai/api/v1"),
 		"sambanova" => Some("https://api.sambanova.ai/v1"),
 		"togetherai" => Some("https://api.together.xyz/v1"),
@@ -318,19 +260,15 @@ pub fn build_production_model_menu(
 				continue;
 			}
 			if let Some(p) = catalog.find_provider(&conn.id) {
-				let live_ids = (p.id == "openrouter")
-					.then(live_openrouter_models)
-					.flatten();
-				for m in p
-					.models
-					.iter()
-					.filter(|m| p.id != "openrouter" || include_openrouter_model(&m.id, live_ids))
-					.take(12)
-				{
-					if out.iter().any(|x| x.model_id == m.id) {
+				for m in &p.models {
+					let model_id = format!("{}/{}", p.id, m.id);
+					if out
+						.iter()
+						.any(|x| x.model_id == m.id || x.model_id == model_id)
+					{
 						continue;
 					}
-					out.push(ModelEntry::remote(&m.name, &m.id, &p.name));
+					out.push(ModelEntry::remote(&m.name, &model_id, &p.name));
 				}
 			} else if let Some(mid) = conn.default_model.as_ref()
 				&& !out.iter().any(|x| x.model_id == *mid)
@@ -358,17 +296,7 @@ pub fn build_production_model_menu(
 		if connected.iter().any(|conn| conn.id == provider.id) {
 			continue;
 		}
-		let live_ids = (provider.id == "openrouter")
-			.then(live_openrouter_models)
-			.flatten();
-		for model in provider
-			.models
-			.iter()
-			.filter(|model| {
-				provider.id != "openrouter" || include_openrouter_model(&model.id, live_ids)
-			})
-			.take(12)
-		{
+		for model in &provider.models {
 			let model_id = format!("{}/{}", provider.id, model.id);
 			if out
 				.iter()

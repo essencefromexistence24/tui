@@ -252,6 +252,12 @@ fn test_assistant_with_content_and_tool_calls() {
     assert_eq!(chat_msg.text_content(), "Let me help you with that.");
     assert_eq!(chat_msg.tool_calls.len(), 1);
     assert_eq!(chat_msg.model_id, Some("grok-3".to_string()));
+
+    let wire = serde_json::to_value(&chat_msg).expect("serialize assistant wire message");
+    assert!(
+        wire.get("model_id").is_none(),
+        "assistant model_id is internal and must not appear on the Chat Completions wire: {wire}"
+    );
 }
 
 #[test]

@@ -1,18 +1,22 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use indexmap::IndexMap;
 use serde::Deserialize;
+use xai_grok_sampler::AuthScheme;
 
+use crate::auth::codex::CODEX_RESPONSES_URL;
 use crate::sampling::ApiBackend;
 
 use super::config::{EnvKeys, ModelEntryConfig};
 use xai_grok_config_types::LazinessDetectorPerModelConfig;
 
 const MODELS_DEV_CACHE_FILE: &str = "models-dev.json";
-const OPENROUTER_MODELS_URL: &str = "https://openrouter.ai/api/v1/models";
+const COMMUNITY_PROVIDERS_JSON: &str =
+    include_str!("../../../xai-grok-models/community_providers.json");
+const AUTH_PROFILES_FILENAME: &str = "auth-profiles.json";
 
 /// Provider APIs that expose an OpenAI-compatible chat-completions surface.
 /// The models.dev catalog contains many native APIs; only these compatible
@@ -35,7 +39,7 @@ const OPENAI_COMPATIBLE_ENDPOINTS: &[(&str, &str)] = &[
     ("togetherai", "https://api.together.xyz/v1"),
 ];
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ModelsDevCache {
     #[serde(default)]
     providers: Vec<ModelsDevProvider>,
@@ -66,22 +70,40 @@ struct ModelsDevModel {
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenRouterModelsResponse {
-    #[serde(default)]
-    data: Vec<OpenRouterModel>,
+struct CommunityProviderDef {
+    id: String,
+    #[serde(default, rename = "baseUrl")]
+    base_url: String,
+    #[serde(default, rename = "apiBackend")]
+    api_backend: String,
+    #[serde(default, rename = "authScheme")]
+    auth_scheme: String,
+    #[serde(default, rename = "envKeyHint")]
+    #[allow(dead_code)]
+    env_key_hint: String,
 }
 
 #[derive(Debug, Deserialize)]
-struct OpenRouterModel {
-    id: String,
+struct AuthProfilesIndex {
+    #[serde(default)]
+    profiles: serde_json::Map<String, serde_json::Value>,
+    #[serde(default)]
+    active_profiles: serde_json::Map<String, serde_json::Value>,
 }
 
-/// Live OpenRouter model IDs for this process. `models.dev` is intentionally
-/// cached for hours, while OpenRouter can remove free endpoints sooner. A
-/// successful live response therefore becomes the authority for OpenRouter;
-/// a failed response leaves the catalog usable offline instead of hiding every
-/// configured model.
-static OPENROUTER_LIVE_MODELS: OnceLock<Option<HashSet<String>>> = OnceLock::new();
+const CODEX_OAUTH_MODELS: &[(&str, &str, u64)] = &[
+    ("gpt-5.3-codex", "GPT-5.3 Codex", 256_000),
+    ("gpt-5.2-codex", "GPT-5.2 Codex", 256_000),
+    ("gpt-5.1-codex", "GPT-5.1 Codex", 256_000),
+    ("gpt-5.1-codex-max", "GPT-5.1 Codex Max", 256_000),
+    ("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 256_000),
+    ("gpt-5-codex", "GPT-5 Codex", 256_000),
+    ("gpt-5.4", "GPT-5.4", 256_000),
+    ("gpt-5.1", "GPT-5.1", 256_000),
+    ("o3", "o3", 200_000),
+    ("o4-mini", "o4-mini", 200_000),
+    ("gpt-4.1", "GPT-4.1", 1_047_576),
+];
 
 pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     let mut map = IndexMap::new();
@@ -165,97 +187,57 @@ pub(crate) fn builtin_community_models() -> IndexMap<String, ModelEntryConfig> {
     map
 }
 
-fn live_openrouter_models() -> Option<&'static HashSet<String>> {
-    OPENROUTER_LIVE_MODELS
-        .get_or_init(|| {
-            let key = ["OPENROUTER_API_KEY", "OPENROUTER_KEY"]
-                .into_iter()
-                .find_map(|name| {
-                    std::env::var(name)
-                        .ok()
-                        .map(|value| value.trim().to_owned())
-                        .filter(|value| !value.is_empty())
-                })?;
-            let client = reqwest::blocking::Client::builder()
-                .timeout(std::time::Duration::from_secs(8))
-                .user_agent("dx-tui/openrouter-models")
-                .build()
-                .ok()?;
-            let response = client
-                .get(OPENROUTER_MODELS_URL)
-                .bearer_auth(key)
-                .send()
-                .ok()?;
-            if !response.status().is_success() {
-                tracing::debug!(status = %response.status(), "OpenRouter live model catalog unavailable");
-                return None;
-            }
-            let payload = response.json::<OpenRouterModelsResponse>().ok()?;
-            let ids = payload
-                .data
-                .into_iter()
-                .map(|model| model.id)
-                .filter(|id| !id.trim().is_empty())
-                .collect::<HashSet<_>>();
-            (!ids.is_empty()).then_some(ids)
-        })
-        .as_ref()
-}
-
-fn include_openrouter_model(model_id: &str, live_ids: Option<&HashSet<String>>) -> bool {
-    live_ids.is_none_or(|ids| ids.contains(model_id))
-}
-
-/// Load API-key providers from DX's cached models.dev catalog. OpenRouter
-/// entries are additionally checked once against its live `/models` endpoint
-/// so removed endpoints do not remain selectable. If that check is unavailable,
-/// cached entries remain visible for offline use. A provider is included only
-/// when one of its declared environment variables contains a non-empty value.
+/// Load models for providers that this user actually connected: a dedicated
+/// environment key, an OAuth/token profile under `~/.grok/agent`, or a
+/// `[model.<provider>]` / `[model.<provider>/…]` table in Grok config.
+///
+/// Providers without a known request adapter are skipped even if some other
+/// tool on the machine exported a similarly named environment variable.
 pub(crate) fn configured_catalog_model_entries() -> IndexMap<String, ModelEntryConfig> {
-    let Some(cache) = load_models_dev_cache() else {
-        return IndexMap::new();
-    };
-    configured_catalog_model_entries_from(cache, |name| {
-        std::env::var(name)
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-    })
+    let cache = load_models_dev_cache().unwrap_or_default();
+    let connected = connected_provider_ids(&cache, |name| env_is_set(name));
+    let api_keys = grok_config_provider_api_keys();
+    configured_catalog_model_entries_from(cache, &connected, &api_keys, |name| env_is_set(name))
+}
+
+fn env_is_set(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .is_some_and(|value| !value.trim().is_empty())
 }
 
 fn configured_catalog_model_entries_from(
     cache: ModelsDevCache,
+    connected_ids: &HashSet<String>,
+    api_keys: &HashMap<String, String>,
     is_env_configured: impl Fn(&str) -> bool,
 ) -> IndexMap<String, ModelEntryConfig> {
     let mut entries = IndexMap::new();
+    if connected_ids.contains("openai-codex") {
+        insert_codex_oauth_models(&mut entries);
+    }
     for provider in cache.providers {
+        if !provider_is_connected(&provider, connected_ids, &is_env_configured) {
+            continue;
+        }
+        let Some((base_url, api_backend, auth_scheme)) = resolve_provider_route(&provider) else {
+            continue;
+        };
         let env_names = provider_env_names(&provider);
-        let Some(env_key) = env_names
+        let env_key = env_names
             .iter()
-            .find(|name| is_env_configured(name))
-            .map(|_| EnvKeys::new(env_names.clone()))
-        else {
-            continue;
-        };
-        let Some(base_url) = compatible_provider_endpoint(&provider).map(str::to_owned) else {
-            continue;
-        };
-        let live_ids = (provider.id == "openrouter")
-            .then(live_openrouter_models)
-            .flatten();
+            .any(|name| is_env_configured(name))
+            .then(|| EnvKeys::new(env_names));
         let provider_name = provider_display_name(&provider.id, provider.name.as_deref());
         for model in provider.models {
             let model_id = model.id.trim();
             if model_id.is_empty() {
                 continue;
             }
-            if provider.id == "openrouter" && !include_openrouter_model(model_id, live_ids) {
-                tracing::debug!(
-                    model = model_id,
-                    "skipping OpenRouter model absent from live catalog"
-                );
+            let key = format!("{}/{}", provider.id, model_id);
+            if entries.contains_key(&key) {
                 continue;
             }
-            let key = format!("{}/{}", provider.id, model_id);
             let display_name = model
                 .name
                 .filter(|name| !name.trim().is_empty())
@@ -269,14 +251,14 @@ fn configured_catalog_model_entries_from(
                     base_url: base_url.clone(),
                     api_base_url: None,
                     name: Some(format!("{display_name} ({provider_name})")),
-                    description: Some(format!("{provider_name} API-key model")),
+                    description: Some(format!("{provider_name} connected model")),
                     max_completion_tokens: None,
                     temperature: None,
                     top_p: None,
-                    api_key: None,
-                    env_key: Some(env_key.clone()),
-                    api_backend: ApiBackend::ChatCompletions,
-                    auth_scheme: None,
+                    api_key: api_keys.get(&provider.id).cloned(),
+                    env_key: env_key.clone(),
+                    api_backend: api_backend.clone(),
+                    auth_scheme,
                     reasoning_effort: None,
                     supports_reasoning_effort: model.reasoning,
                     reasoning_efforts: Vec::new(),
@@ -286,7 +268,11 @@ fn configured_catalog_model_entries_from(
                     auto_compact_threshold_percent: None,
                     system_prompt_label: None,
                     use_concise: false,
-                    agent_type: "grok-build".to_owned(),
+                    agent_type: if provider.id == "openai-codex" {
+                        "codex".to_owned()
+                    } else {
+                        "grok-build".to_owned()
+                    },
                     inference_idle_timeout_secs: Some(300),
                     max_retries: None,
                     hidden: false,
@@ -305,6 +291,208 @@ fn configured_catalog_model_entries_from(
     entries
 }
 
+fn insert_codex_oauth_models(entries: &mut IndexMap<String, ModelEntryConfig>) {
+    for (id, name, ctx) in CODEX_OAUTH_MODELS {
+        let key = format!("openai-codex/{id}");
+        entries.insert(
+            key.clone(),
+            ModelEntryConfig {
+                id: Some(key),
+                model: (*id).to_owned(),
+                base_url: CODEX_RESPONSES_URL.to_owned(),
+                api_base_url: None,
+                name: Some(format!("{name} (OpenAI Codex)")),
+                description: Some("ChatGPT / Codex OAuth model".to_owned()),
+                max_completion_tokens: None,
+                temperature: None,
+                top_p: None,
+                api_key: None,
+                env_key: None,
+                api_backend: ApiBackend::Responses,
+                auth_scheme: Some(AuthScheme::Bearer),
+                reasoning_effort: None,
+                supports_reasoning_effort: true,
+                reasoning_efforts: Vec::new(),
+                extra_headers: IndexMap::new(),
+                context_window: NonZeroU64::new(*ctx).expect("codex context is non-zero"),
+                auto_compact_threshold_percent: None,
+                system_prompt_label: None,
+                use_concise: false,
+                agent_type: "codex".to_owned(),
+                inference_idle_timeout_secs: Some(300),
+                max_retries: None,
+                hidden: false,
+                supported_in_api: true,
+                supports_backend_search: false,
+                compactions_remaining: None,
+                compaction_at_tokens: None,
+                show_model_fingerprint: false,
+                stream_tool_calls: None,
+                local_model_path: None,
+                laziness_detector: LazinessDetectorPerModelConfig::default(),
+            },
+        );
+    }
+}
+
+fn provider_is_connected(
+    provider: &ModelsDevProvider,
+    connected_ids: &HashSet<String>,
+    is_env_configured: &impl Fn(&str) -> bool,
+) -> bool {
+    if connected_ids.contains(&provider.id) {
+        return true;
+    }
+    provider_env_names(provider)
+        .iter()
+        .any(|name| is_env_configured(name))
+}
+
+fn connected_provider_ids(
+    cache: &ModelsDevCache,
+    is_env_configured: impl Fn(&str) -> bool,
+) -> HashSet<String> {
+    let mut ids = HashSet::new();
+    for provider in oauth_connected_provider_ids() {
+        ids.insert(provider);
+    }
+    for id in grok_config_connected_provider_ids() {
+        ids.insert(id);
+    }
+    for provider in &cache.providers {
+        if provider_env_names(provider)
+            .iter()
+            .any(|name| is_env_configured(name))
+        {
+            ids.insert(provider.id.clone());
+        }
+    }
+    ids
+}
+
+fn grok_config_connected_provider_ids() -> HashSet<String> {
+    grok_config_model_table()
+        .map(|models| {
+            models
+                .keys()
+                .map(|key| key.split('/').next().unwrap_or(key).to_string())
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// API keys saved under `[model.<provider>]` / `[model.<provider>/…]`.
+/// Applied to every expanded catalog model for that provider so a Connect
+/// flow that writes the key into config.toml actually authenticates.
+fn grok_config_provider_api_keys() -> HashMap<String, String> {
+    let Some(models) = grok_config_model_table() else {
+        return HashMap::new();
+    };
+    let mut keys = HashMap::new();
+    for (key, value) in models {
+        let Some(table) = value.as_table() else {
+            continue;
+        };
+        let Some(api_key) = table
+            .get("api_key")
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+        else {
+            continue;
+        };
+        let provider = key.split('/').next().unwrap_or(key.as_str());
+        keys.entry(provider.to_string()).or_insert_with(|| api_key.to_string());
+    }
+    keys
+}
+
+fn grok_config_model_table() -> Option<toml::Table> {
+    let path = crate::util::grok_home::grok_home().join("config.toml");
+    let text = std::fs::read_to_string(path).ok()?;
+    let doc = text.parse::<toml::Table>().ok()?;
+    doc.get("model")?.as_table().cloned()
+}
+
+fn oauth_connected_provider_ids() -> HashSet<String> {
+    let path = crate::util::grok_home::grok_home()
+        .join("agent")
+        .join(AUTH_PROFILES_FILENAME);
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return HashSet::new();
+    };
+    let Ok(index) = serde_json::from_str::<AuthProfilesIndex>(&text) else {
+        return HashSet::new();
+    };
+    let mut ids = HashSet::new();
+    for key in index.profiles.keys().chain(index.active_profiles.keys()) {
+        if let Some(provider) = key.split(':').next()
+            && !provider.is_empty()
+        {
+            ids.insert(provider.to_string());
+        }
+    }
+    ids
+}
+
+fn community_provider_defs() -> &'static [CommunityProviderDef] {
+    static DEFS: OnceLock<Vec<CommunityProviderDef>> = OnceLock::new();
+    DEFS.get_or_init(|| serde_json::from_str(COMMUNITY_PROVIDERS_JSON).unwrap_or_default())
+}
+
+fn community_provider(id: &str) -> Option<&'static CommunityProviderDef> {
+    community_provider_defs()
+        .iter()
+        .find(|provider| provider.id == id)
+}
+
+fn parse_api_backend(value: &str) -> Option<ApiBackend> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "chat_completions" | "openai" | "openai-compatible" => {
+            Some(ApiBackend::ChatCompletions)
+        }
+        "responses" => Some(ApiBackend::Responses),
+        "messages" | "anthropic" => Some(ApiBackend::Messages),
+        _ => None,
+    }
+}
+
+fn parse_auth_scheme(value: &str) -> Option<AuthScheme> {
+    match value.trim().to_ascii_lowercase().replace('-', "_").as_str() {
+        "" | "bearer" | "oauth" => Some(AuthScheme::Bearer),
+        "x_api_key" | "xapikey" => Some(AuthScheme::XApiKey),
+        _ => None,
+    }
+}
+
+fn resolve_provider_route(
+    provider: &ModelsDevProvider,
+) -> Option<(String, ApiBackend, Option<AuthScheme>)> {
+    if provider.id == "openai-codex" {
+        return Some((
+            CODEX_RESPONSES_URL.to_owned(),
+            ApiBackend::Responses,
+            Some(AuthScheme::Bearer),
+        ));
+    }
+    if let Some(community) = community_provider(&provider.id) {
+        let backend = parse_api_backend(&community.api_backend)?;
+        let base = if community.base_url.trim().is_empty() {
+            compatible_provider_endpoint(provider)?.to_owned()
+        } else {
+            community.base_url.clone()
+        };
+        return Some((base, backend, parse_auth_scheme(&community.auth_scheme)));
+    }
+    let endpoint = compatible_provider_endpoint(provider)?;
+    Some((
+        endpoint.to_owned(),
+        ApiBackend::ChatCompletions,
+        Some(AuthScheme::Bearer),
+    ))
+}
+
 fn compatible_provider_endpoint(provider: &ModelsDevProvider) -> Option<&str> {
     if let Some((_, endpoint)) = OPENAI_COMPATIBLE_ENDPOINTS
         .iter()
@@ -312,10 +500,17 @@ fn compatible_provider_endpoint(provider: &ModelsDevProvider) -> Option<&str> {
     {
         return Some(*endpoint);
     }
-    provider
-        .api
-        .as_deref()
-        .filter(|api| api.starts_with("https://") && api.contains("/v1"))
+    if let Some(community) = community_provider(&provider.id)
+        && community.base_url.starts_with("https://")
+    {
+        return Some(community.base_url.as_str());
+    }
+    // Only accept models.dev `api` when it is an HTTPS OpenAI-compatible
+    // `/v1` surface. Native-only APIs (Bedrock, Vertex, many China
+    // portals) are listed in the catalog but have no adapter here.
+    provider.api.as_deref().filter(|api| {
+        api.starts_with("https://") && (api.contains("/v1") || api.ends_with("/v1"))
+    })
 }
 
 fn provider_display_name(id: &str, catalog_name: Option<&str>) -> String {
@@ -523,8 +718,11 @@ fn local_model_directories() -> Vec<PathBuf> {
 mod tests {
     use super::{
         ModelsDevCache, builtin_community_models, configured_catalog_model_entries_from,
-        is_supported_local_model_file, local_model_key,
+        insert_codex_oauth_models, is_supported_local_model_file, local_model_key,
     };
+    use crate::sampling::ApiBackend;
+    use indexmap::IndexMap;
+    use std::collections::{HashMap, HashSet};
 
     #[test]
     fn bundled_community_catalog_has_no_local_model_names() {
@@ -572,8 +770,13 @@ mod tests {
             }"#,
         )
         .expect("test models.dev cache");
-        let models =
-            configured_catalog_model_entries_from(cache, |name| name == "OPENROUTER_API_KEY");
+        let connected = HashSet::from(["openrouter".to_string()]);
+        let models = configured_catalog_model_entries_from(
+            cache,
+            &connected,
+            &HashMap::new(),
+            |name| name == "OPENROUTER_API_KEY",
+        );
         let entry = models
             .get("openrouter/qwen/qwen3-coder")
             .expect("configured provider model");
@@ -599,7 +802,47 @@ mod tests {
             }"#,
         )
         .expect("test models.dev cache");
-        let models = configured_catalog_model_entries_from(cache, |_| false);
+        let models =
+            configured_catalog_model_entries_from(cache, &HashSet::new(), &HashMap::new(), |_| false);
         assert!(models.is_empty());
+    }
+
+    #[test]
+    fn config_api_key_is_copied_onto_expanded_models() {
+        let cache: ModelsDevCache = serde_json::from_str(
+            r#"{
+                "providers": [{
+                    "id": "groq",
+                    "name": "Groq",
+                    "env": ["GROQ_API_KEY"],
+                    "api": "https://api.groq.com/openai/v1",
+                    "models": [{ "id": "llama-3.3-70b", "name": "Llama 3.3 70B" }]
+                }]
+            }"#,
+        )
+        .expect("test models.dev cache");
+        let connected = HashSet::from(["groq".to_string()]);
+        let api_keys = HashMap::from([("groq".to_string(), "gsk-test".to_string())]);
+        let models =
+            configured_catalog_model_entries_from(cache, &connected, &api_keys, |_| false);
+        let entry = models
+            .get("groq/llama-3.3-70b")
+            .expect("expanded groq model");
+        assert_eq!(entry.api_key.as_deref(), Some("gsk-test"));
+        assert_eq!(entry.base_url, "https://api.groq.com/openai/v1");
+        assert_eq!(entry.model, "llama-3.3-70b");
+    }
+
+    #[test]
+    fn oauth_codex_injects_responses_models() {
+        let mut entries = IndexMap::new();
+        insert_codex_oauth_models(&mut entries);
+        let entry = entries
+            .get("openai-codex/gpt-5.3-codex")
+            .expect("codex oauth model");
+        assert_eq!(entry.model, "gpt-5.3-codex");
+        assert_eq!(entry.base_url, crate::auth::codex::CODEX_RESPONSES_URL);
+        assert_eq!(entry.api_backend, ApiBackend::Responses);
+        assert_eq!(entry.agent_type, "codex");
     }
 }

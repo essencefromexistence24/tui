@@ -456,9 +456,16 @@ pub(crate) fn poll_oauth_job(state: &mut ProviderConnectState) {
     let name = provider_id.clone();
     match result {
         Ok(()) => {
+            if let Err(error) = mark_oauth_provider_connected(&name) {
+                state.error_message = Some(error);
+                state.status_message = None;
+                return;
+            }
             state.mode = ConnectMode::Browse;
             state.configured_ids = load_configured_providers();
-            state.status_message = Some(format!("{name} OAuth connected."));
+            state.status_message = Some(format!(
+                "{name} OAuth connected. Use /model to pick its models."
+            ));
             state.error_message = None;
         }
         Err(error) => {
@@ -857,30 +864,84 @@ fn zeroclaw_auth_service() -> zeroclaw_providers::auth::AuthService {
 }
 
 fn load_zeroclaw_configured_providers() -> Vec<String> {
-    let service = zeroclaw_auth_service();
-    // This function is called by synchronous TUI rendering code, which may
-    // itself run on Tokio's runtime. Always use a dedicated thread so this
-    // inspection never attempts to nest `block_on` on the UI runtime.
-    std::thread::Builder::new()
-        .name("dx-provider-profile-read".into())
-        .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .ok()?;
-            Some(
-                runtime
-                    .block_on(service.list_profile_ids())
-                    .unwrap_or_default(),
-            )
+    // Read profile IDs from disk. Spawning a Tokio runtime on every
+    // picker render made /providers and /model feel stuck for seconds.
+    let path = grok_home().join("agent").join("auth-profiles.json");
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    if let Some(profiles) = value.get("profiles").and_then(|v| v.as_object()) {
+        ids.extend(
+            profiles
+                .keys()
+                .filter_map(|profile| profile.split(':').next().map(str::to_string)),
+        );
+    }
+    if let Some(active) = value.get("active_profiles").and_then(|v| v.as_object()) {
+        ids.extend(active.keys().map(|provider| provider.to_string()));
+    }
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn mark_oauth_provider_connected(provider_id: &str) -> Result<(), String> {
+    match provider_id {
+        "openai-codex" => save_grok_provider(
+            "openai-codex",
+            "https://chatgpt.com/backend-api/codex/responses",
+            "responses",
+            "bearer",
+            "",
+            false,
+        )
+        .and_then(|_| {
+            // `model` is the slug sent on the wire. A table named
+            // `openai-codex` would otherwise request model="openai-codex".
+            patch_model_slug("openai-codex", "gpt-5.3-codex")
         })
-        .ok()
-        .and_then(|join| join.join().ok())
-        .flatten()
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|profile| profile.split(':').next().map(str::to_string))
-        .collect()
+        .and_then(|_| set_default_model("openai-codex/gpt-5.3-codex")),
+        "gemini-oauth" => Ok(()),
+        "copilot" => Ok(()),
+        _ => Ok(()),
+    }
+}
+
+fn patch_model_slug(provider_id: &str, model: &str) -> Result<(), String> {
+    let config_path = grok_home().join("config.toml");
+    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = content
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Failed to parse Grok config: {e}"))?;
+    let Some(table) = doc
+        .get_mut("model")
+        .and_then(|item| item.as_table_mut())
+        .and_then(|models| models.get_mut(provider_id))
+        .and_then(|item| item.as_table_mut())
+    else {
+        return Ok(());
+    };
+    table["model"] = Value::from(model).into();
+    std::fs::write(&config_path, doc.to_string())
+        .map_err(|e| format!("Failed to update Grok provider model slug: {e}"))
+}
+
+fn set_default_model(model_id: &str) -> Result<(), String> {
+    let config_path = grok_home().join("config.toml");
+    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = content
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Failed to parse Grok config: {e}"))?;
+    let models = doc
+        .entry("models")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    models["default"] = Value::from(model_id).into();
+    std::fs::write(&config_path, doc.to_string())
+        .map_err(|e| format!("Failed to set default model: {e}"))
 }
 
 pub fn load_configured_providers() -> Vec<String> {
@@ -1034,6 +1095,13 @@ pub fn save_provider_config(
 fn grok_protocol_for_provider(
     provider_id: &str,
 ) -> Option<(&'static str, &'static str, &'static str)> {
+    if provider_id == "openai-codex" {
+        return Some((
+            "https://chatgpt.com/backend-api/codex/responses",
+            "responses",
+            "bearer",
+        ));
+    }
     // ZeroClaw's Gemini implementation uses Google's generateContent/SSE
     // protocol, which is not interchangeable with Grok's chat-completions
     // client. Leave it for the dedicated Gemini adapter.
@@ -1076,7 +1144,9 @@ fn save_grok_provider(
     table["base_url"] = Value::from(base_url).into();
     table["api_backend"] = Value::from(api_backend).into();
     table["auth_scheme"] = Value::from(auth_scheme).into();
-    table["api_key"] = Value::from(api_key).into();
+    if !api_key.trim().is_empty() {
+        table["api_key"] = Value::from(api_key).into();
+    }
     if set_default {
         let models = doc
             .entry("models")
