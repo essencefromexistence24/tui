@@ -1888,14 +1888,8 @@ pub(crate) fn render_dropdown_chrome(
         (bottom.saturating_sub(panel_height - 1), bottom)
     };
     let embedded = crate::views::modal_window::embedded();
-    let (hpad_left, hpad_right) = if embedded {
-        (0, 0)
-    } else {
-        (
-            layout_cfg.eff_hpad_left(compact),
-            layout_cfg.eff_hpad_right(compact),
-        )
-    };
+    let hpad_left = layout_cfg.eff_hpad_left(compact);
+    let hpad_right = layout_cfg.eff_hpad_right(compact);
     let panel_x = area.x + hpad_left;
     let panel_width = area.width.saturating_sub(hpad_left + hpad_right);
     if top_border_y >= bottom_border_y || panel_width <= 4 {
@@ -1950,9 +1944,9 @@ pub(crate) fn render_dropdown_chrome(
             buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_w);
         }
     }
-    let content_inset = dropdown_content_inset(layout_cfg, compact);
-    let items_x = layout_prompt.x + content_inset;
-    let items_width = layout_prompt.width.saturating_sub(content_inset);
+    let (content_left, content_right) = dropdown_content_inset(layout_cfg, compact);
+    let items_x = panel_x + content_left;
+    let items_width = panel_width.saturating_sub(content_left + content_right);
     Some(DropdownChrome {
         items: Rect {
             x: items_x,
@@ -1963,25 +1957,33 @@ pub(crate) fn render_dropdown_chrome(
         panel: panel_area,
     })
 }
-/// Left inset of dropdown item rows inside the panel (see the comment in
-/// [`render_dropdown_chrome`]).
-fn dropdown_content_inset(layout_cfg: &crate::appearance::LayoutConfig, compact: bool) -> u16 {
+/// Horizontal inset of dropdown item rows inside the panel. Normal panels
+/// reserve only their border cells; embedded panels use divider rows and
+/// therefore render content edge-to-edge.
+fn dropdown_content_inset(
+    layout_cfg: &crate::appearance::LayoutConfig,
+    compact: bool,
+) -> (u16, u16) {
+    let _ = (layout_cfg, compact);
     if crate::views::modal_window::embedded() {
-        0
+        (0, 0)
     } else {
-        1 + layout_cfg.eff_hpad_left(compact)
+        (1, 1)
     }
 }
 /// Width of the dropdown item rows [`render_dropdown_chrome`] will produce for
 /// `layout_prompt` — for sizing the row count *before* drawing the chrome.
 pub(crate) fn dropdown_items_width(
     layout_prompt: Rect,
-    layout_cfg: &crate::appearance::LayoutConfig,
-    compact: bool,
+    _layout_cfg: &crate::appearance::LayoutConfig,
+    _compact: bool,
 ) -> u16 {
+    let outer_left = _layout_cfg.eff_hpad_left(_compact);
+    let outer_right = _layout_cfg.eff_hpad_right(_compact);
+    let (left, right) = dropdown_content_inset(_layout_cfg, _compact);
     layout_prompt
         .width
-        .saturating_sub(dropdown_content_inset(layout_cfg, compact))
+        .saturating_sub(outer_left + outer_right + left + right)
 }
 /// Geometry returned by [`render_dropdown_chrome`]: the inset `items` area for
 /// rendering rows and the full `panel` rect (borders + padding) used as an

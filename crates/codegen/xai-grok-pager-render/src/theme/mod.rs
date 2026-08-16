@@ -53,8 +53,8 @@ impl ChatTheme {
             .map(|kind| {
                 let name = kind.display_name().to_string();
                 let title = match kind {
-                    ThemeKind::GrokNight => "Grok Night",
-                    ThemeKind::GrokDay => "Grok Day",
+                    ThemeKind::GrokNight => "Dx Night",
+                    ThemeKind::GrokDay => "Dx Day",
                     ThemeKind::TokyoNight => "Tokyo Night",
                     ThemeKind::RosePineMoon => "Rose Pine Moon",
                     ThemeKind::OscuraMidnight => "Oscura Midnight",
@@ -126,9 +126,9 @@ impl ThemeKind {
     /// Human-readable display name.
     pub fn display_name(self) -> &'static str {
         match self {
-            Self::GrokNight => "groknight",
+            Self::GrokNight => "dxnight",
             Self::TokyoNight => "tokyonight",
-            Self::GrokDay => "grokday",
+            Self::GrokDay => "dxday",
             Self::RosePineMoon => "rosepine-moon",
             Self::OscuraMidnight => "oscura-midnight",
             Self::Auto => "auto",
@@ -158,9 +158,9 @@ impl ThemeKind {
         let lower = name.to_lowercase();
         match lower.as_str() {
             "auto" | "system" => Some(Self::Auto),
-            "groknight" | "grok-night" | "dark" => Some(Self::GrokNight),
+            "dxnight" | "dx-night" | "groknight" | "grok-night" | "dark" => Some(Self::GrokNight),
             "tokyonight" | "tokyo-night" | "tokyo" => Some(Self::TokyoNight),
-            "grokday" | "grok-day" | "light" | "day" => Some(Self::GrokDay),
+            "dxday" | "dx-day" | "grokday" | "grok-day" | "light" | "day" => Some(Self::GrokDay),
             "rosepine" | "rose-pine" | "rosepine-moon" | "rose-pine-moon" => {
                 Some(Self::RosePineMoon)
             }
@@ -202,12 +202,12 @@ pub fn canonical_name(value: &str) -> Option<&'static str> {
 }
 
 /// Human-friendly display name for a canonical theme value (e.g.
-/// `"groknight"` → `"Grok Night"`). Falls back to `value` verbatim.
+/// `"groknight"` → `"Dx Night"`). Falls back to `value` verbatim.
 pub fn display_name_for_canonical(value: &str) -> &str {
     match value {
         "auto" => "Auto",
-        "groknight" => "Grok Night",
-        "grokday" => "Grok Day",
+        "dxnight" | "groknight" => "Dx Night",
+        "dxday" | "grokday" => "Dx Day",
         "tokyonight" => "Tokyo Night",
         "rosepine-moon" => "Rose Pine Moon",
         other => dx_theme_title(other).unwrap_or(other),

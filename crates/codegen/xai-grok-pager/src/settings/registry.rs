@@ -617,21 +617,21 @@ pub fn current_value_for(
             ui.theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
-                .unwrap_or("groknight"),
+                .unwrap_or("dxnight"),
         )),
         "auto_dark_theme" => Some(SettingValue::Enum(
             ui.auto_dark_theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
                 .filter(|s| *s != "auto")
-                .unwrap_or("groknight"),
+                .unwrap_or("dxnight"),
         )),
         "auto_light_theme" => Some(SettingValue::Enum(
             ui.auto_light_theme
                 .as_deref()
                 .and_then(crate::theme::canonical_name)
                 .filter(|s| *s != "auto")
-                .unwrap_or("grokday"),
+                .unwrap_or("dxday"),
         )),
         // render_mermaid: SHELL-owned (persisted to `[ui].render_mermaid`).
         // Read from the process-wide cache mirror, which reflects the live value
@@ -871,7 +871,7 @@ mod tests {
                         .theme
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
-                        .unwrap_or("groknight");
+                        .unwrap_or("dxnight");
                     assert_eq!(
                         *default, expected,
                         "theme default drifts from UiConfig::default()",
@@ -887,7 +887,7 @@ mod tests {
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
                         .filter(|s| *s != "auto")
-                        .unwrap_or("groknight");
+                        .unwrap_or("dxnight");
                     assert_eq!(
                         *default, expected,
                         "auto_dark_theme default drifts from UiConfig::default()",
@@ -903,7 +903,7 @@ mod tests {
                         .as_deref()
                         .and_then(crate::theme::canonical_name)
                         .filter(|s| *s != "auto")
-                        .unwrap_or("grokday");
+                        .unwrap_or("dxday");
                     assert_eq!(
                         *default, expected,
                         "auto_light_theme default drifts from UiConfig::default()",

@@ -3155,9 +3155,10 @@ impl AgentView {
                             buf.set_line_safe(hint_x, top_border_y, &hint_line, hint_w);
                         }
                     }
-                    let content_inset = 1 + layout_cfg.eff_hpad_left(compact);
-                    let items_x = layout.prompt.x + content_inset;
-                    let items_width = layout.prompt.width.saturating_sub(content_inset);
+                    let content_left = 1;
+                    let content_right = 1;
+                    let items_x = panel_x + content_left;
+                    let items_width = panel_width.saturating_sub(content_left + content_right);
                     let items_area = Rect {
                         x: items_x,
                         y: top_border_y + 1,
@@ -3302,9 +3303,10 @@ impl AgentView {
                         );
                     }
                 }
-                let content_inset = 1 + layout_cfg.eff_hpad_left(compact);
-                let items_x = layout.prompt.x + content_inset;
-                let items_width = layout.prompt.width.saturating_sub(content_inset);
+                let content_left = 1;
+                let content_right = 1;
+                let items_x = panel_x + content_left;
+                let items_width = panel_width.saturating_sub(content_left + content_right);
                 let items_area_rect = Rect {
                     x: items_x,
                     y: top_border_y + 1,
