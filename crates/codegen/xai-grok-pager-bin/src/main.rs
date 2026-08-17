@@ -1838,6 +1838,9 @@ fn main() {
     if let Some(code) = xai_grok_pager::voice::maybe_run_capture_subprocess() {
         std::process::exit(code);
     }
+    if let Err(error) = xai_grok_pager::views::channel_connect::configure_dx_channel_storage() {
+        eprintln!("Warning: could not initialize Dx channel storage: {error}");
+    }
     let args = PagerArgs::parse_cli();
     if dispatch_version_if_requested(&args) || dispatch_doctor_if_requested(&args) {
         return;

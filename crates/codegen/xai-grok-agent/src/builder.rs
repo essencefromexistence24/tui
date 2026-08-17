@@ -726,12 +726,25 @@ impl AgentBuilder {
                     .tools
                     .push((&memory::get_tool::MemoryGetImpl).into());
             }
-            if self.web_search_config.is_enabled() {
-                use xai_grok_tools::implementations::grok_build;
+            // Keep both web tools in the native definition set even when
+            // their runtime clients are not configured. This keeps the
+            // provider-facing contract aligned with the 26-tool Dx Serializer
+            // Compact catalog; execution still checks the corresponding
+            // runtime client/configuration and returns a useful error when
+            // the capability is unavailable.
+            use xai_grok_tools::implementations::grok_build;
+            let has_web_search = tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.id.ends_with(":web_search"));
+            if !has_web_search {
                 tool_config.tools.push((&grok_build::WebSearchTool).into());
             }
-            if self.web_fetch_config.is_enabled() {
-                use xai_grok_tools::implementations::grok_build;
+            let has_web_fetch = tool_config
+                .tools
+                .iter()
+                .any(|tool| tool.id.ends_with(":web_fetch"));
+            if !has_web_fetch {
                 tool_config.tools.push((&grok_build::WebFetchTool).into());
             }
             if self.lsp.is_some() {

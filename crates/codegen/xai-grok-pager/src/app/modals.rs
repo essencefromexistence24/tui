@@ -442,6 +442,35 @@ impl AgentView {
                     }
                     InputOutcome::Changed
                 }
+                crate::views::provider_connect::input::ConnectOutcome::ConfigureAzure {
+                    resource,
+                    deployment,
+                    api_version,
+                    api_key,
+                    set_default,
+                } => {
+                    if let Err(e) = crate::views::provider_connect::save_azure_provider_config(
+                        &resource,
+                        &deployment,
+                        &api_version,
+                        &api_key,
+                        set_default,
+                    ) {
+                        if let Some(ActiveModal::ProviderConnect { state }) = &mut self.active_modal
+                        {
+                            state.error_message = Some(format!("Failed to save: {e}"));
+                        }
+                    } else if let Some(ActiveModal::ProviderConnect { state }) =
+                        &mut self.active_modal
+                    {
+                        state.configured_ids =
+                            crate::views::provider_connect::load_configured_providers();
+                        state.mode = crate::views::provider_connect::ConnectMode::Browse;
+                        state.status_message =
+                            Some("Azure OpenAI configured! Use /model to select it.".to_string());
+                    }
+                    InputOutcome::Changed
+                }
                 crate::views::provider_connect::input::ConnectOutcome::Unchanged => {
                     InputOutcome::Changed
                 }

@@ -461,50 +461,7 @@ impl SessionActor {
         };
         self.mcp_reminder_dirty
             .store(false, std::sync::atomic::Ordering::Relaxed);
-        let failed_section = {
-            let mcp_state = self.mcp_state.lock().await;
-            let connected_names: std::collections::HashSet<&str> =
-                server_summaries.iter().map(|s| s.name.as_str()).collect();
-            let mut failed: Vec<(String, String)> = Vec::new();
-            for cfg in &mcp_state.configs {
-                let name = mcp_server_name(cfg);
-                if !connected_names.contains(name) && !mcp_state.is_server_handshaking(name) {
-                    let base = if mcp_state.auth_required.contains(name) {
-                        "auth required".to_string()
-                    } else if let Some(detail) =
-                        mcp_state.init_failed.get(name).filter(|d| !d.is_empty())
-                    {
-                        detail.clone()
-                    } else {
-                        "connection failed".to_string()
-                    };
-                    let retries_on_use = !mcp_state.auth_required.contains(name)
-                        && matches!(cfg, acp::McpServer::Http(_) | acp::McpServer::Sse(_));
-                    let reason = if retries_on_use {
-                        format!("{base} — retries automatically on next tool call")
-                    } else {
-                        base
-                    };
-                    failed.push((name.to_string(), reason));
-                }
-            }
-            failed.sort_by(|a, b| a.0.cmp(&b.0));
-            if failed.is_empty() {
-                None
-            } else {
-                let mut s = "\nMCP servers that failed to connect:\n".to_string();
-                for (name, reason) in &failed {
-                    s.push_str(&format!("- {name} ({reason})\n"));
-                }
-                Some(s)
-            }
-        };
         let mut reminder_text = reminder_text;
-        if let Some(ref section) = failed_section {
-            reminder_text
-                .get_or_insert_with(String::new)
-                .push_str(section);
-        }
         if let Some(mut text) = reminder_text {
             if let Some(hint) = self.rendered_mcp_hint().await {
                 text.push_str(&hint);
@@ -512,7 +469,6 @@ impl SessionActor {
             self.push_system_reminder(&text);
             tracing::info!(
                 servers = server_summaries.len(),
-                has_failed = failed_section.is_some(),
                 mode = ?self.mcp_reminder_mode,
                 "Injected MCP server system-reminder"
             );
@@ -1623,7 +1579,8 @@ impl SessionActor {
     /// injector and the `/context` estimate. `None` when the template
     /// fails to render.
     async fn rendered_mcp_hint(&self) -> Option<String> {
-        let hint_template = " search_tool before use_tool; never guess args.";
+        let hint_template =
+            " To use MCP servers, always use search_tool before use_tool; never guess args.";
         self.tool_bridge_handle()
             .render_prompt(hint_template, &serde_json::json!({}))
             .await

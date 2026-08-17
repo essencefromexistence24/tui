@@ -357,6 +357,32 @@ pub fn pretty_plugin_name(raw: &str) -> String {
         .join(" ")
 }
 
+/// Turn a skill identifier into the same human-readable title style used by
+/// the Plugins tab. This is presentation-only; the raw skill name remains the
+/// identifier used by discovery, toggles, and invocation.
+pub fn pretty_skill_name(raw: &str) -> String {
+    raw.trim_start_matches('/')
+        .split(['-', '_', '.', '/', ':'])
+        .filter(|part| !part.is_empty())
+        .map(|part| match part.to_ascii_lowercase().as_str() {
+            "ai" => "AI".to_string(),
+            "api" => "API".to_string(),
+            "cli" => "CLI".to_string(),
+            "mcp" => "MCP".to_string(),
+            "pdf" => "PDF".to_string(),
+            "pptx" => "PPTX".to_string(),
+            value => {
+                let mut chars = value.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 impl PluginGroup {
     fn new(rank: u8, key: &str, label: &str) -> Self {
         Self {
@@ -2790,38 +2816,6 @@ fn filter_and_sort_skills(
     SkillsEntryData { matches }
 }
 
-fn skill_source_str(skill: &SkillInfo) -> String {
-    if let Some(ref cs) = skill.config_source {
-        match cs {
-            xai_grok_tools::types::config_source::ConfigSource::User { path } => {
-                if crate::util::is_under_user_grok_home(path) {
-                    crate::util::display_user_grok_path("skills")
-                } else if path.display().to_string().contains("/.claude/") {
-                    "~/.claude/skills".into()
-                } else {
-                    "user".into()
-                }
-            }
-            xai_grok_tools::types::config_source::ConfigSource::Project { path } => {
-                let s = path.display().to_string();
-                if s.contains("/.grok/") {
-                    ".grok/skills".into()
-                } else if s.contains("/.claude/") {
-                    ".claude/skills".into()
-                } else {
-                    "project".into()
-                }
-            }
-            xai_grok_tools::types::config_source::ConfigSource::Plugin { plugin_name, .. } => {
-                format!("plugin: {}", plugin_name)
-            }
-            _ => format!("{:?}", skill.scope).to_lowercase(),
-        }
-    } else {
-        format!("{:?}", skill.scope).to_lowercase()
-    }
-}
-
 /// Names shown per component category before "+N more".
 const COMPONENT_ITEMS_CAP: usize = 8;
 
@@ -2968,6 +2962,7 @@ pub fn render_extensions_modal(
         && matches!(
             state.provider_connect.mode,
             crate::views::provider_connect::ConnectMode::KeyInput { .. }
+                | crate::views::provider_connect::ConnectMode::AzureInput { .. }
                 | crate::views::provider_connect::ConnectMode::OAuth { .. }
         );
     let in_input_mode = state.input.is_some() || state.mcp_setup.is_some() || provider_input_mode;
@@ -3169,13 +3164,12 @@ pub fn render_extensions_modal(
                         for m in members {
                             let si = m.skill_index;
                             let skill = &skills[si];
-                            let source = skill_source_str(skill);
-                            entry_labels.push(skill.label().to_string());
-                            let right = match &skill.author {
-                                Some(a) if !a.is_empty() => format!("({} · {})", source, a),
-                                _ => format!("({})", source),
-                            };
-                            entry_right_labels.push(right);
+                            entry_labels.push(pretty_skill_name(skill.label()));
+                            entry_right_labels.push(if skill.enabled {
+                                "[Disable]".to_string()
+                            } else {
+                                "[Enable]".to_string()
+                            });
                             let desc = skill
                                 .short_description
                                 .as_deref()
@@ -3186,7 +3180,10 @@ pub fn render_extensions_modal(
                                 entry_desc_lines.push(vec![desc.to_string()]);
                             }
                             entry_summary_lines.push(vec![]);
-                            let mut fields = vec![("path".to_string(), skill.path.clone())];
+                            // Paths are implementation details. The description
+                            // is rendered above the row and metadata remains
+                            // available without exposing filesystem locations.
+                            let mut fields = Vec::new();
                             if let Some(ref a) = skill.author
                                 && !a.is_empty()
                             {
@@ -4250,14 +4247,17 @@ pub fn render_extensions_modal(
         (content_hit.item_rects, content_hit.entry_indices)
     };
 
-    // Plugins, Channels, and Connects expose real row-level controls on the
+    // Skills, Plugins, Channels, and Connects expose real row-level controls on the
     // right side of each selectable row. Store their hit rectangles alongside
     // the picker hit areas so mouse clicks dispatch the same action as the
     // keyboard shortcuts.
     state.button_areas.clear();
     if matches!(
         state.active_tab,
-        ExtensionsTab::Plugins | ExtensionsTab::Connect | ExtensionsTab::Connects
+        ExtensionsTab::Skills
+            | ExtensionsTab::Plugins
+            | ExtensionsTab::Connect
+            | ExtensionsTab::Connects
     ) {
         for (visible_index, rect) in item_rects.iter().enumerate() {
             let Some(&entry_index) = entry_indices.get(visible_index) else {
@@ -4277,6 +4277,7 @@ pub fn render_extensions_modal(
                 continue;
             }
             let action = match state.active_tab {
+                ExtensionsTab::Skills => ButtonAction::ToggleSelectedSkill,
                 ExtensionsTab::Plugins => ButtonAction::ToggleSelectedPlugin,
                 ExtensionsTab::Connect => {
                     let Some(channel) = state.channel_connect.entries.get(*data_index) else {
@@ -4305,7 +4306,10 @@ pub fn render_extensions_modal(
                     1,
                 ),
                 action,
-                key: if state.active_tab == ExtensionsTab::Plugins {
+                key: if matches!(
+                    state.active_tab,
+                    ExtensionsTab::Skills | ExtensionsTab::Plugins
+                ) {
                     ' '
                 } else {
                     'e'

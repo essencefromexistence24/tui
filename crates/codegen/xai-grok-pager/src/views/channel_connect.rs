@@ -42,6 +42,79 @@ static SESSION_ROUTES: OnceLock<
     Mutex<std::collections::HashMap<crate::app::agent::AgentId, (String, String)>>,
 > = OnceLock::new();
 
+/// Point ZeroClaw's channel configuration at Dx's home and keep it separate
+/// from Dx/Grok's own `config.toml`. Explicit ZeroClaw environment overrides
+/// remain authoritative for advanced/hosted deployments.
+pub fn configure_dx_channel_storage() -> Result<()> {
+    let config_dir = match std::env::var_os("ZEROCLAW_CONFIG_DIR") {
+        Some(value) if !value.is_empty() => PathBuf::from(value),
+        _ => {
+            let dir = xai_grok_config::grok_home();
+            // This is performed once during process startup, before any
+            // channel/config worker threads are spawned.
+            unsafe { std::env::set_var("ZEROCLAW_CONFIG_DIR", &dir) };
+            dir
+        }
+    };
+
+    let config_file_missing = match std::env::var_os("ZEROCLAW_CONFIG_FILE") {
+        None => true,
+        Some(value) => value.is_empty(),
+    };
+    if config_file_missing {
+        unsafe { std::env::set_var("ZEROCLAW_CONFIG_FILE", "channel.toml") };
+    }
+
+    std::fs::create_dir_all(&config_dir).with_context(|| {
+        format!(
+            "failed to create Dx channel directory {}",
+            config_dir.display()
+        )
+    })?;
+
+    let target = config_dir.join("channel.toml");
+    if !target.exists() {
+        // Never rename Dx/Grok's normal config.toml unless it is clearly a
+        // ZeroClaw config. This preserves existing TUI settings and MCP data.
+        let local_legacy = config_dir.join("config.toml");
+        let mut candidates = vec![local_legacy];
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".zeroclaw").join("config.toml"));
+        }
+        let source = candidates
+            .into_iter()
+            .find(|path| path.is_file() && zero_claw_config_file(path));
+
+        if let Some(source) = source {
+            std::fs::copy(&source, &target).with_context(|| {
+                format!("failed to migrate ZeroClaw config {}", source.display())
+            })?;
+
+            if let Some(source_key) = source.parent().map(|dir| dir.join(".secret_key")) {
+                let target_key = config_dir.join(".secret_key");
+                if source_key.is_file() && !target_key.exists() {
+                    std::fs::copy(&source_key, target_key).with_context(|| {
+                        format!(
+                            "failed to migrate ZeroClaw secret key {}",
+                            source_key.display()
+                        )
+                    })?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn zero_claw_config_file(path: &std::path::Path) -> bool {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    contents.contains("[channels")
+        || contents.contains("schema_version") && contents.contains("zeroclaw")
+}
+
 fn supervisor_slot() -> &'static Mutex<Option<SupervisorHandle>> {
     SUPERVISOR.get_or_init(|| Mutex::new(None))
 }
@@ -230,21 +303,24 @@ impl ChannelConnectState {
     /// The shared ZeroClaw config path. The Connect tab opens this path through
     /// the TUI's existing external-editor action for schema-specific setup.
     pub fn config_path() -> PathBuf {
+        let _ = configure_dx_channel_storage();
         load_agent_config()
             .map(|config| config.config_path)
             .unwrap_or_else(|_| {
                 std::env::var_os("ZEROCLAW_CONFIG")
                     .map(PathBuf::from)
                     .unwrap_or_else(|| {
-                        dirs::home_dir()
+                        std::env::var_os("ZEROCLAW_CONFIG_DIR")
+                            .map(PathBuf::from)
+                            .or_else(dirs::home_dir)
                             .unwrap_or_else(|| PathBuf::from("."))
-                            .join(".zeroclaw")
-                            .join("config.toml")
+                            .join("channel.toml")
                     })
             })
     }
 
     pub fn setup_fields(kind: &str, alias: &str) -> Result<Vec<ChannelSetupField>> {
+        configure_dx_channel_storage()?;
         let mut config = load_agent_config()?;
         let section = config_section(kind);
         let prefix = format!("channels.{section}.{alias}");
@@ -281,6 +357,7 @@ impl ChannelConnectState {
     }
 
     pub fn save_setup(kind: &str, alias: &str, fields: &[(String, String)]) -> Result<()> {
+        configure_dx_channel_storage()?;
         let kind = kind.to_owned();
         let alias = alias.to_owned();
         let fields = fields.to_owned();
@@ -512,6 +589,7 @@ pub fn stop_supervisor() {
 }
 
 fn load_agent_config() -> anyhow::Result<zeroclaw_config::schema::Config> {
+    configure_dx_channel_storage()?;
     // Connect-tab rendering and form actions can run on the TUI's Tokio
     // runtime. Config::load_or_init is async, so never call block_on directly
     // here; a nested runtime panics when Extensions is opened.

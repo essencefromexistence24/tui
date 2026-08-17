@@ -353,6 +353,7 @@ impl AgentView {
                 && matches!(
                     state.provider_connect.mode,
                     crate::views::provider_connect::ConnectMode::KeyInput { .. }
+                        | crate::views::provider_connect::ConnectMode::AzureInput { .. }
                         | crate::views::provider_connect::ConnectMode::OAuth { .. }
                 )
         }) {
@@ -387,6 +388,37 @@ impl AgentView {
                     }
                     Err(error) => {
                         tracing::warn!("Failed to save provider config: {error}");
+                        state.provider_connect.error_message =
+                            Some(format!("Failed to save: {error}"));
+                    }
+                }
+            } else if let crate::views::provider_connect::input::ConnectOutcome::ConfigureAzure {
+                resource,
+                deployment,
+                api_version,
+                api_key,
+                set_default,
+            } = outcome
+            {
+                let result = crate::views::provider_connect::save_azure_provider_config(
+                    &resource,
+                    &deployment,
+                    &api_version,
+                    &api_key,
+                    set_default,
+                );
+                let state = self.extensions_modal.as_mut().unwrap();
+                match result {
+                    Ok(()) => {
+                        state.provider_connect.configured_ids =
+                            crate::views::provider_connect::load_configured_providers();
+                        state.provider_connect.mode =
+                            crate::views::provider_connect::ConnectMode::Browse;
+                        state.provider_connect.error_message = None;
+                        state.provider_connect.status_message =
+                            Some("Azure OpenAI configured. Use /model to select it.".to_string());
+                    }
+                    Err(error) => {
                         state.provider_connect.error_message =
                             Some(format!("Failed to save: {error}"));
                     }

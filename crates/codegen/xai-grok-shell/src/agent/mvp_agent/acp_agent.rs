@@ -427,7 +427,16 @@ impl acp::Agent for MvpAgent {
         self.sync_process_static_api_key(None);
         let current_working_directory = self.launch_cwd.clone();
         let hostname = gethostname::gethostname();
-        let mcp_servers: Vec<crate::extensions::mcp::McpServerEntry> = Vec::new();
+        // Publish the same real MCP catalog used by `x.ai/mcp/list`.
+        // Keeping this metadata empty made configured servers invisible to
+        // clients that build their Extensions view from the initialize
+        // response, even though the runtime could load them later.
+        let compat = self.cfg.borrow().compat_resolved;
+        let configured_mcp_servers = crate::util::config::load_mcp_servers(
+            &current_working_directory,
+            &compat,
+        );
+        let mcp_servers = crate::extensions::mcp::build_mcp_catalog(&configured_mcp_servers);
         self.spawn_initialize_launch_mcp_setup();
         self.spawn_managed_gateway_tool_catalog_fetch();
         {

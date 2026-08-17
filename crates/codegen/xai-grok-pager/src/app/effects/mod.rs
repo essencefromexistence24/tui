@@ -2702,12 +2702,17 @@ pub(crate) fn execute(
         }
         Effect::ToggleSkill { agent_id, session_id: _, skill_name, enabled } => {
             let tx = acp_tx.clone();
+            // The Skills tab must mutate the workspace whose extensions modal
+            // is open. Using `.` here made the ACP handler resolve against the
+            // process working directory, which can differ after a worktree or
+            // session switch and made toggles appear to do nothing.
+            let skill_cwd = cwd.to_string_lossy().into_owned();
             tasks
                 .spawn(async move {
                     let params = serde_json::json!({
                     "name": skill_name,
                     "enabled": enabled,
-                    "cwd": ".",
+                    "cwd": skill_cwd,
                 });
                     let req = acp::ExtRequest::new(
                         "x.ai/skills/toggle",

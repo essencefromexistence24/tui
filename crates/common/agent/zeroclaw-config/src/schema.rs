@@ -17949,6 +17949,15 @@ fn default_config_dir() -> Result<PathBuf> {
     Ok(home.join(".zeroclaw"))
 }
 
+/// The on-disk configuration filename. ZeroClaw keeps `config.toml` as its
+/// standalone default, while hosts such as Dx can choose a collision-free
+/// filename (for example `channel.toml`) through the environment.
+fn config_file_name() -> std::ffi::OsString {
+    std::env::var_os("ZEROCLAW_CONFIG_FILE")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| std::ffi::OsString::from("config.toml"))
+}
+
 /// Canonical on-disk directory for a locale's runtime/zerocode FTL catalogues:
 /// `<config_dir>/data/ftl/<locale>/`. This is where `zeroclaw locales fetch`
 /// writes downloaded translations and where the runtime i18n loader reads them.
@@ -18004,13 +18013,14 @@ fn default_path_under_config_dir(relative: &str) -> String {
 
 pub fn resolve_config_dir_for_data(data_dir: &Path) -> (PathBuf, PathBuf) {
     let data_config_dir = data_dir.to_path_buf();
-    if data_config_dir.join("config.toml").exists() {
+    let config_name = config_file_name();
+    if data_config_dir.join(&config_name).exists() {
         return (data_config_dir.clone(), data_config_dir.join("data"));
     }
 
     let legacy_config_dir = data_dir.parent().map(|parent| parent.join(".zeroclaw"));
     if let Some(legacy_dir) = legacy_config_dir {
-        if legacy_dir.join("config.toml").exists() {
+        if legacy_dir.join(&config_name).exists() {
             return (legacy_dir, data_config_dir);
         }
 
@@ -18831,7 +18841,7 @@ impl Config {
         // Anything else (parse failure, weird value) is treated as
         // "don't touch the filesystem"; the TOML migrator will surface
         // the real error.
-        let config_toml_path = zeroclaw_dir.join("config.toml");
+        let config_toml_path = zeroclaw_dir.join(config_file_name());
         let needs_fs_migration = config_toml_path.is_file()
             && matches!(
                 std::fs::read_to_string(&config_toml_path)
@@ -18869,7 +18879,7 @@ impl Config {
             );
         }
 
-        let config_path = zeroclaw_dir.join("config.toml");
+        let config_path = zeroclaw_dir.join(config_file_name());
 
         // The install dir is the only directory `load_or_init` creates
         // unconditionally. Per-agent workspaces (`agents/<alias>/workspace/`)

@@ -321,13 +321,34 @@ async fn list_skills_with_options(
         );
     }
 
+    // Dx now stores its user data under `~/Dx/tui`, while installations made
+    // before that migration may still have the shipped skill bundle under
+    // `~/.grok/bundled`. Keep the fallback read-only and only use it when the
+    // active Dx home has no bundle; this preserves the real bundled skills
+    // during migration without reintroducing the old home as the active path.
     let bundled_dir = global_dir.join("bundled");
+    let legacy_bundled_dir = if bundled_dir.is_dir() {
+        None
+    } else {
+        #[allow(deprecated)]
+        std::env::home_dir()
+            .map(|home| home.join(".grok").join("bundled"))
+            .filter(|path| path.is_dir())
+    };
     collect_discovered_paths(
         find_skill_paths(&bundled_dir),
         SkillScope::Bundled,
         &mut seen_canonical_paths,
         &mut skill_files,
     );
+    if let Some(legacy_bundled_dir) = legacy_bundled_dir {
+        collect_discovered_paths(
+            find_skill_paths(&legacy_bundled_dir),
+            SkillScope::Bundled,
+            &mut seen_canonical_paths,
+            &mut skill_files,
+        );
+    }
 
     parse_skill_files(skill_files)
 }

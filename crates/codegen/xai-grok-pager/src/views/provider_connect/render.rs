@@ -92,6 +92,24 @@ pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut Provide
             state,
             &theme,
         ),
+        ConnectMode::AzureInput {
+            resource,
+            deployment,
+            api_version,
+            api_key,
+            active_field,
+            ..
+        } => render_azure_input(
+            buf,
+            content_area,
+            resource,
+            deployment,
+            api_version,
+            api_key,
+            *active_field,
+            state,
+            &theme,
+        ),
         ConnectMode::OAuth { provider_id, .. } => {
             let text = if let Some(error) = &state.error_message {
                 format!("{provider_id} OAuth failed.\n\n{error}\n\nEsc returns to providers.")
@@ -104,6 +122,66 @@ pub fn render_provider_connect(buf: &mut Buffer, area: Rect, state: &mut Provide
                 .style(Style::default().fg(theme.text_primary).bg(theme.bg_base))
                 .render(content_area, buf);
         }
+    }
+}
+
+fn render_azure_input(
+    buf: &mut Buffer,
+    area: Rect,
+    resource: &str,
+    deployment: &str,
+    api_version: &str,
+    api_key: &str,
+    active_field: usize,
+    state: &ProviderConnectState,
+    theme: &Theme,
+) {
+    let fields = [
+        ("Azure resource", resource),
+        ("Deployment", deployment),
+        ("API version", api_version),
+        ("API key", api_key),
+    ];
+    let constraints = std::iter::once(ratatui::layout::Constraint::Length(1))
+        .chain(std::iter::repeat_n(
+            ratatui::layout::Constraint::Length(3),
+            fields.len(),
+        ))
+        .chain(std::iter::once(ratatui::layout::Constraint::Min(0)))
+        .collect::<Vec<_>>();
+    let rows = ratatui::layout::Layout::default()
+        .direction(ratatui::layout::Direction::Vertical)
+        .constraints(constraints)
+        .margin(1)
+        .split(area);
+    Paragraph::new("Azure OpenAI requires resource, deployment, API version, and API key. Tab/arrow keys move between fields; Enter saves.")
+        .style(Style::default().fg(theme.gray))
+        .render(rows[0], buf);
+    for (index, (label, value)) in fields.iter().enumerate() {
+        let shown = if index == 3 && !value.is_empty() {
+            "•".repeat(value.chars().count())
+        } else {
+            (*value).to_string()
+        };
+        Paragraph::new(shown)
+            .style(Style::default().fg(theme.text_primary))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .title(format!(" {label} "))
+                    .border_style(Style::default().fg(if active_field == index {
+                        theme.accent_running
+                    } else {
+                        theme.gray
+                    })),
+            )
+            .render(rows[index + 1], buf);
+    }
+    if let Some(error) = &state.error_message {
+        Paragraph::new(error.as_str())
+            .style(Style::default().fg(theme.accent_error))
+            .render(rows[fields.len() + 1], buf);
     }
 }
 
@@ -287,6 +365,24 @@ pub(crate) fn render_embedded_key_input(
             provider_id,
             input_buffer,
             *set_default,
+            state,
+            &Theme::current(),
+        ),
+        ConnectMode::AzureInput {
+            resource,
+            deployment,
+            api_version,
+            api_key,
+            active_field,
+            ..
+        } => render_azure_input(
+            buf,
+            area,
+            resource,
+            deployment,
+            api_version,
+            api_key,
+            *active_field,
             state,
             &Theme::current(),
         ),

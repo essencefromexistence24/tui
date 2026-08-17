@@ -205,6 +205,14 @@ pub enum ConnectMode {
         input_buffer: String,
         set_default: bool,
     },
+    AzureInput {
+        resource: String,
+        deployment: String,
+        api_version: String,
+        api_key: String,
+        active_field: usize,
+        set_default: bool,
+    },
     OAuth {
         provider_id: String,
         job: Arc<Mutex<Option<Result<(), String>>>>,
@@ -1090,6 +1098,56 @@ pub fn save_provider_config(
     }
     std::fs::write(&config_path, doc.to_string()).map_err(|e| format!("{e}"))?;
     Ok(())
+}
+
+pub fn save_azure_provider_config(
+    resource: &str,
+    deployment: &str,
+    api_version: &str,
+    api_key: &str,
+    set_default: bool,
+) -> Result<(), String> {
+    let resource = resource.trim();
+    let deployment = deployment.trim();
+    let api_version = api_version.trim();
+    let api_key = api_key.trim();
+    if resource.is_empty() || deployment.is_empty() || api_version.is_empty() || api_key.is_empty()
+    {
+        return Err("Azure requires resource, deployment, API version, and API key.".to_string());
+    }
+
+    let config_path = grok_home().join("config.toml");
+    let content = std::fs::read_to_string(&config_path).unwrap_or_default();
+    let mut doc = content
+        .parse::<DocumentMut>()
+        .map_err(|e| format!("Failed to parse config: {e}"))?;
+    let model = doc
+        .entry("model")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let model = model
+        .as_table_mut()
+        .ok_or_else(|| "Config `model` must be a table.".to_string())?;
+    let entry = model
+        .entry("azure")
+        .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+    let table = entry
+        .as_table_mut()
+        .ok_or_else(|| "Config `model.azure` must be a table.".to_string())?;
+    table["base_url"] = Value::from(format!(
+        "https://{resource}.openai.azure.com/openai/deployments/{deployment}"
+    ))
+    .into();
+    table["api_backend"] = Value::from("chat_completions").into();
+    table["auth_scheme"] = Value::from("api-key").into();
+    table["api_version"] = Value::from(api_version).into();
+    table["api_key"] = Value::from(api_key).into();
+    if set_default {
+        let models = doc
+            .entry("models")
+            .or_insert(toml_edit::Item::Table(toml_edit::Table::new()));
+        models["default"] = Value::from("azure").into();
+    }
+    std::fs::write(&config_path, doc.to_string()).map_err(|e| format!("{e}"))
 }
 
 fn grok_protocol_for_provider(

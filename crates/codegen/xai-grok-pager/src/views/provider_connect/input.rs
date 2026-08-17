@@ -14,6 +14,13 @@ pub enum ConnectOutcome {
         api_key: Option<String>,
         set_default: bool,
     },
+    ConfigureAzure {
+        resource: String,
+        deployment: String,
+        api_version: String,
+        api_key: String,
+        set_default: bool,
+    },
     Unchanged,
 }
 
@@ -30,6 +37,7 @@ pub fn handle_provider_connect_key(
             set_default,
             ..
         } => handle_key_input(state, key, provider_id, input_buffer, *set_default),
+        ConnectMode::AzureInput { .. } => handle_azure_key(state, key),
         ConnectMode::OAuth { .. } if key.code == KeyCode::Esc => {
             state.mode = ConnectMode::Browse;
             state.error_message = None;
@@ -161,12 +169,101 @@ pub(crate) fn handle_selection(
             }
             return ConnectOutcome::Unchanged;
         }
-        state.mode = ConnectMode::KeyInput {
-            provider_id: p.id.clone(),
-            input_buffer: String::new(),
-            set_default: true,
+        state.mode = if p.id == "azure" || p.id == "azure-openai" {
+            ConnectMode::AzureInput {
+                resource: String::new(),
+                deployment: String::new(),
+                api_version: "2024-10-21".to_string(),
+                api_key: String::new(),
+                active_field: 0,
+                set_default: true,
+            }
+        } else {
+            ConnectMode::KeyInput {
+                provider_id: p.id.clone(),
+                input_buffer: String::new(),
+                set_default: true,
+            }
         };
         state.error_message = None;
+    }
+    ConnectOutcome::Unchanged
+}
+
+fn handle_azure_key(state: &mut ProviderConnectState, key: KeyEvent) -> ConnectOutcome {
+    let ConnectMode::AzureInput {
+        resource,
+        deployment,
+        api_version,
+        api_key,
+        active_field,
+        set_default,
+    } = state.mode.clone()
+    else {
+        return ConnectOutcome::Unchanged;
+    };
+    let mut values = [resource, deployment, api_version, api_key];
+    match key.code {
+        KeyCode::Esc => {
+            state.mode = ConnectMode::Browse;
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            state.mode = ConnectMode::AzureInput {
+                resource: values[0].clone(),
+                deployment: values[1].clone(),
+                api_version: values[2].clone(),
+                api_key: values[3].clone(),
+                active_field: (active_field + 1) % values.len(),
+                set_default,
+            };
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            state.mode = ConnectMode::AzureInput {
+                resource: values[0].clone(),
+                deployment: values[1].clone(),
+                api_version: values[2].clone(),
+                api_key: values[3].clone(),
+                active_field: (active_field + values.len() - 1) % values.len(),
+                set_default,
+            };
+        }
+        KeyCode::Backspace => {
+            values[active_field].pop();
+            state.mode = ConnectMode::AzureInput {
+                resource: values[0].clone(),
+                deployment: values[1].clone(),
+                api_version: values[2].clone(),
+                api_key: values[3].clone(),
+                active_field,
+                set_default,
+            };
+        }
+        KeyCode::Char(c) => {
+            values[active_field].push(c);
+            state.mode = ConnectMode::AzureInput {
+                resource: values[0].clone(),
+                deployment: values[1].clone(),
+                api_version: values[2].clone(),
+                api_key: values[3].clone(),
+                active_field,
+                set_default,
+            };
+        }
+        KeyCode::Enter => {
+            if values.iter().any(|value| value.trim().is_empty()) {
+                state.error_message =
+                    Some("Azure requires resource, deployment, API version, and API key.".into());
+            } else {
+                return ConnectOutcome::ConfigureAzure {
+                    resource: values[0].trim().into(),
+                    deployment: values[1].trim().into(),
+                    api_version: values[2].trim().into(),
+                    api_key: values[3].trim().into(),
+                    set_default,
+                };
+            }
+        }
+        _ => {}
     }
     ConnectOutcome::Unchanged
 }
