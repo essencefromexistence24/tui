@@ -3674,6 +3674,19 @@ impl AgentView {
             {
                 ShortcutsBar::new(&viewer_hints).render(layout.shortcuts, buf);
             }
+            // Plan approval uses the line viewer and returns before the normal
+            // end-of-frame paint pass. Paint the chat sidebar here as well so
+            // entering plan mode never removes the right-hand session panel.
+            if let Some(sidebar_area) = dx_sidebar_area {
+                let sidebar_model = self.dx_sidebar_view_model();
+                crate::dx::sidebar::render(
+                    &mut self.dx_ui.sidebar,
+                    &sidebar_model,
+                    sidebar_area,
+                    buf,
+                    &theme,
+                );
+            }
             self.pane_areas = layout.pane_areas();
             let viewer_cursor = if plan_prompt_focused || self.is_casual_commenting() {
                 prompt_cursor_pos

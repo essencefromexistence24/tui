@@ -872,7 +872,14 @@ impl SessionActor {
         {
             let _span = tracing::info_span!("tool.register").entered();
             let early_raw_input =
-                serde_json::from_str::<serde_json::Value>(&call.function.arguments).ok();
+                serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                    .ok()
+                    .map(|value| {
+                        crate::session::helpers::tool_input_parsing::normalize_tool_arguments(
+                            &call.function.name,
+                            value,
+                        )
+                    });
             let subagent_background = matches!(
                 call.function.name.as_str(),
                 "task" | "Task" | "spawn_subagent"
@@ -983,6 +990,14 @@ impl SessionActor {
                 }
             }
         };
+        // Normalize provider/harness coercion at the single dispatch boundary
+        // so typed tools receive the schema shapes they advertise. This also
+        // keeps hooks, permissions, lock selection, and execution aligned on
+        // the same canonical argument value.
+        let raw_input = crate::session::helpers::tool_input_parsing::normalize_tool_arguments(
+            &call.function.name,
+            raw_input,
+        );
         let tool_input = match self
             .agent
             .borrow()

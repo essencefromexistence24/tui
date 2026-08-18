@@ -3,6 +3,12 @@
 //! payload preparation.
 #![allow(clippy::items_after_test_module)]
 use super::*;
+
+/// Custom user-message templates keep their runtime support, but their
+/// verbose skills/MCP prompt sections stay disabled with the compact first
+/// prompt. Re-enable this switch when the expanded prompt is needed again.
+const SEND_TEMPLATE_SKILLS_MCP_PROMPT_INJECTIONS: bool = false;
+
 /// Normalize a free-form name (e.g. an MCP server identifier) into a
 /// single safe filesystem segment.
 ///
@@ -520,7 +526,11 @@ impl SessionActor {
     ) -> Option<String> {
         use xai_grok_agent::prompt::agents_md::read_agents_config_with_paths;
         use xai_grok_agent::prompt::user_message::UserMessageContext;
-        self.wait_for_mcp_templated_prefix_ready(&template).await;
+        if SEND_TEMPLATE_SKILLS_MCP_PROMPT_INJECTIONS {
+            self.wait_for_mcp_templated_prefix_ready(&template).await;
+        } else {
+            // Sumon Sir will work on it later.
+        }
         let cwd_str = cwd.to_string_lossy().to_string();
         let bridge = self.agent.borrow().tool_bridge().clone();
         let (vcs_root, vcs_status) = self.gather_vcs_for_prefix(cwd).await;
@@ -550,8 +560,18 @@ impl SessionActor {
             &vendor_homes,
             Some(&workspace_root),
         );
-        let skills = self.slash_skills_for_resolve().await;
-        let mcp_servers = self.gather_mcp_servers(cwd).await;
+        let skills = if SEND_TEMPLATE_SKILLS_MCP_PROMPT_INJECTIONS {
+            self.slash_skills_for_resolve().await
+        } else {
+            // Sumon Sir will work on it later.
+            Vec::new()
+        };
+        let mcp_servers = if SEND_TEMPLATE_SKILLS_MCP_PROMPT_INJECTIONS {
+            self.gather_mcp_servers(cwd).await
+        } else {
+            // Sumon Sir will work on it later.
+            Vec::new()
+        };
         let shell = resolve_session_shell();
         let today_local = chrono::Local::now().date_naive();
         let mcps_root = Self::workspace_mcps_root(cwd).map(|p| p.to_string_lossy().to_string());

@@ -317,6 +317,11 @@ impl SessionActor {
             );
             return;
         }
+        // Client/session overrides must retain the Dx Serializer Compact
+        // contract; the helper is idempotent and therefore safe for prompts
+        // already decorated by spawn or model-switch setup.
+        let system_prompt =
+            xai_grok_agent::prompt::dx_serializer_compact::append_to_system_prompt(&system_prompt);
         let Some(changed) = self
             .chat_state_handle
             .replace_system_head(&system_prompt)

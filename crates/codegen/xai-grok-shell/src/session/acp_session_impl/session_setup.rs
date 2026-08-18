@@ -2,6 +2,12 @@
 //! readiness, skills reload and reminders, session info, and model-metadata
 //! refresh.
 use super::*;
+
+/// Keep the first request focused on the compact Dx prompt contract. The
+/// skill registry and slash-command updates remain available to the TUI; only
+/// their verbose conversation reminder is disabled for this measurement.
+const SEND_SKILL_PROMPT_INJECTION: bool = false;
+
 impl SessionActor {
     /// `true` for session-based ACP auth methods.
     fn is_session_based_auth(&self) -> bool {
@@ -33,6 +39,11 @@ impl SessionActor {
     }
     /// Set up `[system, skill_reminder?]` — prefix is deferred to background.
     pub(super) async fn initialize(&self, system_prompt: String) {
+        // Enforce the compact catalog at the final initialization boundary so
+        // every first request receives the same tool contract, regardless of
+        // which session construction path supplied the prompt.
+        let system_prompt =
+            xai_grok_agent::prompt::dx_serializer_compact::append_to_system_prompt(&system_prompt);
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge.on_skill_discovery_clear().await;
         save_system_prompt(&self.session_info, &system_prompt);
@@ -86,8 +97,12 @@ impl SessionActor {
             )
         });
         let effects = bridge.apply_pending_skill_update().await?;
-        if let Some(item) = self.wrap_skill_reminder(&effects) {
-            conversation.push(item);
+        if SEND_SKILL_PROMPT_INJECTION {
+            if let Some(item) = self.wrap_skill_reminder(&effects) {
+                conversation.push(item);
+            }
+        } else {
+            // Sumon Sir will work on it later.
         }
         Some(effects)
     }

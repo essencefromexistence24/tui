@@ -225,7 +225,9 @@ impl SessionActor {
         } else {
             let definitions = self.agent.borrow().tool_definitions().await;
             if token_optimization.optimize_tool_schemas {
-                xai_grok_agent::native_tool_presentation::compact_native_definitions(definitions)
+                xai_grok_agent::native_tool_presentation::native_registration_definitions(
+                    definitions,
+                )
             } else {
                 definitions
             }

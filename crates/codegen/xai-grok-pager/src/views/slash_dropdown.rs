@@ -58,6 +58,15 @@ fn tag_suffix_width(row: &SuggestionRow) -> usize {
     row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0)
 }
 
+/// The workflow registry uses `[new]` as an action badge. Its description is
+/// intentionally omitted from the slash picker so the badge remains a single
+/// compact row instead of creating an extra description row.
+fn suppress_new_tag_description(row: &SuggestionRow) -> bool {
+    row.tag
+        .as_deref()
+        .is_some_and(|tag| tag.eq_ignore_ascii_case("new"))
+}
+
 /// Compute the aligned label column width from all visible items.
 ///
 /// The label column gets up to 60% of the available width (capped at
@@ -371,7 +380,8 @@ fn flat_line_count(items: &[SuggestionRow], row_w: usize, cap: usize) -> usize {
     let mut lines = 0usize;
     for item in items {
         let desc_w = BadgeLayout::compute(item, row_w, desc_indent).desc_w;
-        let description_lines = if item.description.is_empty() {
+        let description_lines = if item.description.is_empty() || suppress_new_tag_description(item)
+        {
             0
         } else {
             simple_word_wrap(&item.description, desc_w).len()
@@ -464,7 +474,7 @@ fn build_item_lines(
 
         let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
         let layout = BadgeLayout::compute(item, total_w, desc_indent);
-        let desc_lines = if item.description.is_empty() {
+        let desc_lines = if item.description.is_empty() || suppress_new_tag_description(item) {
             Vec::new()
         } else {
             simple_word_wrap(&item.description, layout.desc_w)
@@ -834,6 +844,17 @@ mod tests {
         // All-short descriptions keep the one-row-per-item sizing.
         let short = vec![row("/exit", "Quit"), row("/model", "Switch model")];
         assert_eq!(desired_item_rows(&short, 60), 2);
+    }
+
+    #[test]
+    fn new_workflow_badge_keeps_description_out_of_picker_height() {
+        let mut workflow = row(
+            "/workflow-name",
+            "A long workflow description that would otherwise occupy one or more extra rows.",
+        );
+        workflow.tag = Some("new".to_string());
+
+        assert_eq!(desired_item_rows(&[workflow], 40), 1);
     }
 
     /// Every item is on screen (present in the hit map) when the area is

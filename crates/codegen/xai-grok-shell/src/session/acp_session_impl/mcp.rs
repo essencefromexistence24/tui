@@ -1,4 +1,9 @@
 use super::*;
+
+/// MCP clients and tools stay fully operational. Only the dynamic verbose
+/// MCP system-reminder is disabled while the compact first prompt is measured.
+const SEND_MCP_PROMPT_INJECTIONS: bool = false;
+
 impl SessionActor {
     /// Wait for MCP tools to be initialized.
     /// If initialization is in progress by another task, this will poll until complete.
@@ -428,6 +433,12 @@ impl SessionActor {
     /// Suppressed when the active template manages MCP context elsewhere. The
     /// dirty flag is still cleared.
     pub(super) async fn maybe_inject_mcp_reminder(&self) {
+        if !SEND_MCP_PROMPT_INJECTIONS {
+            self.mcp_reminder_dirty
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            // Sumon Sir will work on it later.
+            return;
+        }
         if !self
             .mcp_reminder_dirty
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -768,6 +779,10 @@ impl SessionActor {
         Ok(())
     }
     pub(super) async fn maybe_inject_mcp_connecting_reminder(&self) {
+        if !SEND_MCP_PROMPT_INJECTIONS {
+            // Sumon Sir will work on it later.
+            return;
+        }
         if self.mcp_connecting_reminder_injected.get() {
             return;
         }
