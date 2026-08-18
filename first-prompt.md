@@ -9,9 +9,9 @@
 |---|---:|
 | System prompt | 5175 bytes / 5175 chars |
 | Prompt context JSON | 326 bytes / 326 chars |
-| Conversation items JSON | 5743 bytes / 5743 chars |
+| Conversation items JSON | 5717 bytes / 5717 chars |
 | Tool definitions JSON | 1063 bytes / 1063 chars |
-| Request envelope JSON | 495 bytes / 495 chars |
+| Request envelope JSON | 506 bytes / 506 chars |
 
 ## System prompt
 
@@ -93,7 +93,7 @@ write "Write file" (file_path content object (file_path string content string))
     "content": [
       {
         "type": "text",
-        "text": "<context os=\"windows\" shell=\"pwsh\" cwd=\"G:\\Dx\\tui\" Time:\"2026-08-18, 11:06 PM\" />\n<context git=\"## main...origin/main [ahead 46]; files=18 M13 A5 D0 R0 ?0\" />"
+        "text": "<context os=\"windows\" shell=\"pwsh\" cwd=\"G:\\Dx\\tui\" Time:\"2026-08-18, 11:16 PM\" />\n<context git=\"## main...origin/main [ahead 47]\" />"
       }
     ]
   },
@@ -102,7 +102,7 @@ write "Write file" (file_path content object (file_path string content string))
     "content": [
       {
         "type": "text",
-        "text": "<user_query>\nhi\n</user_query>"
+        "text": "<user_query>\nHi\n</user_query>"
       }
     ],
     "prompt_index": 0
@@ -120,15 +120,15 @@ write "Write file" (file_path content object (file_path string content string))
 
 ```json
 {
-  "model": "hy3-free",
+  "model": "openai/gpt-oss-120b",
   "temperature": null,
   "max_output_tokens": null,
   "top_p": null,
   "tool_choice": "None",
   "hosted_tools": "[]",
-  "x_grok_conv_id": "01a015d6-acbb-7421-baf0-0ceffe34ba82",
-  "x_grok_req_id": "60ed3bcc-e638-4377-8f03-57eab4e54e91",
-  "x_grok_session_id": "01a015d6-acbb-7421-baf0-0ceffe34ba82",
+  "x_grok_conv_id": "01a015e0-3cdf-7421-b97a-0c6699875fe2",
+  "x_grok_req_id": "d899676f-ef30-42a3-b248-f4c364749ad8",
+  "x_grok_session_id": "01a015e0-3cdf-7421-b97a-0c6699875fe2",
   "x_grok_turn_idx": "1",
   "x_grok_agent_id": "9311883b-8be3-5652-9252-6bc3aad3e5fb",
   "x_grok_deployment_id": null,
