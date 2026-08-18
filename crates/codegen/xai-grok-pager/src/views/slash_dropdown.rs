@@ -58,15 +58,6 @@ fn tag_suffix_width(row: &SuggestionRow) -> usize {
     row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0)
 }
 
-/// The workflow registry uses `[new]` as an action badge. Its description is
-/// intentionally omitted from the slash picker so the badge remains a single
-/// compact row instead of creating an extra description row.
-fn suppress_new_tag_description(row: &SuggestionRow) -> bool {
-    row.tag
-        .as_deref()
-        .is_some_and(|tag| tag.eq_ignore_ascii_case("new"))
-}
-
 /// Compute the aligned label column width from all visible items.
 ///
 /// The label column gets up to 60% of the available width (capped at
@@ -380,21 +371,14 @@ fn flat_line_count(items: &[SuggestionRow], row_w: usize, cap: usize) -> usize {
     let mut lines = 0usize;
     for item in items {
         let desc_w = BadgeLayout::compute(item, row_w, desc_indent).desc_w;
-        let description_lines = if item.description.is_empty() || suppress_new_tag_description(item)
-        {
+        let description_lines = if item.description.is_empty() {
             0
         } else {
             simple_word_wrap(&item.description, desc_w).len()
         };
-        // Tagged rows reserve their first line for the title and right-side
-        // button, so descriptions always begin on the following line.
-        lines += if item.tag.is_some() {
-            1 + description_lines
-        } else if description_lines == 0 {
-            1
-        } else {
-            description_lines
-        };
+        // Tagged rows keep the first description line beside the title (the
+        // tag button is right-aligned); only wrapped continuations add rows.
+        lines += if description_lines == 0 { 1 } else { description_lines };
         if lines >= cap {
             return cap;
         }
@@ -448,8 +432,9 @@ fn build_item_lines(
         if is_selected { normal_style } else { bg_style },
     );
 
-    // Tagged argument rows have a distinct two-column layout: the title stays
-    // on the left and the action tag is a button at the far right.
+    // Tagged rows have a distinct layout: the title and the first description
+    // line share the first row, and the action tag is a button at the far
+    // right of that row (not on a second line).
     if let Some(tag_text) = tag_suffix(item) {
         let tag_text = truncate_str(&tag_text, total_w.saturating_sub(PREFIX_W));
         let tag_w = tag_text.width();
@@ -460,40 +445,49 @@ fn build_item_lines(
                 .saturating_sub(1),
         );
         let label = truncate_str(&item.display, title_limit);
-        let label_w = label.width();
-        let gap = total_w.saturating_sub(PREFIX_W + label_w + tag_w);
         let label_spans = build_highlighted_spans(&label, &item.indices, normal_style, match_style);
 
+        let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
+        let layout = BadgeLayout::compute(item, total_w, desc_indent);
+        let desc_lines = if item.description.is_empty() {
+            Vec::new()
+        } else {
+            simple_word_wrap(&item.description, layout.desc_w)
+        };
+        let first_desc = desc_lines.first().map(String::as_str).unwrap_or("");
+
+        let pad_to_col = label_col_w.saturating_sub(label.width());
+        let mut used = PREFIX_W + label.width() + pad_to_col;
         let mut spans = vec![prefix_span];
         spans.extend(label_spans);
+        if pad_to_col > 0 {
+            spans.push(Span::styled(" ".repeat(pad_to_col), bg_style));
+        }
+        if !first_desc.is_empty() {
+            spans.push(Span::styled(" ".repeat(LABEL_DESC_GAP), bg_style));
+            spans.push(Span::styled(first_desc.to_string(), desc_style));
+            used += LABEL_DESC_GAP + first_desc.width();
+        }
+        if let Some(badge) = &layout.badge
+            && used + 1 + badge.width() + 1 + tag_w <= total_w
+        {
+            spans.push(Span::styled(" ".to_string(), bg_style));
+            spans.push(Span::styled(badge.clone(), desc_style));
+            used += 1 + badge.width();
+        }
+        let gap = total_w.saturating_sub(used).saturating_sub(tag_w);
         if gap > 0 {
             spans.push(Span::styled(" ".repeat(gap), bg_style));
         }
         spans.push(Span::styled(tag_text, tag_style));
         out.push(Line::from(spans).style(bg_style));
 
-        let desc_indent = PREFIX_W + label_col_w + LABEL_DESC_GAP;
-        let layout = BadgeLayout::compute(item, total_w, desc_indent);
-        let desc_lines = if item.description.is_empty() || suppress_new_tag_description(item) {
-            Vec::new()
-        } else {
-            simple_word_wrap(&item.description, layout.desc_w)
-        };
-        for (line_idx, desc_line) in desc_lines.iter().enumerate() {
-            let mut spans = vec![
+        // Continuation lines indented to the description column.
+        for desc_line in desc_lines.iter().skip(1) {
+            let spans = vec![
                 Span::styled(" ".repeat(desc_indent), bg_style),
                 Span::styled(desc_line.clone(), desc_style),
             ];
-            if line_idx == 0
-                && let Some(badge) = &layout.badge
-            {
-                let used = desc_indent + desc_line.width();
-                let gap = total_w.saturating_sub(used).saturating_sub(badge.width());
-                if gap > 0 {
-                    spans.push(Span::styled(" ".repeat(gap), bg_style));
-                }
-                spans.push(Span::styled(badge.clone(), desc_style));
-            }
             out.push(Line::from(spans).style(bg_style));
         }
         return;
@@ -526,12 +520,12 @@ fn build_item_lines(
         }
         let first_desc = desc_lines.first().map(String::as_str).unwrap_or("");
         if !first_desc.is_empty() {
-            spans.push(Span::styled(" ".to_string(), bg_style));
+            spans.push(Span::styled(" ".repeat(LABEL_DESC_GAP), bg_style));
             spans.push(Span::styled(first_desc.to_string(), desc_style));
         }
         if let Some(badge) = &layout.badge {
             // Align to the first line's used width, not wrap `desc_indent`.
-            let desc_gap = if first_desc.is_empty() { 0 } else { 1 };
+            let desc_gap = if first_desc.is_empty() { 0 } else { LABEL_DESC_GAP };
             let used = PREFIX_W + label_col_w + desc_gap + first_desc.width();
             let gap = total_w.saturating_sub(used).saturating_sub(badge.width());
             if gap > 0 {
@@ -846,15 +840,46 @@ mod tests {
         assert_eq!(desired_item_rows(&short, 60), 2);
     }
 
+    /// The workflow `[new]` badge stays a button on the tag row; the
+    /// description shares that first row and only wrapped continuations
+    /// add picker height.
     #[test]
-    fn new_workflow_badge_keeps_description_out_of_picker_height() {
+    fn new_workflow_badge_description_shares_first_row() {
         let mut workflow = row(
             "/workflow-name",
             "A long workflow description that would otherwise occupy one or more extra rows.",
         );
         workflow.tag = Some("new".to_string());
 
-        assert_eq!(desired_item_rows(&[workflow], 40), 1);
+        // The first description line sits beside the title; wrapped
+        // continuations push the height past one row.
+        let rows = desired_item_rows(&[workflow.clone()], 40);
+        assert!(rows > 1, "wrapped continuation must add rows, got {rows}");
+
+        // Render and verify label, inline description, and the right-aligned
+        // [new] button all live on the same first row.
+        let width: u16 = 60;
+        let snap = SlashSnapshot {
+            open: true,
+            matches: vec![workflow],
+            selected: 0,
+            ..Default::default()
+        };
+        let mut buf = Buffer::empty(Rect::new(0, 0, width, 4));
+        let area = Rect::new(0, 0, width, 4);
+        render_dropdown(&mut buf, area, &snap, None, &Theme::current());
+        let line0: String = (0..width)
+            .map(|x| buf[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(line0.contains("/workflow-name"), "label missing: {line0:?}");
+        assert!(
+            line0.contains("A long workflow description"),
+            "description must be inline: {line0:?}"
+        );
+        assert!(
+            line0.trim_end().ends_with("[new]"),
+            "[new] badge must be right-aligned: {line0:?}"
+        );
     }
 
     /// Every item is on screen (present in the hit map) when the area is

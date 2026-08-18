@@ -25,6 +25,12 @@ pub struct AgentMessageBlock {
     /// Detected ` ```mermaid ` diagrams + render skeleton, populated at
     /// construction/finish (never per streaming chunk) like the media refs.
     mermaid: MermaidContent,
+    /// Server-side `streamStartMs` captured on the first chunk of the
+    /// stream. Generation timing for t/s accounting: spans TTFT-excluded
+    /// model output time only, unlike the turn wall clock.
+    stream_start_ms: Option<i64>,
+    /// Server-side `agentTimestampMs` of the latest streamed chunk.
+    last_chunk_ms: Option<i64>,
 }
 
 impl AgentMessageBlock {
@@ -40,6 +46,8 @@ impl AgentMessageBlock {
             image_refs,
             video_refs,
             mermaid,
+            stream_start_ms: None,
+            last_chunk_ms: None,
         }
     }
 
@@ -50,6 +58,8 @@ impl AgentMessageBlock {
             image_refs: Vec::new(),
             video_refs: Vec::new(),
             mermaid: MermaidContent::default(),
+            stream_start_ms: None,
+            last_chunk_ms: None,
         }
     }
 
@@ -61,6 +71,31 @@ impl AgentMessageBlock {
     /// Push a chunk without rendering immediately.
     pub fn push_chunk_deferred(&mut self, chunk: &str) {
         self.content.push_chunk_deferred(chunk);
+    }
+
+    /// Record server-side stream timing for t/s accounting.
+    ///
+    /// `stream_start_ms` sticks from the first chunk (the stream's start);
+    /// `chunk_ms` is the emission time of the latest chunk. Both come from
+    /// the notification `_meta` (`streamStartMs` / `agentTimestampMs`) so the
+    /// span is generation time only — TTFT and tool-call gaps excluded.
+    pub fn record_stream_timing(&mut self, stream_start_ms: Option<i64>, chunk_ms: Option<i64>) {
+        if self.stream_start_ms.is_none() {
+            self.stream_start_ms = stream_start_ms;
+        }
+        if let Some(ms) = chunk_ms {
+            self.last_chunk_ms = Some(ms);
+        }
+    }
+
+    /// Server-side generation span in ms (last chunk − stream start).
+    /// `None` when either timestamp is unknown (pre-meta shell or
+    /// non-streamed construction).
+    pub fn generation_span_ms(&self) -> Option<i64> {
+        match (self.stream_start_ms, self.last_chunk_ms) {
+            (Some(start), Some(last)) if last >= start => Some(last - start),
+            _ => None,
+        }
     }
 
     /// Get the source markdown text.

@@ -67,6 +67,10 @@ pub struct SidebarUiState {
     pub panel_area: Rect,
     pub section_areas: [Rect; SECTION_COUNT],
     pub row_areas: Vec<(usize, usize, Rect)>,
+    /// Item counts from the previous render, so auto expand/collapse only
+    /// fires on a content transition (empty→items, items→empty) and never
+    /// fights a manual toggle of a section that still has items.
+    prev_item_counts: [usize; SECTION_COUNT],
 }
 
 impl Default for SidebarUiState {
@@ -77,6 +81,7 @@ impl Default for SidebarUiState {
             panel_area: Rect::default(),
             section_areas: [Rect::default(); SECTION_COUNT],
             row_areas: Vec::new(),
+            prev_item_counts: [0; SECTION_COUNT],
         }
     }
 }
@@ -108,6 +113,20 @@ pub fn split(area: Rect, visible: bool) -> (Rect, Option<Rect>) {
     (chunks[0], Some(chunks[1]))
 }
 
+/// Sections whose content drives their accordion state: they auto-expand when
+/// they have items and auto-collapse when they go empty.
+const AUTO_FOLLOW_SECTIONS: [usize; 3] =
+    [TASKS_SECTION, WORKFLOWS_SECTION, SUBAGENTS_SECTION];
+
+/// Number of real items in a section (placeholder / empty lines excluded).
+fn section_item_count(section: &SidebarSection) -> usize {
+    section
+        .lines
+        .iter()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with("No "))
+        .count()
+}
+
 pub fn render(
     state: &mut SidebarUiState,
     model: &SidebarViewModel,
@@ -115,6 +134,20 @@ pub fn render(
     buf: &mut Buffer,
     theme: &Theme,
 ) {
+    // Auto expand/collapse on content transitions, so a section that gains
+    // items opens itself and one that empties folds back to its header.
+    // Manual toggles still win: with items present the open flag only moves
+    // when the user clicks it.
+    for i in AUTO_FOLLOW_SECTIONS {
+        let count = section_item_count(&model.sections[i]);
+        let prev = state.prev_item_counts[i];
+        if count > 0 && prev == 0 {
+            state.accordion_open[i] = true;
+        } else if count == 0 && prev > 0 {
+            state.accordion_open[i] = false;
+        }
+        state.prev_item_counts[i] = count;
+    }
     state.panel_area = area;
     state.section_areas = [Rect::default(); SECTION_COUNT];
     state.row_areas.clear();
@@ -250,11 +283,7 @@ pub fn render(
                 }
                 state.section_areas[section_index] = row_area;
                 let chevron = if open { "▼" } else { "▶" };
-                let count = section
-                    .lines
-                    .iter()
-                    .filter(|line| !line.trim().is_empty() && !line.starts_with("No "))
-                    .count();
+                let count = section_item_count(section);
                 let label = if count > 0 {
                     format!("{chevron} {} · {count}", section.name)
                 } else {

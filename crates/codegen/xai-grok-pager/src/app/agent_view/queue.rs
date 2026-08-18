@@ -291,8 +291,11 @@ impl AgentView {
         // Output tokens: estimated from the agent's response text written this
         // turn — the context-total delta also counts the user's input and tool
         // outputs, which isn't "what the AI produced". Rate is those output
-        // tokens over the turn's wall clock.
+        // tokens over the server-reported generation span (stream start →
+        // last chunk), which excludes TTFT and tool-call gaps; when the wire
+        // meta is absent (older shell) it falls back to the turn's wall clock.
         let mut output_tokens = 0u64;
+        let mut gen_ms: i64 = 0;
         for (_, entry) in entries.iter().rev() {
             if matches!(
                 entry.block,
@@ -305,6 +308,9 @@ impl AgentView {
                 crate::scrollback::block::RenderBlock::ToolCall(_) => tools += 1,
                 crate::scrollback::block::RenderBlock::AgentMessage(msg) => {
                     output_tokens += xai_token_estimation::estimate_tokens(&msg.text());
+                    if let Some(span) = msg.generation_span_ms() {
+                        gen_ms += span;
+                    }
                 }
                 _ => {}
             }
@@ -315,18 +321,28 @@ impl AgentView {
         };
         let mut parts = vec![model];
         if output_tokens > 0 {
-            let secs = elapsed_opt
-                .map(|d| d.as_secs_f64().max(1e-9))
-                .unwrap_or(0.0);
-            let rate = if secs > 0.0 {
-                output_tokens as f64 / secs
-            } else {
-                0.0
-            };
+            // Tokens/sec is computed but hidden on the response action row for now.
+            // let secs = if gen_ms > 0 {
+            //     gen_ms as f64 / 1000.0
+            // } else {
+            //     elapsed_opt
+            //         .map(|d| d.as_secs_f64().max(1e-9))
+            //         .unwrap_or(0.0)
+            // };
+            // let rate = if secs > 0.0 {
+            //     output_tokens as f64 / secs
+            // } else {
+            //     0.0
+            // };
+            // parts.push(format!(
+            //     "{} tokens ({:.1} t/s)",
+            //     crate::views::turn_status::format_tokens_short(output_tokens),
+            //     rate
+            // ));
+            let _ = gen_ms;
             parts.push(format!(
-                "{} tokens ({:.1} t/s)",
+                "{} tokens",
                 crate::views::turn_status::format_tokens_short(output_tokens),
-                rate
             ));
         }
         parts.push(format!("{tools} tools"));

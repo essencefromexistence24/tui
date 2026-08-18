@@ -2,7 +2,9 @@
 
 /// Complete built-in tool catalog and its decoding rule.
 pub const TOOL_CATALOG: &str = include_str!("../../templates/dx_serializer_compact_tools.md");
-const CATALOG_MARKER: &str = "Dx Serializer Compact: 26 tools.";
+/// Must match the template's header line exactly — the idempotency check
+/// depends on it, so the dedup silently breaks when they drift.
+const CATALOG_MARKER: &str = "Dx Serializer Compact 26 tools.";
 
 /// Attach the compact tool contract to the canonical system prompt.
 ///
@@ -24,9 +26,20 @@ mod tests {
     #[test]
     fn catalog_is_present_and_complete() {
         assert!(TOOL_CATALOG.contains("Dx Serializer Compact"));
-        assert!(TOOL_CATALOG.contains("Dx Serializer Compact: 26 tools."));
+        assert!(TOOL_CATALOG.contains("Dx Serializer Compact 26 tools."));
         assert!(TOOL_CATALOG.contains("run_terminal_command"));
         assert!(TOOL_CATALOG.contains("reference_to_video"));
+    }
+
+    #[test]
+    fn marker_matches_template_header() {
+        let header = TOOL_CATALOG.lines().next().expect("catalog header");
+        assert_eq!(
+            header.trim(),
+            CATALOG_MARKER,
+            "dedup marker must equal the template's header line or \
+             append_to_system_prompt duplicates the catalog"
+        );
     }
 
     #[test]

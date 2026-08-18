@@ -198,7 +198,7 @@ fn build_item_line(
         spans.push(Span::styled(" ".repeat(padding), bg_style));
     }
     if !desc.is_empty() {
-        spans.push(Span::styled(" ".to_string(), bg_style));
+        spans.push(Span::styled(" ".repeat(LABEL_DESC_GAP), bg_style));
         spans.push(Span::styled(desc, desc_style));
     }
 

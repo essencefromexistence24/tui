@@ -654,11 +654,24 @@ impl ChatState {
 
 		let start = self.input.suggestion_index.saturating_sub(list_rows.saturating_sub(1));
 		let slice = &self.input.suggestions[start..];
+		let visible: Vec<_> = slice.iter().take(list_rows).enumerate().collect();
 
-		for (row, item) in slice.iter().take(list_rows).enumerate() {
+		// First pass: max label width across the full list (not just the
+		// visible slice) so descriptions stay column-aligned while scrolling.
+		// Prefix is always one column (`›` or ` `).
+		const LABEL_DESC_GAP: u16 = 2;
+		let max_label_w: u16 = self
+			.input
+			.suggestions
+			.iter()
+			.map(|item| 1u16 + item.label.width() as u16)
+			.max()
+			.unwrap_or(0);
+
+		for (row, item) in &visible {
 			let idx = start + row;
-			let selected = idx == self.input.suggestion_index;
-			let y = list_y0 + row as u16;
+			let selected = *idx == self.input.suggestion_index;
+			let y = list_y0 + *row as u16;
 
 			// Full-width row fill
 			for x in area.left()..area.right() {
@@ -681,20 +694,19 @@ impl ChatState {
 				Style::default().fg(self.theme.muted_fg).bg(self.theme.card)
 			};
 			let prefix = if selected { "›" } else { " " };
-			// Compact: "› /sessions  Switch session" stretched across full width
 			let label = format!("{prefix}{}", item.label);
-			let label_w = label.chars().count() as u16;
-			let rest = area.width.saturating_sub(label_w + 1);
-			let desc = if rest > 3 {
+			let label_w = label.width() as u16;
+			let pad = max_label_w.saturating_sub(label_w) + LABEL_DESC_GAP;
+			let rest = area.width.saturating_sub(label_w + pad);
+			let desc = if rest > 3 && !item.description.is_empty() {
 				let d: String = item.description.chars().take(rest as usize).collect();
-				// pad so row reads full-width
-				format!(" {d}")
+				format!("{}{d}", " ".repeat(pad as usize))
 			} else {
 				String::new()
 			};
 			// Show kind on first row when at top of list
 			let extra =
-				if row == 0 && start == 0 && rest > 20 { format!("  · {kind}") } else { String::new() };
+				if *row == 0 && start == 0 && rest > 20 { format!("  · {kind}") } else { String::new() };
 			let line = Line::from(vec![
 				Span::styled(label, style),
 				Span::styled(desc, desc_style),

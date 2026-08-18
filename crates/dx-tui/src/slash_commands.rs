@@ -425,6 +425,12 @@ pub const SLASH_COMMANDS: &[SlashSpec] = &[
 		description: "Review changes (commit|branch|pr)",
 		always_visible: true,
 	},
+	SlashSpec {
+		name: "/workflows",
+		aliases: &["/workflow"],
+		description: "Show workflow runs (phases, agents, progress)",
+		always_visible: true,
+	},
 	// ── CLI-style ────────────────────────────────────────────
 	SlashSpec { name: ":q", aliases: &[], description: "Vim-style exit", always_visible: true },
 ];
@@ -1155,6 +1161,10 @@ impl ChatState {
 			}
 			"/review" => {
 				self.cmd_review(resolved.args);
+				SlashResult::Handled
+			}
+			"/workflows" | "/workflow" => {
+				self.show_toast("Workflows — runs, phases, agents".into());
 				SlashResult::Handled
 			}
 

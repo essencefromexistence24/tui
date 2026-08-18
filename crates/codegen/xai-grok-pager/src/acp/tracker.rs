@@ -947,6 +947,11 @@ impl AcpUpdateTracker {
         {
             entry.created_at = Some(utc_ms_to_local(ts_ms));
         }
+        if let Some(entry) = scrollback.get_by_id_mut(id)
+            && let RenderBlock::AgentMessage(msg) = &mut entry.block
+        {
+            msg.record_stream_timing(meta.stream_start_ms, meta.agent_timestamp_ms);
+        }
         if meta.is_replay {
             scrollback.push_chunk_to_agent_deferred(id, &text)
         } else {
