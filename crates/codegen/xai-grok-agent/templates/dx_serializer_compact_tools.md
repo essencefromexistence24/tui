@@ -1,6 +1,29 @@
-Dx Serializer Compact: 26 tools. Format: tool=`name "desc" (required type (key type extras))`. Empty descriptions omit quotes. Types: string/integer/boolean/object/array. `?`=nullable. Token after type or enum=default. `[x|y]`=enum. `uN min [default [max]]`=format/range. `array?string`=nullable string array. `array string`/`array(fields)`=arrays. Trailing fields=required. `object true`=additionalProperties. Lone `null`=untyped default null. Names unchanged.
+Dx Serializer Compact 26 tools.
 
-Call only the keys written on each line. Names before `object` are required. Do not invent aliases: not `path` (use `target_file` / `target_directory` / `file_path`), not `tool` (use `tool_name` plus `tool_input`), not `task` or `activeForm` or `header` or `multiSelect`. `todo_write` items are only `id` `content` `status`. `ask_user_question` is a `questions` array; options use `label` and `description`. `image_edit.image` is a string array. `image_to_video.image` is one string. `reference_to_video` needs `images` (two to seven strings) and `aspect_ratio`. `use_tool` is MCP only (`server__tool`), never a native tool. `monitor` needs `command` and `description`. `kill_command_or_subagent` needs `task_id`. `scheduler_create` needs `interval` and `prompt` to create. `workflow` takes exactly one of `name`, `script`, or `script_path`; a script starts with `let meta`. Explore subagents have no shell.
+Line is name description required names object then field type extras.
+No description means empty.
+Types string integer boolean object array.
+nullable allows null.
+Next token after type or enum is default.
+Brackets are enum.
+u64 u32 u8 are formats. Numbers after are min default max. Some skip default or max.
+array string is string array. array nullable string is nullable string array. array group is object array.
+Trailing nested names are required.
+object true allows extra keys.
+Lone null means no type default null.
+Keep names exact.
+
+Call only listed keys. Names before object are required.
+Never invent aliases. Use target_file target_directory file_path never path. Use tool_name tool_input never tool. Never send task activeForm header multiSelect.
+todo_write items are id content status only.
+ask_user_question is questions array. Options use label description.
+image_edit image is string array. image_to_video image is one string. reference_to_video needs images two to seven plus aspect_ratio.
+use_tool is MCP only never native. tool_name is server__tool.
+monitor needs command description.
+kill_command_or_subagent needs task_id.
+scheduler_create needs interval prompt to create. Interval is 60s 5m 2h 1d never cron.
+workflow takes one of name script script_path. Script starts with let meta. meta.name is lowercase hyphens.
+Explore subagents have no shell.
 
 ```dx
 run_terminal_command "Run shell command" (command description object (command string timeout integer? u64 0 120000 36000000 description string background boolean false))
