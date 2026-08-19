@@ -837,8 +837,8 @@ impl PagerArgs {
             .map(std::path::Path::new)
             .and_then(|p| p.file_name())
             .and_then(|n| n.to_str())
-            .filter(|n| *n == "grok" || *n == "agent")
-            .unwrap_or("grok")
+            .filter(|n| matches!(*n, "grok" | "agent" | "dx" | "dx.exe" | "dx-tui" | "dx-tui.exe"))
+            .unwrap_or("dx")
             .to_owned();
         Self::parse_from(std::iter::once(bin_name).chain(std::env::args().skip(1)))
     }

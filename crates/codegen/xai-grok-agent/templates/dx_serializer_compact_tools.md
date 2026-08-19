@@ -1,5 +1,12 @@
-Dx Serializer Compact 26 tools Line name description required names object fields name type extras No description empty Types string integer boolean object array nullable after type allows null Token after type or enum default Brackets enum u64 u32 u8 format min default max some omit array string string array array nullable string nullable string array array group object array Trailing nested names required object true extra keys Lone null untyped default null Keep names exact Call listed keys Names before object required Never invent aliases target_file target_directory file_path never path tool_name tool_input never tool Never task activeForm header multiSelect todo_write id content status ask_user_question questions array options label description image_edit image string array image_to_video image one string reference_to_video images two to seven plus aspect_ratio use_tool MCP only never native tool_name server__tool monitor command description kill_command_or_subagent task_id scheduler_create interval prompt Interval 60s 5m 2h 1d never cron workflow one name script script_path Script starts let meta meta name lowercase hyphens Explore subagents no shell
+You have 26 tools - Read each line - Use listed keys and types only.
 
+Format:
+Line name description required names object field type extras No description empty nullable allows null After type or enum default Brackets enum u64 u32 u8 then min default max some omit array type means that type array array group means object array Trailing nested names required object true extra keys Lone null untyped default null.
+
+Calls:
+Never invent names path means target_file target_directory file_path tool means tool_name tool_input Never send task activeForm header multiSelect cron todo_write id content status ask_user_question options label description use_tool MCP only tool_name server__tool monitor command description kill_command_or_subagent task_id scheduler_create interval prompt 60s 5m 2h 1d workflow one name script script_path Script starts let meta meta name lowercase hyphens Explore no shell.
+
+TOOLS:
 run_terminal_command "Run shell command" (command description object (command string timeout integer? u64 0 120000 36000000 description string background boolean false))
 read_file (target_file object (target_file string offset integer 1 limit integer pages string? format string?))
 search_replace "Replace exact text" (file_path old_string new_string object (file_path string old_string string new_string string replace_all boolean false))

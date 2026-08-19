@@ -1,7 +1,8 @@
 //! Context usage bar — shows token usage in the status bar.
 //!
-//! Default builds a `Line<'static>` of styled spans: `8.5K / 1.0M` (actual tokens,
-//! colored by usage percentage). On hover, replaces the tokens with a progress
+//! Default builds a `Line<'static>` of styled spans: `8.5k / 1.0M` (both
+//! sides truncated to 1 decimal, colored by usage
+//! percentage). On hover, replaces the tokens with a progress
 //! bar + percentage, e.g. `█████ 42.0%`. The bar width is derived from the
 //! default string length so the hover line is the same total width — no layout
 //! shift on hover. The default is right-padded to a minimum of 6 columns so the
@@ -32,24 +33,23 @@ pub fn fmt_pct5(pct: f64) -> String {
     }
 }
 
-/// Format a token count as a compact string (≤4 chars).
-///
-/// - `0–999`:     `"0"`, `"12"`, `"999"`
-/// - `1K–9.9K`:   `"1.2K"` (4 chars)
-/// - `10K–999K`:  `"12K"`, `"999K"` (≤4 chars)
-/// - `1M–9.9M`:   `"1.2M"` (4 chars)
-/// - `10M+`:      `"12M"`, `"123M"` (≤4 chars)
+/// Format a token count as a full number (no K/M abbreviation).
 pub fn fmt_tokens(n: u64) -> String {
+    n.to_string()
+}
+
+/// Format a token count compactly, truncating (never rounding) to 1 decimal.
+///
+/// Used for both sides of the bar. A value is only bumped to the next tenth
+/// once it has fully reached it: `1451` → `1.4k` (not `1.5k`), `1500` →
+/// `1.5k`, `1600` → `1.6k`, `1_000_000` → `1.0M`, `1_200_000` → `1.2M`.
+pub fn fmt_tokens_compact(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
-    } else if n < 10_000 {
-        format!("{:.1}K", n as f64 / 1_000.0)
     } else if n < 1_000_000 {
-        format!("{}K", n / 1_000)
-    } else if n < 10_000_000 {
-        format!("{:.1}M", n as f64 / 1_000_000.0)
+        format!("{:.1}k", (n / 100) as f64 / 10.0)
     } else {
-        format!("{}M", n / 1_000_000)
+        format!("{:.1}M", (n / 100_000) as f64 / 10.0)
     }
 }
 
@@ -166,7 +166,8 @@ const BAR_PCT_GAP: u16 = 1;
 
 /// Build the context usage bar as a `Line<'static>`.
 ///
-/// Normal: `8.5K / 1.0M` — actual token usage, colored by the same percentage
+/// Normal: `8.5k / 1.0M` — both sides truncated to 1 decimal, colored by the
+/// same percentage
 /// gradient the hover bar uses so the urgency signal stays visible at a glance.
 /// Hovered: `█████ 42.0%` — progress bar + colored percentage, sized to match.
 ///
@@ -209,7 +210,11 @@ pub fn context_bar_line_for_session(
 
     // Default form drives the line width: `used / total`, right-padded to the
     // minimum hover width so the two states always render at the same width.
-    let mut token_str = format!("{} / {}", fmt_tokens(used), fmt_tokens(total));
+    let mut token_str = format!(
+        "{} / {}",
+        fmt_tokens_compact(used),
+        fmt_tokens_compact(total)
+    );
     let natural_width = token_str.chars().count() as u16;
     let min_width = BAR_PCT_GAP + PCT_WIDTH;
     if natural_width < min_width {
@@ -287,30 +292,31 @@ mod tests {
     }
 
     #[test]
-    fn test_fmt_tokens_thousands() {
-        assert_eq!(fmt_tokens(1_200), "1.2K");
-        assert_eq!(fmt_tokens(9_960), "10.0K"); // rounds up
-        assert_eq!(fmt_tokens(9_940), "9.9K");
-        assert_eq!(fmt_tokens(12_000), "12K");
-        assert_eq!(fmt_tokens(123_000), "123K");
-        assert_eq!(fmt_tokens(999_000), "999K");
+    fn test_fmt_tokens_full_numbers() {
+        assert_eq!(fmt_tokens(1_200), "1200");
+        assert_eq!(fmt_tokens(9_960), "9960");
+        assert_eq!(fmt_tokens(12_000), "12000");
+        assert_eq!(fmt_tokens(123_000), "123000");
+        assert_eq!(fmt_tokens(999_000), "999000");
+        assert_eq!(fmt_tokens(1_200_000), "1200000");
+        assert_eq!(fmt_tokens(12_000_000), "12000000");
+        assert_eq!(fmt_tokens(123_000_000), "123000000");
     }
 
     #[test]
-    fn test_fmt_tokens_millions() {
-        assert_eq!(fmt_tokens(1_200_000), "1.2M");
-        assert_eq!(fmt_tokens(12_000_000), "12M");
-        assert_eq!(fmt_tokens(123_000_000), "123M");
-    }
-
-    #[test]
-    fn test_fmt_tokens_max_4_chars() {
-        for n in [
-            0, 1, 999, 1_200, 9_900, 12_000, 999_000, 1_200_000, 12_000_000,
-        ] {
-            let s = fmt_tokens(n);
-            assert!(s.len() <= 4, "fmt_tokens({n}) = {s:?} should be ≤4 chars");
-        }
+    fn test_fmt_tokens_compact_truncates_not_rounds() {
+        assert_eq!(fmt_tokens_compact(0), "0");
+        assert_eq!(fmt_tokens_compact(999), "999");
+        // 1451 is not yet fully 1500 → stays 1.4k (truncated, not rounded to 1.5k).
+        assert_eq!(fmt_tokens_compact(1_451), "1.4k");
+        assert_eq!(fmt_tokens_compact(1_500), "1.5k");
+        assert_eq!(fmt_tokens_compact(1_549), "1.5k");
+        assert_eq!(fmt_tokens_compact(1_599), "1.5k");
+        assert_eq!(fmt_tokens_compact(1_600), "1.6k");
+        assert_eq!(fmt_tokens_compact(9_999), "9.9k");
+        assert_eq!(fmt_tokens_compact(999_999), "999.9k");
+        assert_eq!(fmt_tokens_compact(1_200_000), "1.2M");
+        assert_eq!(fmt_tokens_compact(12_000_000), "12.0M");
     }
 
     #[test]
@@ -332,13 +338,17 @@ mod tests {
     }
 
     #[test]
-    fn test_context_bar_default_shows_compact_token_usage() {
-        // Default (non-hovered) state shows `used / total` with no padding.
+    fn test_context_bar_default_shows_token_usage() {
+        // Default (non-hovered) state shows compact `used / total`, both truncated.
         let theme = Theme::default();
         let line = context_bar_line(Some(8_500), Some(1_000_000), false, &theme)
             .expect("token data provided");
         let text = line_text(&line);
-        assert_eq!(text, "8.5K / 1.0M");
+        assert_eq!(text, "8.5k / 1.0M");
+        // Left side stays truncated until fully past the next tenth.
+        let line = context_bar_line(Some(1_451), Some(1_000_000), false, &theme)
+            .expect("token data provided");
+        assert_eq!(line_text(&line), "1.4k / 1.0M");
     }
 
     #[test]
@@ -387,8 +397,8 @@ mod tests {
     #[test]
     fn test_context_bar_hover_bar_grows_with_token_string() {
         // The bar size should scale with the default string length.
-        // `500 / 1.0M` (10 chars) → bar = 10 - 6 = 4 chars.
-        // `8.5K / 1.0M` (11 chars) → bar = 11 - 6 = 5 chars.
+        // `500 / 1000000` (12 chars) → bar = 12 - 6 = 6 chars.
+        // `8.5k / 1000000` (13 chars) → bar = 13 - 6 = 7 chars.
         let theme = Theme::default();
         let short = context_bar_line(Some(500), Some(1_000_000), true, &theme).unwrap();
         let long = context_bar_line(Some(8_500), Some(1_000_000), true, &theme).unwrap();

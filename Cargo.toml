@@ -485,8 +485,14 @@ zip = "3"
 zstd = "0.13"
 
 [profile.release]
-incremental = true
+incremental = false
 panic = "abort"
+# Full cross-crate dead-code elimination + symbol strip. This is the main
+# size lever for the monolithic dx-tui.exe (thousands of transitive crates).
+lto = "thin"
+codegen-units = 16
+strip = true
+debug = 0
 
 # The pager now directly embeds the DX browser/editor/animation stack and is
 # substantially larger than an ordinary crate. Split its optimized codegen
