@@ -92,6 +92,12 @@ struct HostTheme {
     overrides: Vec<(&'static str, Color)>,
 }
 
+impl Default for EditorAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EditorAdapter {
     pub fn new() -> Self {
         Self {

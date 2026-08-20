@@ -128,6 +128,9 @@ pub struct AnimationSurface {
     last_width: u16,
     splash_font_index: usize,
     last_font_change: Instant,
+    /// Row just below the splash figlet title + description (area coords),
+    /// refreshed every Splash render; used to park the home box under it.
+    pub last_title_bottom: u16,
 }
 
 impl Default for AnimationSurface {
@@ -142,6 +145,7 @@ impl Default for AnimationSurface {
             last_width: 120,
             splash_font_index: 0,
             last_font_change: Instant::now(),
+            last_title_bottom: 0,
         }
     }
 }
@@ -247,7 +251,7 @@ impl AnimationSurface {
                         (self.splash_font_index + 1) % super::splash::splash_font_count();
                     self.last_font_change = Instant::now();
                 }
-                super::splash::render(
+                self.last_title_bottom = super::splash::render(
                     area,
                     buf,
                     &crate::theme::ChatTheme::from(theme),

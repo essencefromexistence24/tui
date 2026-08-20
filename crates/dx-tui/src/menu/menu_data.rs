@@ -36,7 +36,7 @@ pub struct Menu {
 impl Menu {
     pub fn new(theme: ChatTheme) -> Self {
         let mut rng = SimpleRng::default();
-        let effects = EffectsRepository::new(theme.clone(), &mut rng);
+        let effects = EffectsRepository::new(theme, &mut rng);
         let active_effect = effects.get_random_opening_effect(&mut rng);
 
         let main_menu = get_main_menu();

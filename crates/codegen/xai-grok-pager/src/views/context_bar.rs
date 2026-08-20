@@ -1,7 +1,7 @@
 //! Context usage bar — shows token usage in the status bar.
 //!
 //! Default builds a `Line<'static>` of styled spans: `8.5k / 1.0M` (both
-//! sides truncated to 1 decimal, colored by usage
+//! sides rounded to 1 decimal, colored by usage
 //! percentage). On hover, replaces the tokens with a progress
 //! bar + percentage, e.g. `█████ 42.0%`. The bar width is derived from the
 //! default string length so the hover line is the same total width — no layout
@@ -38,18 +38,21 @@ pub fn fmt_tokens(n: u64) -> String {
     n.to_string()
 }
 
-/// Format a token count compactly, truncating (never rounding) to 1 decimal.
+/// Format a token count compactly, rounding to 1 decimal.
 ///
-/// Used for both sides of the bar. A value is only bumped to the next tenth
-/// once it has fully reached it: `1451` → `1.4k` (not `1.5k`), `1500` →
-/// `1.5k`, `1600` → `1.6k`, `1_000_000` → `1.0M`, `1_200_000` → `1.2M`.
+/// Used for both sides of the bar. `1451` → `1.5k`, `9960` → `10.0k`,
+/// `12_000` → `12k`, `1_200_000` → `1.2M`, `12_000_000` → `12M`.
 pub fn fmt_tokens_compact(n: u64) -> String {
     if n < 1_000 {
         n.to_string()
+    } else if n < 10_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
     } else if n < 1_000_000 {
-        format!("{:.1}k", (n / 100) as f64 / 10.0)
+        format!("{}k", n / 1_000)
+    } else if n < 10_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
     } else {
-        format!("{:.1}M", (n / 100_000) as f64 / 10.0)
+        format!("{}M", n / 1_000_000)
     }
 }
 
@@ -304,19 +307,20 @@ mod tests {
     }
 
     #[test]
-    fn test_fmt_tokens_compact_truncates_not_rounds() {
+    fn test_fmt_tokens_compact_rounds() {
         assert_eq!(fmt_tokens_compact(0), "0");
         assert_eq!(fmt_tokens_compact(999), "999");
-        // 1451 is not yet fully 1500 → stays 1.4k (truncated, not rounded to 1.5k).
-        assert_eq!(fmt_tokens_compact(1_451), "1.4k");
+        // 1451 rounds to 1.5k (matches the pre-truncation behaviour).
+        assert_eq!(fmt_tokens_compact(1_451), "1.5k");
         assert_eq!(fmt_tokens_compact(1_500), "1.5k");
         assert_eq!(fmt_tokens_compact(1_549), "1.5k");
-        assert_eq!(fmt_tokens_compact(1_599), "1.5k");
-        assert_eq!(fmt_tokens_compact(1_600), "1.6k");
-        assert_eq!(fmt_tokens_compact(9_999), "9.9k");
-        assert_eq!(fmt_tokens_compact(999_999), "999.9k");
+        assert_eq!(fmt_tokens_compact(1_551), "1.6k");
+        assert_eq!(fmt_tokens_compact(9_940), "9.9k");
+        assert_eq!(fmt_tokens_compact(9_960), "10.0k");
+        assert_eq!(fmt_tokens_compact(12_000), "12k");
+        assert_eq!(fmt_tokens_compact(999_999), "999k");
         assert_eq!(fmt_tokens_compact(1_200_000), "1.2M");
-        assert_eq!(fmt_tokens_compact(12_000_000), "12.0M");
+        assert_eq!(fmt_tokens_compact(12_000_000), "12M");
     }
 
     #[test]
@@ -339,16 +343,16 @@ mod tests {
 
     #[test]
     fn test_context_bar_default_shows_token_usage() {
-        // Default (non-hovered) state shows compact `used / total`, both truncated.
+        // Default (non-hovered) state shows compact `used / total`, both rounded.
         let theme = Theme::default();
         let line = context_bar_line(Some(8_500), Some(1_000_000), false, &theme)
             .expect("token data provided");
         let text = line_text(&line);
         assert_eq!(text, "8.5k / 1.0M");
-        // Left side stays truncated until fully past the next tenth.
+        // Left side rounds to the nearest tenth.
         let line = context_bar_line(Some(1_451), Some(1_000_000), false, &theme)
             .expect("token data provided");
-        assert_eq!(line_text(&line), "1.4k / 1.0M");
+        assert_eq!(line_text(&line), "1.5k / 1.0M");
     }
 
     #[test]

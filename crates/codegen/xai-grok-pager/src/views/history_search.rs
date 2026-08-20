@@ -220,7 +220,7 @@ fn publish_query_matches(
             hits.push((i, sc));
         }
     }
-    hits.sort_unstable_by(|a, b| b.1.cmp(&a.1));
+    hits.sort_unstable_by_key(|b| std::cmp::Reverse(b.1));
     if hits.len() > MAX_RESULTS {
         hits.truncate(MAX_RESULTS);
     }

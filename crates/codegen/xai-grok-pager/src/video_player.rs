@@ -193,6 +193,10 @@ pub struct VideoLaunch {
 }
 
 /// Launch one local media path or online URL in the detached native player.
+///
+/// The native player must outlive the TUI (detached on unix, fire-and-forget
+/// on Windows), so it is intentionally NOT enrolled in the TUI process scope.
+#[allow(clippy::disallowed_methods)]
 pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlayerError> {
     validate_graphical_session()?;
     if raw_path.trim().eq_ignore_ascii_case("dx-showcase") {
@@ -232,6 +236,8 @@ pub fn launch(raw_path: &str, workspace: &Path) -> Result<VideoLaunch, VideoPlay
     })
 }
 
+/// Native player outlives the TUI; see [`launch`].
+#[allow(clippy::disallowed_methods)]
 fn launch_showcase() -> Result<VideoLaunch, VideoPlayerError> {
     validate_graphical_session()?;
     let directory = showcase_assets_dir().map_err(|error| VideoPlayerError::PlaylistWrite {
@@ -311,6 +317,8 @@ fn launch_showcase() -> Result<VideoLaunch, VideoPlayerError> {
     })
 }
 
+/// Native player outlives the TUI; see [`launch`].
+#[allow(clippy::disallowed_methods)]
 fn launch_showcase_video(selector: &str) -> Result<VideoLaunch, VideoPlayerError> {
     let video = showcase_video(selector).ok_or(VideoPlayerError::Usage)?;
     let assets = showcase_assets_dir().map_err(|error| VideoPlayerError::PlaylistWrite {
@@ -782,9 +790,9 @@ fn development_executable() -> Option<PathBuf> {
         if std::env::consts::ARCH != "x86_64" {
             return None;
         }
-        return Some(PathBuf::from(
+        Some(PathBuf::from(
             r"G:\Dx\hexxed\terminal\dx-video-player\dx-video-player.exe",
-        ));
+        ))
     }
     #[cfg(not(windows))]
     None

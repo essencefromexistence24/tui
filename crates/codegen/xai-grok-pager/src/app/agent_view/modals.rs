@@ -2421,8 +2421,8 @@ impl AgentView {
                             .and_then(|index| state.channel_connect.entries.get(index))
                     })
                     .map(|entry| (entry.kind.to_string(), "default".to_string()));
-                if let Some((kind, alias)) = selected {
-                    if let Some(ref mut state) = self.extensions_modal {
+                if let Some((kind, alias)) = selected
+                    && let Some(ref mut state) = self.extensions_modal {
                         let channel_id = format!("{kind}.{alias}");
                         state.input = Some(crate::views::extensions_modal::ModalInput::from_specs(
                             format!("channel_message:{channel_id}"),
@@ -2441,7 +2441,6 @@ impl AgentView {
                         ));
                         state.modal_message = None;
                     }
-                }
                 InputOutcome::Changed
             }
             ButtonAction::BindSelectedChannel => {

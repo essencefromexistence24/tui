@@ -90,7 +90,7 @@ pub fn split_scrollback(host: Rect, visible: bool, turn_count: usize) -> (Rect, 
     if !visible || host.width < MIN_CHAT_WIDTH + WIDTH || host.height == 0 {
         return (host, None);
     }
-    let rail_h = (turn_count as u16).max(1).min(MAX_HEIGHT).min(host.height);
+    let rail_h = (turn_count as u16).clamp(1, MAX_HEIGHT).min(host.height);
     let y = host.y + host.height.saturating_sub(rail_h) / 2;
     let rail = Rect {
         x: host.x,

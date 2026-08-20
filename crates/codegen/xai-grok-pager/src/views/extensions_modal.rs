@@ -1727,7 +1727,7 @@ pub fn build_action_from_input(
     }
 
     if let Some(channel_id) = command_prefix.strip_prefix("channel_message:") {
-        let recipient = field_texts.get(0)?.trim();
+        let recipient = field_texts.first()?.trim();
         let message = field_texts.get(1)?.trim();
         if recipient.is_empty() || message.is_empty() {
             return None;
@@ -3109,11 +3109,9 @@ pub fn render_extensions_modal(
                     entry_data_indices.push(Some(node_index));
                     entry_group_keys.push(None);
                     entry_badge_text.push(
-                        state
+                        if state
                             .connect_configurations
-                            .contains_key(&node.id)
-                            .then(|| "Configured".to_string())
-                            .unwrap_or_default(),
+                            .contains_key(&node.id) { "Configured".to_string() } else { Default::default() },
                     );
                     entry_badge_color.push(None);
                 }

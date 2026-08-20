@@ -34,14 +34,6 @@ impl DxViewCommand {
             view: DxView::Diff,
         }
     }
-
-    pub const fn animation() -> Self {
-        Self {
-            name: "anim",
-            description: "Open the Train screen",
-            view: DxView::Animation,
-        }
-    }
 }
 
 impl SlashCommand for DxViewCommand {
@@ -66,8 +58,7 @@ impl SlashCommand for DxViewCommand {
             DxView::Editor => "/editor",
             DxView::FileBrowser => "/browser",
             DxView::Diff => "/diff",
-            DxView::Animation => "/anim",
-            DxView::Chat => unreachable!("not exposed by DxViewCommand"),
+            DxView::Animation | DxView::Chat => unreachable!("not exposed by DxViewCommand"),
         }
     }
 

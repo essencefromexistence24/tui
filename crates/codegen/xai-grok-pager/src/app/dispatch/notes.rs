@@ -366,8 +366,8 @@ fn extract_session_context(agent: &AgentView) -> String {
                     user_prompts.push(text);
                 }
             }
-            RenderBlock::ToolCall(tc) => {
-                if file_paths.len() < 20 {
+            RenderBlock::ToolCall(tc)
+                if file_paths.len() < 20 => {
                     match tc {
                         ToolCallBlock::Read(b) => {
                             file_paths.push(b.path.clone());
@@ -381,7 +381,6 @@ fn extract_session_context(agent: &AgentView) -> String {
                         _ => {}
                     }
                 }
-            }
             _ => {}
         }
         // Stop early once we have enough context.

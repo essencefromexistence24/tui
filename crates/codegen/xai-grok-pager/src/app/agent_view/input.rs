@@ -51,6 +51,159 @@ mod carousel_prompt_routing_tests {
         assert_eq!(agent.dx_ui.animation.intro, intro_before);
     }
 }
+#[cfg(test)]
+mod splash_home_input_tests {
+    use super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::app_view::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    fn ctrl_key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::CONTROL))
+    }
+
+    fn is_splash(agent: &super::super::AgentView) -> bool {
+        agent.dx_ui.animation.current() == crate::dx::animation::AnimationKind::Splash
+    }
+
+    #[test]
+    fn splash_up_down_cycles_menu_selection() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        assert!(is_splash(&agent));
+        // None + Down -> first row.
+        agent.handle_input(&key(KeyCode::Down), &registry);
+        assert_eq!(agent.splash_menu_index, Some(0));
+        // 0 + Down -> 1.
+        agent.handle_input(&key(KeyCode::Down), &registry);
+        assert_eq!(agent.splash_menu_index, Some(1));
+        // 1 + Up -> 0.
+        agent.handle_input(&key(KeyCode::Up), &registry);
+        assert_eq!(agent.splash_menu_index, Some(0));
+        // 0 + Up wraps -> last row.
+        agent.handle_input(&key(KeyCode::Up), &registry);
+        assert_eq!(agent.splash_menu_index, Some(3));
+        // 3 + Down wraps -> 0.
+        agent.handle_input(&key(KeyCode::Down), &registry);
+        assert_eq!(agent.splash_menu_index, Some(0));
+    }
+
+    #[test]
+    fn splash_number_keys_dispatch_menu_rows() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&key(KeyCode::Char('1')), &registry),
+            InputOutcome::Action(Action::OpenNewWorktreeDialog)
+        ));
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&key(KeyCode::Char('2')), &registry),
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&key(KeyCode::Char('4')), &registry),
+            InputOutcome::Action(Action::Quit)
+        ));
+    }
+
+    #[test]
+    fn splash_changelog_row_needs_fetched_markdown() {
+        let registry = ActionRegistry::defaults();
+        // No markdown yet: the row no-ops and '3' falls through to the prompt.
+        let mut agent = make_agent();
+        agent.handle_input(&key(KeyCode::Char('3')), &registry);
+        assert_eq!(agent.prompt.text(), "3");
+        // With markdown: opens the release notes modal.
+        let mut agent = make_agent();
+        agent.splash_changelog_md = Some("# Notes".to_string());
+        assert!(matches!(
+            agent.handle_input(&key(KeyCode::Char('3')), &registry),
+            InputOutcome::Action(Action::ShowReleaseNotes { .. })
+        ));
+        assert_eq!(agent.prompt.text(), "", "dispatch must not type into the prompt");
+    }
+
+    #[test]
+    fn splash_menu_key_codes_dispatch_rows() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&ctrl_key(KeyCode::Char('w')), &registry),
+            InputOutcome::Action(Action::OpenNewWorktreeDialog)
+        ));
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&ctrl_key(KeyCode::Char('q')), &registry),
+            InputOutcome::Action(Action::Quit)
+        ));
+        // ctrl+s already opens the session picker (Resume) on the splash.
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&ctrl_key(KeyCode::Char('s')), &registry),
+            InputOutcome::Action(Action::FetchSessionList)
+        ));
+    }
+
+    #[test]
+    fn splash_left_right_cycles_suggestion_batch() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        assert_eq!(agent.splash_suggestion_batch, 0);
+        agent.handle_input(&key(KeyCode::Right), &registry);
+        assert_eq!(agent.splash_suggestion_batch, 1);
+        // Right wraps from the last batch back to 0.
+        agent.splash_suggestion_batch = 3;
+        agent.handle_input(&key(KeyCode::Right), &registry);
+        assert_eq!(agent.splash_suggestion_batch, 0);
+        // Left wraps back to the last batch.
+        agent.handle_input(&key(KeyCode::Left), &registry);
+        assert_eq!(agent.splash_suggestion_batch, 3);
+    }
+
+    #[test]
+    fn splash_enter_starts_new_session_without_selection_and_dispatches_with_one() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        assert!(matches!(
+            agent.handle_input(&key(KeyCode::Enter), &registry),
+            InputOutcome::Action(Action::NewSession)
+        ));
+        let mut agent = make_agent();
+        agent.handle_input(&key(KeyCode::Down), &registry);
+        assert!(matches!(
+            agent.handle_input(&key(KeyCode::Enter), &registry),
+            InputOutcome::Action(Action::OpenNewWorktreeDialog)
+        ));
+    }
+
+    #[test]
+    fn splash_arrows_do_not_touch_carousel_but_non_splash_kinds_still_cycle() {
+        let registry = ActionRegistry::defaults();
+        let mut agent = make_agent();
+        let intro_before = agent.dx_ui.animation.intro;
+        // On the splash, Up is menu navigation — the carousel intro is untouched.
+        agent.handle_input(&key(KeyCode::Up), &registry);
+        assert_eq!(agent.splash_menu_index, Some(3));
+        assert_eq!(agent.dx_ui.animation.intro, intro_before);
+        // On a non-splash kind, Up still selects the intro.
+        agent.dx_ui.animation.next();
+        let current_before = agent.dx_ui.animation.current();
+        agent.handle_input(&key(KeyCode::Up), &registry);
+        assert_eq!(agent.dx_ui.animation.intro, current_before);
+        assert_eq!(
+            agent.splash_menu_index,
+            Some(3),
+            "menu selection stays untouched on non-splash kinds"
+        );
+    }
+}
 impl AgentView {
     /// Minimal's composer stays logically focused when Vim startup leaves the
     /// legacy pane field on Scrollback; overlays and dropdowns still own input.
@@ -143,6 +296,23 @@ impl AgentView {
             || self.gboom.is_some()
             || self.video_viewer.is_some()
             || self.image_viewer.is_some()
+    }
+    /// Dispatch a splash-home menu row by index. Mirror of the welcome menu:
+    /// 0 = New worktree, 1 = Resume session, 2 = Changelog (opens release notes
+    /// only once the changelog markdown has been fetched), 3 = Quit.
+    pub(crate) fn splash_dispatch_menu(&self, index: usize) -> Option<InputOutcome> {
+        match index {
+            0 => Some(InputOutcome::Action(Action::OpenNewWorktreeDialog)),
+            1 => Some(InputOutcome::Action(Action::FetchSessionList)),
+            2 => self.splash_changelog_md.as_deref().map(|md| {
+                InputOutcome::Action(Action::ShowReleaseNotes {
+                    title: "Release Notes".to_string(),
+                    content: md.trim().to_string(),
+                })
+            }),
+            3 => Some(InputOutcome::Action(Action::Quit)),
+            _ => None,
+        }
     }
     /// Prompt pane focused with an empty draft and no overlay or prompt-local
     /// sub-state owning keys — the state where a bare Left backs out of the
@@ -570,8 +740,14 @@ impl AgentView {
             }
             return InputOutcome::Changed;
         }
-        if self.dx_ui.view == crate::dx::DxView::Animation && !self.dx_ui.palette_visible {
+        if self.dx_ui.view == crate::dx::DxView::Animation
+            && !self.dx_ui.palette_visible
+            && !self.modal_owns_input()
+        {
             let mut handled = false;
+            let mut action: Option<InputOutcome> = None;
+            let on_splash = self.dx_ui.animation.current() == crate::dx::animation::AnimationKind::Splash;
+            let empty = self.prompt.text().is_empty();
             if let Event::Key(key) = ev
                 && key.kind != KeyEventKind::Release
                 && key.modifiers.is_empty()
@@ -583,21 +759,78 @@ impl AgentView {
                         self.dx_ui.view = crate::dx::DxView::Chat;
                         handled = true;
                     }
-                    KeyCode::Left if self.prompt.text().is_empty() => {
+                    // Splash home: Up/Down navigate the menu, Left/Right cycle
+                    // the bottom-bar suggestion batch. Other animation kinds
+                    // keep the carousel behavior below.
+                    KeyCode::Up if empty && on_splash => {
+                        self.splash_menu_index = Some(match self.splash_menu_index {
+                            Some(0) | None => 3,
+                            Some(i) => i - 1,
+                        });
+                        handled = true;
+                    }
+                    KeyCode::Down if empty && on_splash => {
+                        self.splash_menu_index = Some(match self.splash_menu_index {
+                            Some(3) | None => 0,
+                            Some(i) => i + 1,
+                        });
+                        handled = true;
+                    }
+                    KeyCode::Left if empty && on_splash => {
+                        self.splash_suggestion_batch = self
+                            .splash_suggestion_batch
+                            .checked_sub(1)
+                            .unwrap_or(crate::app::agent_view::SPLASH_SUGGESTION_BATCHES - 1);
+                        self.splash_suggestion_rotated_at = Instant::now();
+                        handled = true;
+                    }
+                    KeyCode::Right if empty && on_splash => {
+                        self.splash_suggestion_batch = (self.splash_suggestion_batch + 1)
+                            % crate::app::agent_view::SPLASH_SUGGESTION_BATCHES;
+                        self.splash_suggestion_rotated_at = Instant::now();
+                        handled = true;
+                    }
+                    KeyCode::Char(ch) if empty && on_splash && ('1'..='4').contains(&ch) => {
+                        let index = match ch {
+                            '1' => 0,
+                            '2' => 1,
+                            '3' => 2,
+                            '4' => 3,
+                            _ => unreachable!(),
+                        };
+                        let dispatch = self.splash_dispatch_menu(index);
+                        if let Some(outcome) = dispatch {
+                            action = Some(outcome);
+                        }
+                    }
+                    KeyCode::Enter if empty && on_splash => {
+                        match self.splash_menu_index {
+                            Some(index) => {
+                                if let Some(outcome) = self.splash_dispatch_menu(index) {
+                                    action = Some(outcome);
+                                }
+                            }
+                            // No menu selection yet: Enter starts a new session
+                            // (like the welcome's prompt Enter), landing back
+                            // on the home screen.
+                            None => action = Some(InputOutcome::Action(Action::NewSession)),
+                        }
+                    }
+                    KeyCode::Left if empty => {
                         self.dx_ui.animation.previous();
                         handled = true;
                     }
-                    KeyCode::Right if self.prompt.text().is_empty() => {
+                    KeyCode::Right if empty => {
                         self.dx_ui.animation.next();
                         handled = true;
                     }
-                    KeyCode::Up if self.prompt.text().is_empty() => {
+                    KeyCode::Up if empty => {
                         self.dx_ui.animation.select_intro();
                         let message = format!("Intro: {}", self.dx_ui.animation.intro.name());
                         self.show_toast(&message);
                         handled = true;
                     }
-                    KeyCode::Down if self.prompt.text().is_empty() => {
+                    KeyCode::Down if empty => {
                         self.dx_ui.animation.select_outro();
                         let message = format!("Outro: {}", self.dx_ui.animation.outro.name());
                         self.show_toast(&message);
@@ -605,7 +838,11 @@ impl AgentView {
                     }
                     _ => {}
                 }
+                if let Some(outcome) = action {
+                    return outcome;
+                }
                 if handled
+                    && !on_splash
                     && self.dx_ui.view == crate::dx::DxView::Animation
                     && matches!(key.code, KeyCode::Left | KeyCode::Right | KeyCode::Down)
                 {
@@ -613,6 +850,23 @@ impl AgentView {
                     self.dx_ui
                         .sound
                         .start_animation_loop(self.dx_ui.animation.current().sound());
+                }
+            }
+            // Menu key codes shown on the splash menu rows (welcome parity).
+            if let Event::Key(key) = ev
+                && key.kind != KeyEventKind::Release
+                && key.modifiers == KeyModifiers::CONTROL
+                && empty
+                && on_splash
+            {
+                match key.code {
+                    KeyCode::Char('w') => {
+                        return InputOutcome::Action(Action::OpenNewWorktreeDialog);
+                    }
+                    KeyCode::Char('q') => {
+                        return InputOutcome::Action(Action::Quit);
+                    }
+                    _ => {}
                 }
             }
             if handled {

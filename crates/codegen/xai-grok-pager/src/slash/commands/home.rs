@@ -1,9 +1,10 @@
-//! `/home` -- exit the current session and return to the welcome screen.
+//! `/home` -- return to the splash home screen.
 
 use crate::app::actions::Action;
+use crate::dx::DxView;
 use crate::slash::command::{CommandExecCtx, CommandResult, SlashCommand};
 
-/// Exit the current session and return to the welcome screen.
+/// Return to the splash home screen (Animation view).
 pub struct HomeCommand;
 
 impl SlashCommand for HomeCommand {
@@ -16,7 +17,7 @@ impl SlashCommand for HomeCommand {
     }
 
     fn description(&self) -> &str {
-        "Return to the welcome screen"
+        "Return to the home screen"
     }
 
     fn usage(&self) -> &str {
@@ -24,6 +25,6 @@ impl SlashCommand for HomeCommand {
     }
 
     fn run(&self, _ctx: &mut CommandExecCtx, _args: &str) -> CommandResult {
-        CommandResult::Action(Action::ExitSession)
+        CommandResult::Action(Action::SwitchDxView(DxView::Animation))
     }
 }

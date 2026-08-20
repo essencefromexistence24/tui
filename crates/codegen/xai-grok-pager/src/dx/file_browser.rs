@@ -327,6 +327,7 @@ conds = [
     )
 }
 
+#[derive(Default)]
 struct BrowserEngine {
     core: Option<Core>,
     term: Option<fb_term::Term>,
@@ -336,18 +337,6 @@ struct BrowserEngine {
     applied_theme: Option<(bool, String)>,
 }
 
-impl Default for BrowserEngine {
-    fn default() -> Self {
-        Self {
-            core: None,
-            term: None,
-            events: None,
-            error: None,
-            last_area: Rect::default(),
-            applied_theme: None,
-        }
-    }
-}
 
 impl BrowserEngine {
     pub fn ensure_initialized(&mut self) {

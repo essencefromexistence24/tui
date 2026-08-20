@@ -17,15 +17,17 @@ const MAX_FIGLET_ROWS: u16 = 12;
 /// Leave room for blank line + description under the title.
 const SPLASH_TAIL_ROWS: u16 = 3;
 
+/// Returns the row just below the centered figlet title + description block
+/// (in `area` coordinates), so callers can place UI right under the logo.
 pub fn render(
     area: Rect,
     buf: &mut Buffer,
     theme: &ChatTheme,
     font_index: usize,
     rainbow: &RainbowEffect,
-) {
+) -> u16 {
     if area.width == 0 || area.height == 0 {
-        return;
+        return area.y;
     }
 
     // Fill splash plate with the active theme so mode/theme switches recolor fully.
@@ -45,7 +47,7 @@ pub fn render(
         )))
         .alignment(ratatui::layout::Alignment::Center)
         .render(area, buf);
-        return;
+        return area.y.saturating_add(1);
     }
     let current_font = all_fonts[font_index % all_fonts.len()].as_str();
 
@@ -87,6 +89,8 @@ pub fn render(
         .alignment(ratatui::layout::Alignment::Center)
         .block(Block::default())
         .render(centered_area, buf);
+
+    centered_area.y.saturating_add(centered_area.height)
 }
 
 fn render_figlet_title(
@@ -102,6 +106,8 @@ fn render_figlet_title(
     // FIGlet fonts are Latin-1 / ASCII — never fail UTF-8 strictly
     let font_str = String::from_utf8_lossy(&font_data);
     let hardblank = extract_hardblank(&font_str);
+
+    let font_str = truncate_font_for_figlet(&font_str);
 
     let Ok(font) = FIGlet::from_content(&font_str) else {
         return compact_dx_title(rainbow, theme);
@@ -203,6 +209,42 @@ fn extract_hardblank(font_str: &str) -> char {
         return rest.chars().next().unwrap_or('$');
     }
     '$'
+}
+
+/// Cut a FIGlet font down to the required characters (32–126 + 7 Deutsch
+/// glyphs) so figlet-rs never trips over the trailing codetag section.
+///
+/// figlet-rs's `read_codetag_font` rejects a font when the bytes after the
+/// 102 required characters aren't a multiple of `height + 1` lines, which
+/// most of our fonts violate — making `FIGlet::from_content` fall back to the
+/// generic block "DX" title. Truncating to exactly
+/// `1 + comment_lines + 102 * height` lines keeps every glyph "Dx" needs and
+/// leaves no trailing section for codetag parsing to fail on.
+fn truncate_font_for_figlet(font_str: &str) -> String {
+    let mut lines = font_str.lines();
+    let Some(header) = lines.next() else {
+        return font_str.to_string();
+    };
+    let infos: Vec<&str> = header.split_whitespace().collect();
+    if infos.len() < 6 {
+        return font_str.to_string();
+    }
+    let Ok(height) = infos[1].parse::<usize>() else {
+        return font_str.to_string();
+    };
+    let Ok(comment_lines) = infos[5].parse::<usize>() else {
+        return font_str.to_string();
+    };
+    let keep = 1 + comment_lines + 102 * height;
+    let mut out = String::with_capacity(font_str.len());
+    for (i, line) in font_str.lines().enumerate() {
+        if i >= keep {
+            break;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
 }
 
 /// Fit a FIGlet line into `max_w` cells, keeping the middle when possible.

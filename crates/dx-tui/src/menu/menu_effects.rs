@@ -154,13 +154,13 @@ impl EffectsRepository {
 
 impl Menu {
     pub fn pick_opening_effect(&mut self) {
-        self.effects = EffectsRepository::new(self.theme.clone(), &mut self.rng);
+        self.effects = EffectsRepository::new(self.theme, &mut self.rng);
         self.active_effect = self.effects.get_random_opening_effect(&mut self.rng);
         self.auto_cycle_timer = Duration::ZERO;
     }
 
     pub fn pick_closing_effect(&mut self) {
-        self.effects = EffectsRepository::new(self.theme.clone(), &mut self.rng);
+        self.effects = EffectsRepository::new(self.theme, &mut self.rng);
         self.active_effect = self.effects.get_random_closing_effect(&mut self.rng);
         self.auto_cycle_timer = Duration::ZERO;
     }

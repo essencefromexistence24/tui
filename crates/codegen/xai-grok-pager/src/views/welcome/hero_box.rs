@@ -91,10 +91,94 @@ fn left_col_width() -> u16 {
     }
 }
 
+/// Height (rows) of a logo-less hero box, used to size the home-splash slot
+/// before [`compute_hero_box`] places the box inside it.
+pub(crate) fn home_box_height(menu_height: u16, info_height: u16) -> u16 {
+    2 + V_PAD * 2 + right_col_height(menu_height, info_height)
+}
+
+/// Layout for the logo-less home-splash box: the bordered box fills `area`
+/// exactly (version + subtitle + menu only — no prompt/tip/error rows, no
+/// centering padding). Sized by [`home_box_height`], so the caller passes a
+/// slot whose height matches the returned box height.
+pub(super) fn compute_home_box(area: Rect, menu_height: u16) -> WelcomeLayout {
+    let zero = Rect::default();
+    let box_width = area.width.saturating_sub(6).min(120);
+    let inner_width = box_width.saturating_sub(2);
+    let left_col_width = H_INSET;
+    let right_width = inner_width.saturating_sub(left_col_width);
+    let info_slot_width = right_width.saturating_sub(H_INSET);
+    let info_height = 0u16;
+    let inner_height = right_col_height(menu_height, info_height);
+
+    // Horizontally center the box; the slot's height equals the box height, so
+    // the box fills it top to bottom.
+    let [_, hero_box, _] = Layout::horizontal([
+        Constraint::Min(0),
+        Constraint::Length(box_width),
+        Constraint::Min(0),
+    ])
+    .flex(Flex::Center)
+    .areas(area);
+
+    let inner = Rect {
+        x: hero_box.x + 1,
+        y: hero_box.y + 1 + V_PAD,
+        width: inner_width,
+        height: inner_height,
+    };
+    let right_x = inner.x + left_col_width;
+
+    // Version line at top of right column.
+    let hero_version = Rect {
+        x: right_x,
+        y: inner.y,
+        width: right_width,
+        height: 1,
+    };
+
+    // Subtitle line below version (info slot is empty on the home box).
+    let hero_subtitle = Rect {
+        x: right_x,
+        y: inner.y + 1,
+        width: right_width,
+        height: 1,
+    };
+
+    // version + subtitle + gap-before-menu (no info slot rows).
+    let right_header_rows = (1 + subtitle_rows(info_height)) + info_height + 1;
+
+    let hero_menu = Rect {
+        x: right_x,
+        y: inner.y + right_header_rows,
+        width: info_slot_width,
+        height: menu_height.min(inner.height.saturating_sub(right_header_rows)),
+    };
+
+    WelcomeLayout {
+        logo: zero,
+        error: zero,
+        menu: zero,
+        changelog: zero,
+        tip: zero,
+        prompt: zero,
+        version: zero,
+        hero_box,
+        hero_logo: zero,
+        hero_version,
+        hero_subtitle,
+        hero_info: zero,
+        hero_menu,
+    }
+}
+
 /// Compute the hero box layout: bordered box with logo left, version + menu right.
 ///
 /// Sizes the in-box info slot here (the announcement clamped to fit, else the
 /// fixed `changelog_height`) so the renderer just draws into `hero_info`.
+/// `show_logo == false` (the home-splash box) collapses the logo column, skips
+/// the announcement fit-clamp (the caller sized the slot exactly), and forces
+/// zero top padding so the box fills its slot.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn compute_hero_box(
     content_area: Rect,
@@ -105,6 +189,7 @@ pub(super) fn compute_hero_box(
     announcement: Option<&xai_grok_announcements::RemoteAnnouncement>,
     expanded: bool,
     has_upgrade_cta: bool,
+    show_logo: bool,
 ) -> WelcomeLayout {
     let zero = Rect::default();
     let tip_gap = if tip_height > 0 { 1u16 } else { 0 };
@@ -115,21 +200,30 @@ pub(super) fn compute_hero_box(
     // i.e. measured == drawn.
     let box_width = content_area.width.saturating_sub(6).min(120);
     let inner_width = box_width.saturating_sub(2);
-    let left_col_width = left_col_width();
+    let left_col_width = if show_logo {
+        left_col_width()
+    } else {
+        H_INSET
+    };
     let right_width = inner_width.saturating_sub(left_col_width);
     let info_slot_width = right_width.saturating_sub(H_INSET);
     let info_height = match announcement {
-        Some(ann) => clamp_info_height(
+        Some(ann) if show_logo => clamp_info_height(
             announcement_desired_rows(ann, info_slot_width, expanded, has_upgrade_cta),
             content_area.height,
             error_height,
             menu_height,
             tip_height,
         ),
+        Some(ann) => announcement_desired_rows(ann, info_slot_width, expanded, has_upgrade_cta),
         None => changelog_height,
     };
 
-    let logo_rows = super::logo::full_logo_line_count();
+    let logo_rows = if show_logo {
+        super::logo::full_logo_line_count()
+    } else {
+        0
+    };
     let info_gap = if info_height > 0 { 1u16 } else { 0 };
     let inner_height = logo_rows.max(right_col_height(menu_height, info_height));
     let hero_box_height = 2 + V_PAD * 2 + inner_height;
@@ -138,24 +232,29 @@ pub(super) fn compute_hero_box(
     let fixed_above = gap_after_error + error_height;
 
     // Top padding for vertical centering (use the default menu height so the
-    // logo position stays constant regardless of picker/focus state).
-    let default_menu_height = 4u16;
-    let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
-    let default_hero = 2 + V_PAD * 2 + default_inner;
-    let remaining = content_area.height.saturating_sub(fixed_above);
-    let top_pad = remaining
-        .saturating_sub(default_hero)
-        .saturating_sub(fixed_below)
-        / 3;
-    // Centering derives top_pad from the default-menu box, but the fit gate
-    // (min_content_height) sizes for the actual box with no pad. Clamp to the
-    // real slack so a taller-than-default menu can't push the rows below the
-    // box off the bottom at the tight boundary.
-    let top_pad = top_pad.min(
-        content_area
-            .height
-            .saturating_sub(fixed_above + hero_box_height + 1 + fixed_below),
-    );
+    // logo position stays constant regardless of picker/focus state). The
+    // home-splash box is sized exactly by its caller: no centering padding.
+    let top_pad = if show_logo {
+        let default_menu_height = 4u16;
+        let default_inner = logo_rows.max(right_col_height(default_menu_height, info_height));
+        let default_hero = 2 + V_PAD * 2 + default_inner;
+        let remaining = content_area.height.saturating_sub(fixed_above);
+        let top_pad = remaining
+            .saturating_sub(default_hero)
+            .saturating_sub(fixed_below)
+            / 3;
+        // Centering derives top_pad from the default-menu box, but the fit gate
+        // (min_content_height) sizes for the actual box with no pad. Clamp to the
+        // real slack so a taller-than-default menu can't push the rows below the
+        // box off the bottom at the tight boundary.
+        top_pad.min(
+            content_area
+                .height
+                .saturating_sub(fixed_above + hero_box_height + 1 + fixed_below),
+        )
+    } else {
+        0
+    };
 
     let [
         _,
@@ -207,11 +306,15 @@ pub(super) fn compute_hero_box(
     let logo_left_pad = LOGO_H_PAD.saturating_sub(1);
 
     // Logo top-aligned, horizontally centered within left column.
-    let hero_logo = Rect {
-        x: inner.x + logo_left_pad,
-        y: inner.y,
-        width: logo_width.min(inner.width.saturating_sub(logo_left_pad)),
-        height: logo_rows.min(inner.height),
+    let hero_logo = if show_logo {
+        Rect {
+            x: inner.x + logo_left_pad,
+            y: inner.y,
+            width: logo_width.min(inner.width.saturating_sub(logo_left_pad)),
+            height: logo_rows.min(inner.height),
+        }
+    } else {
+        zero
     };
 
     // Right column: rest of inner width after left column.
@@ -308,6 +411,7 @@ pub(super) fn render_hero_box(
     changelog_bullets: &[String],
     changelog_has_full_notes: bool,
     upgrade_cta: Option<&str>,
+    show_logo: bool,
     #[cfg(feature = "local-workspace")] workspace_mode: Option<(
         super::WelcomeWorkspaceMode,
         bool,
@@ -323,8 +427,16 @@ pub(super) fn render_hero_box(
         .border_style(Style::default().fg(border_color));
     border_block.render(layout.hero_box, buf);
 
-    super::logo::render_full_logo(layout.hero_logo, buf, theme);
+    if show_logo {
+        super::logo::render_full_logo(layout.hero_logo, buf, theme);
+    }
 
+    let version_mode = if show_logo {
+        super::VersionBadgeMode::HeroInline
+    } else {
+        // Home-splash box: no logo, badge reads just "Dx".
+        super::VersionBadgeMode::HomeSplash
+    };
     super::render_version_badge(
         layout.hero_version,
         buf,
@@ -332,7 +444,7 @@ pub(super) fn render_hero_box(
         None,
         0,
         false,
-        super::VersionBadgeMode::HeroInline,
+        version_mode,
     );
 
     // Subtitle line below the version.

@@ -770,6 +770,30 @@ pub(crate) enum AgentDeferredSend {
     /// Ctrl+Enter — a mid-turn interjection.
     Interject,
 }
+/// Curated dx-tui feature blurbs for the splash bottom bar, grouped into
+/// batches of 3 that rotate every few seconds on the home screen.
+pub(crate) const SPLASH_SUGGESTIONS: [&str; 12] = [
+    "Play videos with /video",
+    "Diff changes with /diff",
+    "Browse files with /browser",
+    "Edit code with /editor",
+    "Message channels with /channels",
+    "Connect tools with /connects",
+    "Plan changes with /plan",
+    "Track tasks with /tasks",
+    "Auto-approve with /auto",
+    "Jump to files with /jump",
+    "Review usage with /usage",
+    "Get help with /help",
+];
+/// Number of suggestion batches (3 suggestions each).
+pub(crate) const SPLASH_SUGGESTION_BATCHES: usize = SPLASH_SUGGESTIONS.len() / 3;
+
+/// Suggestions for a batch index (cycles over [`SPLASH_SUGGESTIONS`]).
+pub(crate) fn splash_suggestion_batch(batch: usize) -> &'static [&'static str] {
+    let start = batch.rem_euclid(SPLASH_SUGGESTION_BATCHES) * 3;
+    &SPLASH_SUGGESTIONS[start..start + 3]
+}
 pub struct AgentView {
     pub session: AgentSession,
     /// Native, presentation-only state for the directly merged DX surfaces.
@@ -1111,6 +1135,21 @@ pub struct AgentView {
     pub media_link_paths_gen: Option<u64>,
     /// Last mouse position (column, row) for hover hit-testing.
     pub last_mouse_pos: (u16, u16),
+    /// Splash-home box: currently selected menu row (None = no keyboard focus).
+    pub splash_menu_index: Option<usize>,
+    /// Splash-home box: hit-test rects for the menu rows (filled each draw).
+    pub splash_menu_rects: Vec<Rect>,
+    /// Last-rendered changelog markdown for the splash Changelog row (set at
+    /// draw time from the app-level copy; `None` until the fetch lands).
+    pub splash_changelog_md: Option<String>,
+    /// Pending update version for the splash's top-left notice.
+    // Sumon — update tip hidden for now (WIP); keep the field for re-enable.
+    #[allow(dead_code)]
+    pub splash_pending_update: Option<String>,
+    /// Splash bottom-bar suggestion batch index (see `SPLASH_SUGGESTIONS`).
+    pub splash_suggestion_batch: usize,
+    /// When the splash suggestion batch last auto-rotated (every 3s).
+    pub splash_suggestion_rotated_at: Instant,
     /// When the pointer last moved (any mouse event). Bounds the macOS
     /// Cmd-key link-hover poll: a pointer merely *resting* over content must
     /// not keep the ~30fps animation tick (and its per-tick CoreGraphics
@@ -2227,15 +2266,14 @@ fn collect_citation_links(
                     });
                 }
             }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf)) => {
-                if !wf.url.is_empty() {
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(wf))
+                if !wf.url.is_empty() => {
                     links.push(VisibleLink {
                         rects: vec![block_geom.content_area],
                         target: crate::render::osc8::LinkTarget::Url(Arc::from(wf.url.as_str())),
                         id: None,
                     });
                 }
-            }
             _ => {}
         }
     }

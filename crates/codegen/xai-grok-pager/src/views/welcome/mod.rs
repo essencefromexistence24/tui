@@ -276,6 +276,7 @@ impl WelcomeLayout {
                 announcement,
                 expanded,
                 has_upgrade_cta,
+                true,
             );
         }
 
@@ -399,6 +400,8 @@ pub(super) enum VersionBadgeMode<'a> {
     HeroFooter,
     /// Hero inline: **Grok Build Beta**  VERSION (left-aligned).
     HeroInline,
+    /// Home-splash hero inline: **Dx**  VERSION (left-aligned, no Beta label).
+    HomeSplash,
 }
 
 pub(super) fn render_version_badge(
@@ -423,7 +426,9 @@ pub(super) fn render_version_badge(
     let (show_team, show_tier, show_api_key, align) = match &mode {
         VersionBadgeMode::Full { .. } => (true, true, true, Alignment::Right),
         VersionBadgeMode::HeroFooter => (true, false, true, Alignment::Right),
-        VersionBadgeMode::HeroInline => (false, false, false, Alignment::Left),
+        VersionBadgeMode::HeroInline | VersionBadgeMode::HomeSplash => {
+            (false, false, false, Alignment::Left)
+        }
     };
 
     if show_team && let Some(team) = team_name {
@@ -483,6 +488,18 @@ pub(super) fn render_version_badge(
         VersionBadgeMode::HeroInline => {
             spans.push(Span::styled(
                 "Dx Beta  ",
+                Style::default()
+                    .fg(theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                xai_grok_version::VERSION,
+                Style::default().fg(theme.gray),
+            ));
+        }
+        VersionBadgeMode::HomeSplash => {
+            spans.push(Span::styled(
+                "Dx  ",
                 Style::default()
                     .fg(theme.text_primary)
                     .add_modifier(Modifier::BOLD),
@@ -1868,6 +1885,7 @@ fn render_welcome_done(
             p.changelog_bullets,
             p.changelog_has_full_notes,
             p.upgrade_cta,
+            true,
             #[cfg(feature = "local-workspace")]
             show_workspace_picker.then_some((
                 p.workspace_mode,
@@ -2271,6 +2289,77 @@ pub(crate) struct SessionPickerRenderCtx<'a> {
     /// Process-wide `--chat`: hides the source-filter chip and the
     /// deep-search/filter footer hints (see `WelcomeRenderParams::chat_mode`).
     pub(crate) chat_mode: bool,
+}
+
+/// Height (rows) of the logo-less home-splash box for a menu of `menu_height`
+/// rows and an `info_height`-row info slot. Re-exported for the agent view's
+/// splash render (the `hero_box` module itself is private).
+pub(crate) fn home_box_height(menu_height: u16, info_height: u16) -> u16 {
+    hero_box::home_box_height(menu_height, info_height)
+}
+
+/// Params for the home-splash box (the logo-less hero box drawn over the
+/// matrix splash on the pager's home screen).
+pub(crate) struct HomeBoxParams<'a> {
+    /// Exact box slot: the box fills this area (no centering padding).
+    pub area: Rect,
+    /// Menu rows as `(key, label)` pairs.
+    pub menu_items: &'a [(&'a str, &'a str)],
+    /// Currently selected menu row.
+    pub selected: Option<usize>,
+    /// Mouse position for hover/hit-testing.
+    pub mouse_pos: Option<(u16, u16)>,
+}
+
+/// Hit-test rects produced by [`render_home_box`].
+pub(crate) struct HomeBoxRects {
+    /// Hit-test rect per menu item row (for click/hover).
+    pub menu_rects: Vec<Rect>,
+}
+
+/// Render the home-splash box: version + subtitle + menu inside the bordered
+/// hero box, without the logo. Returns hit-test rects for the menu rows.
+pub(crate) fn render_home_box(
+    params: &HomeBoxParams<'_>,
+    buf: &mut Buffer,
+    theme: &Theme,
+) -> HomeBoxRects {
+    let menu_height = params.menu_items.len() as u16;
+    let layout = hero_box::compute_home_box(params.area, menu_height);
+    #[cfg(not(feature = "local-workspace"))]
+    let rects = hero_box::render_hero_box(
+        &layout,
+        buf,
+        theme,
+        params.menu_items,
+        params.selected,
+        params.mouse_pos,
+        None,
+        false,
+        &[],
+        false,
+        None,
+        false,
+    );
+    #[cfg(feature = "local-workspace")]
+    let rects = hero_box::render_hero_box(
+        &layout,
+        buf,
+        theme,
+        params.menu_items,
+        params.selected,
+        params.mouse_pos,
+        None,
+        false,
+        &[],
+        false,
+        None,
+        false,
+        None,
+    );
+    HomeBoxRects {
+        menu_rects: rects.menu_rects,
+    }
 }
 
 /// Render the session picker list on the welcome screen.

@@ -43,6 +43,21 @@ impl AgentView {
                         && mouse.row >= area.y
                         && mouse.row < area.bottom()
                 };
+                // Splash-home menu: clicking a row selects + dispatches it.
+                if self.dx_ui.view == crate::dx::DxView::Animation
+                    && self.dx_ui.animation.current()
+                        == crate::dx::animation::AnimationKind::Splash
+                {
+                    for (i, rect) in self.splash_menu_rects.iter().enumerate() {
+                        if contains(*rect) {
+                            self.splash_menu_index = Some(i);
+                            if let Some(outcome) = self.splash_dispatch_menu(i) {
+                                return outcome;
+                            }
+                            return InputOutcome::Changed;
+                        }
+                    }
+                }
                 if let Some(&(section, row, _)) = self
                     .dx_ui
                     .sidebar
@@ -72,7 +87,7 @@ impl AgentView {
                                 .iter()
                                 .filter(|(_, info)| info.is_running())
                                 .collect();
-                            running.sort_by(|a, b| a.1.started_at.cmp(&b.1.started_at));
+                            running.sort_by_key(|a| a.1.started_at);
                             if let Some((session_id, _)) = running.get(row) {
                                 self.open_subagent_fullscreen(session_id.to_string());
                             }
@@ -1111,6 +1126,18 @@ impl AgentView {
                 }
             }
             MouseEventKind::Moved => {
+                // Splash-home menu: hovering a row moves the keyboard selection
+                // so the highlight follows the pointer (mirrors the welcome).
+                if self.dx_ui.view == crate::dx::DxView::Animation
+                    && self.dx_ui.animation.current()
+                        == crate::dx::animation::AnimationKind::Splash
+                    && let Some(i) = self
+                        .splash_menu_rects
+                        .iter()
+                        .position(|r| r.contains((mouse.column, mouse.row).into()))
+                    && self.splash_menu_index != Some(i) {
+                        self.splash_menu_index = Some(i);
+                    }
                 let in_minimap = self
                     .dx_ui
                     .minimap
@@ -1893,5 +1920,47 @@ mod tests {
             "double-click must expand the chip"
         );
         assert_eq!(agent.prompt.textarea.text(), text);
+    }
+    /// A left-click on a splash-home menu row selects + dispatches it; hovering
+    /// only moves the selection.
+    #[test]
+    fn splash_menu_click_dispatches_and_hover_selects() {
+        use crate::app::agent_view::test_fixtures::make_agent;
+        use crate::app::actions::Action;
+        use crate::app::app_view::InputOutcome;
+        let mut agent = make_agent();
+        agent.splash_menu_rects = vec![
+            Rect::new(10, 10, 30, 1),
+            Rect::new(10, 11, 30, 1),
+            Rect::new(10, 12, 30, 1),
+            Rect::new(10, 13, 30, 1),
+        ];
+        // Hover (Moved) moves the keyboard selection, like the welcome.
+        agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Moved,
+            column: 15,
+            row: 12,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert_eq!(agent.splash_menu_index, Some(2));
+        // Click row 0 dispatches the New-worktree dialog.
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 10,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::OpenNewWorktreeDialog)
+        ));
+        // Click row 3 dispatches Quit.
+        let outcome = agent.handle_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 11,
+            row: 13,
+            modifiers: KeyModifiers::empty(),
+        });
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
     }
 }

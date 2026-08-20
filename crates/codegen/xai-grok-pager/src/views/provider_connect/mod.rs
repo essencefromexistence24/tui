@@ -253,7 +253,7 @@ fn user_home() -> std::path::PathBuf {
     std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| grok_home())
+        .unwrap_or_else(grok_home)
 }
 
 fn external_oauth_cache_exists(provider_id: &str) -> bool {
@@ -311,7 +311,10 @@ fn save_oauth_refresh_token(provider_id: &str, token: &str) -> Result<(), String
     })
 }
 
-pub(crate) fn start_oauth_job(provider_id: &str) -> Option<Arc<Mutex<Option<Result<(), String>>>>> {
+/// Cell shared with the background OAuth thread: `None` until the job lands.
+pub(crate) type OAuthJobCell = Arc<Mutex<Option<Result<(), String>>>>;
+
+pub(crate) fn start_oauth_job(provider_id: &str) -> Option<OAuthJobCell> {
     let provider = oauth_provider(provider_id)?.to_string();
     let job = Arc::new(Mutex::new(None));
     let result = Arc::clone(&job);
@@ -487,6 +490,10 @@ pub(crate) fn poll_oauth_job(state: &mut ProviderConnectState) {
     }
 }
 
+/// The OS browser/launcher is intentionally NOT enrolled in the TUI process
+/// scope: it must outlive this app (the browser shows the OAuth page after
+/// the TUI closes/restarts).
+#[allow(clippy::disallowed_methods)]
 fn open_verification_page(url: &str) {
     // OAuth authorize URLs contain query separators (`&`). Validate the
     // destination before handing it to the platform launcher; on Windows we

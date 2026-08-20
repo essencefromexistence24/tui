@@ -4956,6 +4956,8 @@ impl AppView {
                                     voice_listening,
                                     voice_interim: voice_interim.as_deref(),
                                     esc_owned_before_agent,
+                                    pending_update_version: self.pending_update_version.as_deref(),
+                                    changelog_markdown: self.changelog_markdown.as_deref(),
                                 },
                             );
                             if let Some(modal) = self.import_claude_modal.as_mut() {
@@ -5073,9 +5075,15 @@ impl AppView {
                                                     false,
                                                     link_spans,
                                                     AppRenderParams {
-                                                        esc_owned_before_agent,
-                                                        ..Default::default()
-                                                    },
+                                                    esc_owned_before_agent,
+                                                    pending_update_version: self
+                                                        .pending_update_version
+                                                        .as_deref(),
+                                                    changelog_markdown: self
+                                                        .changelog_markdown
+                                                        .as_deref(),
+                                                    ..Default::default()
+                                                },
                                                 )
                                                 } else {
                                                     (None, None)

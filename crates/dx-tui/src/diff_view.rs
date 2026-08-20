@@ -18,6 +18,11 @@ use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
 
 use crate::theme::ChatTheme;
 
+/// Result of a background git refresh: the file list or a displayable error.
+pub type DiffRefreshResult = Result<Vec<DiffFile>, String>;
+/// Channel cell shared with the worker thread that refreshes the diff.
+pub type PendingDiffRefresh = Arc<Mutex<Option<DiffRefreshResult>>>;
+
 fn render_scrollbar_thumb_hover(
     area: Rect,
     buf: &mut Buffer,
@@ -150,7 +155,7 @@ pub struct DiffState {
     pub error: Option<String>,
     pub last_refresh: Option<std::time::Instant>,
     /// Completed by a worker thread so git never blocks the TUI.
-    pub pending_refresh: Option<Arc<Mutex<Option<Result<Vec<DiffFile>, String>>>>>,
+    pub pending_refresh: Option<PendingDiffRefresh>,
     /// Hit-test rects filled by the last render (outer bordered panes).
     pub tree_area: Rect,
     pub patch_area: Rect,

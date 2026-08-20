@@ -1141,7 +1141,9 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
                         agent.dx_ui.file_browser.ensure_initialized();
                     }
                     crate::dx::DxView::Diff => agent.dx_ui.diff.open_and_refresh(),
-                    crate::dx::DxView::Animation => agent.dx_ui.animation.restart(),
+                    // The Animation view is the home screen: entering it shows
+                    // the Splash (home) animation, not the last carousel kind.
+                    crate::dx::DxView::Animation => agent.dx_ui.animation.begin_splash(),
                     crate::dx::DxView::Chat => {}
                 }
                 agent.dx_ui.view = view;

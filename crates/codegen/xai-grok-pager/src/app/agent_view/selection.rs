@@ -959,23 +959,21 @@ impl AgentView {
         // Expanded verb-group slot, header row (`header_row_click`): single
         // click on the header row collapses the group; member rows fall through
         // to the normal foldable path below.
-        if header_row_click {
-            if click_count >= 1 {
+        if header_row_click
+            && click_count >= 1 {
                 self.scrollback.collapse_group_if_expanded();
                 return (None, show_word_select_tip);
             }
-        }
 
         // Single click on a group header → expand/collapse the group.
         // Both expand ("N more") and collapse ("▾ N tool calls") headers
         // are standalone entries with their own index.
         let is_group_header = self.scrollback.is_selected_group_header();
-        if is_group_header {
-            if click_count >= 1 {
+        if is_group_header
+            && click_count >= 1 {
                 self.scrollback.toggle_group_expansion();
                 return (None, show_word_select_tip);
             }
-        }
 
         let foldable = self.scrollback.get(idx).is_some_and(|e| e.is_foldable());
         let is_prompt = self

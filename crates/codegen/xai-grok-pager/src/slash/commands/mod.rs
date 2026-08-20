@@ -88,7 +88,6 @@ pub fn builtin_commands() -> Vec<Arc<dyn SlashCommand>> {
         Arc::new(dx_view::DxViewCommand::editor()),
         Arc::new(dx_view::DxViewCommand::browser()),
         Arc::new(dx_view::DxViewCommand::diff()),
-        Arc::new(dx_view::DxViewCommand::animation()),
         Arc::new(video::VideoCommand),
         Arc::new(docs::DocsCommand),
         Arc::new(home::HomeCommand),

@@ -205,6 +205,10 @@ pub struct AppRenderParams<'a> {
     /// attached-agent popup). Feeds the hint path so the bar never
     /// advertises `Esc cancel` while an app-level owner would consume it.
     pub esc_owned_before_agent: bool,
+    /// Pending update version — drives the splash's top-left update notice.
+    pub pending_update_version: Option<&'a str>,
+    /// Changelog markdown — enables the splash Changelog row once fetched.
+    pub changelog_markdown: Option<&'a str>,
 }
 /// What the bottom shortcuts bar renders this frame.
 enum ShortcutsBarContent {
@@ -1029,7 +1033,15 @@ impl AgentView {
             voice_listening,
             voice_interim,
             esc_owned_before_agent,
+            pending_update_version,
+            changelog_markdown,
         } = app_params;
+        if self.splash_pending_update.as_deref() != pending_update_version {
+            self.splash_pending_update = pending_update_version.map(str::to_owned);
+        }
+        if self.splash_changelog_md.as_deref() != changelog_markdown {
+            self.splash_changelog_md = changelog_markdown.map(str::to_owned);
+        }
         let full_area = area;
         let dx_chrome_visible =
             !in_dashboard_overlay && !self.modal_owns_input() && !self.dx_ui.palette_visible;
@@ -2358,6 +2370,13 @@ impl AgentView {
                 height: 1,
             };
             buf.set_style(fill, Style::default().bg(theme.bg_base));
+        }
+        // Splash bottom-bar suggestions: 3 curated commands centered in the
+        // status row, separated by dots.
+        if self.dx_ui.view == crate::dx::DxView::Animation
+            && self.dx_ui.animation.current() == crate::dx::animation::AnimationKind::Splash
+        {
+            self.render_splash_suggestions(buf, layout.status_bar, &theme);
         }
         self.hit_cancel_button.clear();
         self.hit_bg_button.clear();
@@ -4606,6 +4625,15 @@ impl AgentView {
                 height: carousel_content_bottom.saturating_sub(area.y),
             };
             self.dx_ui.animation.render(animation_area, buf, &theme);
+            // Splash home: overlay the hero box + top-left update notice over
+            // the matrix, and advance the bottom-bar suggestion batch. Skip
+            // while an input dropdown is open (it would be painted over).
+            if self.dx_ui.view == crate::dx::DxView::Animation
+                && self.dx_ui.animation.current() == crate::dx::animation::AnimationKind::Splash
+                && !self.prompt.any_dropdown_open()
+            {
+                self.render_splash_home(animation_area, buf, &theme);
+            }
         }
         if let Some(sidebar_area) = dx_sidebar_area {
             let sidebar_model = self.dx_sidebar_view_model();
@@ -4625,12 +4653,11 @@ impl AgentView {
             if minimap_area.contains(ratatui::layout::Position::new(mx, my)) {
                 let row = my.saturating_sub(minimap_area.y) as usize;
                 let turn = self.dx_ui.minimap.scroll as usize + row;
-                if turn < self.scrollback.turn_count() {
-                    if self.dx_ui.minimap.hovered_turn != Some(turn) {
+                if turn < self.scrollback.turn_count()
+                    && self.dx_ui.minimap.hovered_turn != Some(turn) {
                         self.dx_ui.minimap.hovered_turn = Some(turn);
                         self.dx_ui.minimap.hovered_since = Some(std::time::Instant::now());
                     }
-                }
             } else {
                 self.dx_ui.minimap.hovered_turn = None;
                 self.dx_ui.minimap.hovered_since = None;
@@ -4681,6 +4708,111 @@ impl AgentView {
             }
         }
         (cursor, prompt_post_flush)
+    }
+
+    /// Render the splash-home overlay: the logo-less hero box (version +
+    /// subtitle + welcome menu) at the bottom of the animation area, the
+    /// top-left update notice, and advance the bottom-bar suggestion batch.
+    fn render_splash_home(&mut self, animation_area: Rect, buf: &mut Buffer, theme: &Theme) {
+        // Auto-rotate the bottom-bar suggestion batch every 3s.
+        if self.splash_suggestion_rotated_at.elapsed() >= std::time::Duration::from_secs(3) {
+            self.splash_suggestion_batch = (self.splash_suggestion_batch + 1)
+                % crate::app::agent_view::SPLASH_SUGGESTION_BATCHES;
+            self.splash_suggestion_rotated_at = std::time::Instant::now();
+        }
+
+        // Sumon — center box hidden for now (WIP): flip SHOW_HOME_BOX to re-enable.
+        const SHOW_HOME_BOX: bool = false;
+
+        let menu_items: [(&str, &str); 4] = [
+            ("ctrl+w", "New worktree"),
+            ("ctrl+s", "Resume session"),
+            ("", "Changelog"),
+            ("ctrl+q", "Quit"),
+        ];
+        let menu_height = menu_items.len() as u16;
+        let box_height = crate::views::welcome::home_box_height(menu_height, 0);
+        if box_height == 0 || animation_area.height < box_height {
+            return;
+        }
+        // Park the box right under the centered figlet title + description,
+        // sliding it down (never past the prompt) when the logo ends low.
+        let content_bottom = self.dx_ui.animation.last_title_bottom.max(animation_area.y);
+        let box_slot = Rect {
+            x: animation_area.x,
+            y: content_bottom
+                .saturating_add(1)
+                .min(animation_area.bottom().saturating_sub(box_height)),
+            width: animation_area.width,
+            height: box_height,
+        };
+        if SHOW_HOME_BOX {
+            let rects = crate::views::welcome::render_home_box(
+                &crate::views::welcome::HomeBoxParams {
+                    area: box_slot,
+                    menu_items: &menu_items,
+                    selected: self.splash_menu_index,
+                    mouse_pos: Some(self.last_mouse_pos),
+                },
+                buf,
+                theme,
+            );
+            self.splash_menu_rects = rects.menu_rects;
+        }
+
+        // Sumon — update tip hidden for now (WIP): flip SHOW_HOME_BOX to re-enable.
+        // if let Some(ver) = self.splash_pending_update.as_deref() {
+        //     let text = format!("Update: v{ver} available \u{2014} press ctrl+u to restart");
+        //     let w = text.width() as u16;
+        //     let x = animation_area.x.saturating_add(2);
+        //     let y = animation_area.bottom().saturating_sub(1);
+        //     let notice_area = Rect { x, y, width: w, height: 1 };
+        //     buf.set_style(notice_area, Style::default().bg(theme.bg_base));
+        //     buf.set_span_safe(
+        //         x,
+        //         y,
+        //         &Span::styled(
+        //             text,
+        //             Style::default()
+        //                 .fg(theme.accent_user)
+        //                 .add_modifier(ratatui::style::Modifier::BOLD),
+        //         ),
+        //         w,
+        //     );
+        // }
+    }
+
+    /// Render the splash bottom-bar suggestion batch: 3 curated commands
+    /// centered in the status row, separated by dots. No-op on narrow
+    /// terminals where the left CWD block or right status cluster would
+    /// collide with the centered text.
+    fn render_splash_suggestions(&self, buf: &mut Buffer, bar: Rect, theme: &Theme) {
+        if bar.width < 110 {
+            return;
+        }
+        let items = crate::app::agent_view::splash_suggestion_batch(self.splash_suggestion_batch);
+        let mut spans: Vec<Span> = Vec::with_capacity(items.len() * 2);
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(
+                    " · ",
+                    Style::default().fg(theme.gray_dim).bg(theme.bg_base),
+                ));
+            }
+            spans.push(Span::styled(
+                *item,
+                Style::default().fg(theme.gray).bg(theme.bg_base),
+            ));
+        }
+        let line = Line::from(spans);
+        let w = line.width() as u16;
+        if w == 0 {
+            return;
+        }
+        let x = bar.x + bar.width.saturating_sub(w) / 2;
+        let area = Rect { x, y: bar.y, width: w, height: 1 };
+        buf.set_style(area, Style::default().bg(theme.bg_base));
+        buf.set_line_safe(x, bar.y, &line, w);
     }
 
     fn dx_sidebar_view_model(&self) -> crate::dx::sidebar::SidebarViewModel {
@@ -4762,7 +4894,7 @@ impl AgentView {
                 .iter()
                 .filter(|(_, info)| info.is_running())
                 .collect();
-            running.sort_by(|a, b| a.1.started_at.cmp(&b.1.started_at));
+            running.sort_by_key(|a| a.1.started_at);
             if running.is_empty() {
                 vec!["No Subagents Yet".to_string()]
             } else {

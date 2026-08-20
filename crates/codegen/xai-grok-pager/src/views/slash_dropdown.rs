@@ -249,7 +249,7 @@ pub fn render_dropdown(
         if !is_item_first_line || item.tag.is_none() {
             continue;
         }
-        let tag_w = tag_suffix_width(item).min(row_w as usize) as u16;
+        let tag_w = tag_suffix_width(item).min(row_w) as u16;
         if tag_w == 0 {
             continue;
         }
