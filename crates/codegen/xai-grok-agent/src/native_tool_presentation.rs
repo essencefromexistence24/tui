@@ -38,6 +38,7 @@ const BUILTIN_TOOL_NAMES: &[&str] = &[
     "image_to_video",
     "reference_to_video",
     "write",
+    "get_tool_details",
 ];
 
 /// Controls how built-in tools are presented to providers during the test
@@ -132,8 +133,8 @@ mod tests {
     use xai_grok_tools::types::definition::ToolDefinition;
 
     #[test]
-    fn catalog_has_all_26_unique_native_tools() {
-        assert_eq!(BUILTIN_TOOL_NAMES.len(), 26);
+    fn catalog_has_all_27_unique_native_tools() {
+        assert_eq!(BUILTIN_TOOL_NAMES.len(), 27);
         let mut names = BUILTIN_TOOL_NAMES.to_vec();
         names.sort_unstable();
         names.dedup();

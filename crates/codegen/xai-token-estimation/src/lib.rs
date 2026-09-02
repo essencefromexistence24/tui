@@ -1,21 +1,24 @@
 //! Pure shared token-estimation primitives.
 //!
-//! This crate is the single source of truth for the bytes/4 heuristic and the
-//! derived-display arithmetic that `/context`, `/session-info`, the auto-compact
-//! gates, the preflight overflow check, and every client renderer use to talk
-//! about context-window usage.
+//! This crate is the single source of truth for token counting.
+//! Uses accurate `cl100k_base` (same as `dx-token --ai` / `tiktoken-rs`) with
+//! bytes/4 fallback, and the derived-display arithmetic that `/context`,
+//! `/session-info`, the auto-compact gates, the preflight overflow check, and
+//! every client renderer use to talk about context-window usage.
 
-/// Bytes per token under the rough character-based heuristic.
+/// Bytes per token under the rough character-based heuristic (fallback only).
 pub const BYTES_PER_TOKEN: u64 = 4;
 
 /// Per-image approximate token cost when summing
 /// low-resolution image patches.
 pub const IMAGE_TOKEN_ESTIMATE: u64 = 765;
 
-/// Bytes/4 estimate of a string's token count.
+/// Raw `cl100k_base` token count (same as `dx-token --ai`), fallback to bytes/4.
 #[inline]
 pub fn estimate_tokens(s: &str) -> u64 {
-    (s.len() as u64) / BYTES_PER_TOKEN
+    tiktoken_rs::cl100k_base()
+        .map(|bpe| bpe.encode_with_special_tokens(s).len() as u64)
+        .unwrap_or_else(|_| (s.len() as u64) / BYTES_PER_TOKEN)
 }
 
 /// Inverse of [`estimate_tokens`]: convert a token budget into a character
@@ -107,10 +110,12 @@ mod tests {
 
     #[test]
     fn estimate_tokens_is_bytes_over_four() {
+        // Now raw cl100k_base, not bytes/4. Empty stays 0, ASCII 4 chars is 1 token in both.
         assert_eq!(estimate_tokens(""), 0);
-        assert_eq!(estimate_tokens("abc"), 0);
         assert_eq!(estimate_tokens("abcd"), 1);
-        assert_eq!(estimate_tokens(&"x".repeat(4000)), 1000);
+        assert!(estimate_tokens("Hello world") > 0);
+        // tiktoken compresses repeated "x" ~8 chars per token → 4000/8=500, not bytes/4=1000.
+        assert_eq!(estimate_tokens(&"x".repeat(4000)), 500);
     }
 
     #[test]

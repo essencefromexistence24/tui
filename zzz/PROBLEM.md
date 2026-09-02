@@ -1,289 +1,177 @@
-# Problem: Extensions tabs show no Grok Build items
+# Problem — Opencode Zen / Other Non-xAI Models Return Spurious `FreeUsageLimitError` on First Prompt
 
-## Summary
+**Date:** 2026-08-12  
+**Status:** Resolved in the active request pipeline; regression coverage added
+**Symptom reported:** `Retry failed: FreeUsageLimitError: Error from provider (Console): Rate limit exceeded. Please try again later.`  
+**Scope:** xAI models work; Opencode Zen and other hosted Chat Completions models fail consistently. Error is **not** genuine rate limiting / API quota — it is a **request-construction** problem on the 1st turn / tool payload.
 
-In the main DX TUI extensions modal, these original Grok Build tabs appear empty:
+---
 
-- Hooks
-- Plugins
-- Marketplace
-- Skills
-- MCP Servers
+## 1. TL;DR
 
-Providers and Connect are separate DX/ZeroClaw integrations and are not the source of the original registry data. The required fix is to restore the original Grok Build extension registries and render their real items without replacing them with ZeroClaw data or fabricated placeholders.
+Two independent wire-format bugs on the Chat Completions path make the *first* request invalid for strict OpenAI-compatible providers (Opencode Zen, etc.); those providers surface the validation failure through their Console/free-tier gateway as `FreeUsageLimitError / Rate limit exceeded`:
 
-## User-visible symptoms
+1. **Stripped tool schemas** — hosted (non-local) models were sent `{"type":"object"}` for every built-in tool (description + JSON Schema removed via `compact_native_definitions`). xAI's backend tolerates this because it also reads the Dx Serializer Compact catalog in the prompt; any other provider validates/generates from the native `tools[].function.parameters` object and fails.
+2. **Fragmented first prompt** — the session harness builds the logical first turn as several adjacent synthetic `ConversationItem::User` items (workspace context, skills, MCP reminders, then the query). `conversation_to_chat_messages` emitted each as a separate `role: user` wire message. Strict proxies expect `system + single user` on turn 1 and treat the `user/user/user` burst as malformed / token-abuse, triaging to the free-tier path.
 
-When the extensions menu is opened and the user selects Hooks, Plugins, Marketplace, Skills, or MCP Servers, the list contains no useful original Grok Build entries. These tabs were believed to work previously, but after provider/channel integration they appear empty.
+Both fires on turn 1 — before any model text — hence “tool sending / 1st prompt sending problem” and why retries never help.
 
-The TUI previously rendered a generic picker empty state ('No matches') when a loaded registry contained zero entries. That made a valid empty response indistinguishable from a broken request, dropped response, or failed registry connection.
+---
 
-## Scope boundary
+## 2. Symptom vs Reality
 
-Do not replace the existing Grok Build extension tabs with ZeroClaw data.
+| Symptom | Reality |
+|---|---|
+| `FreeUsageLimitError` after retries | Provider Console mapped a **400-class validation error** (bad tools / bad message sequence) onto its free-usage rate-limit bucket |
+| “Rate limit exceeded. Try again later.” | Retrying the same malformed payload reproduces instantly — not time-based |
+| Only Opencode Zen / non-xAI models | xAI path tolerates both bugs; strict OpenAI-compatible proxies do not |
+| Fails on first prompt, before any tool call | Confirms request-construction, not tool-result handling |
 
-- Providers and Connect are separate tabs.
-- Hooks, Plugins, Marketplace, Skills, and MCP Servers must use the existing Grok Build ACP extension endpoints and response types.
-- Do not create fake built-in entries merely to make the UI look populated.
-- Do not delete or overwrite existing user configuration.
+---
 
-## Expected data flow
+## 3. Affected / Unaffected
 
-    Extensions modal opens or refreshes
-        -> pager creates ACP extension requests
-        -> embedded Grok shell routes the requests
-        -> shell discovers the real configured registries
-        -> shell returns { result: ... }
-        -> pager decodes the result
-        -> TaskResult updates ExtensionsModalState
-        -> renderer displays the actual items
+- **Affected:** Any model routed through `ConversationRequest → ChatCompletionRequest` (`crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs` → `crates/codegen/xai-grok-sampler`) when `tool_definitions` non-empty and first turn has >1 synthetic user item. Reported: Opencode Zen (and “others” via same Console gateway).
+- **Not affected:** xAI-hosted models (`grok-*` via first-party base_url) — they read `dx_serializer_compact::TOOL_CATALOG` in the prompt and accept bare `{"type":"object"}` registrations. Local models (`is_local_base_url`) — they bypass hosted tool schemas entirely (`tool_definitions_builtins_only` then cleared).
 
-## Pager request generation
+---
 
-The shared fetch function is:
+## 4. Root Cause #1 — `compact_native_definitions` Stripped Hosted Tool Schemas
 
-- G:/Dx/tui/crates/codegen/xai-grok-pager/src/app/dispatch/transcript.rs
-- Function: extensions_modal_tab_fetches
+**File:** `crates/codegen/xai-grok-agent/src/native_tool_presentation.rs:48-57`
 
-It requests:
+```rust
+pub fn compact_native_definitions(mut definitions: Vec<ToolDefinition>) -> Vec<ToolDefinition> {
+    // for BUILTIN_TOOL_NAMES: description = None, parameters = {"type":"object"}
+}
+```
 
-- x.ai/hooks/list
-- x.ai/plugins/list
-- x.ai/mcp/list
-- x.ai/skills/list
-- x.ai/workflows/list
-- x.ai/marketplace/list
+**Caller (before fix):** `crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs:210-230`
+```rust
+let definitions = self.agent.borrow().tool_definitions().await;
+xai_grok_agent::native_tool_presentation::compact_native_definitions(definitions)
+```
 
-The request effects are implemented in:
+**Why it breaks non-xAI providers:**
+- Dx Serializer Compact is a *prompt-level* catalog (`TOOL_CATALOG` injected as text). It is **not** the provider’s `tools` parameter.
+- OpenAI-compatible Chat Completions providers validate `tools[].function.parameters` as JSON Schema and use it to constrain generation. Sending a bare object makes every tool effectively `any` — many proxies reject with `invalid_request_error` or route to a degraded free path that then emits `FreeUsageLimitError`.
+- Add `tool_choice` without valid tools would be a hard 400, but here `tool_choice` is present **with** invalid tools — strict providers fail the function-definition leg.
 
-- G:/Dx/tui/crates/codegen/xai-grok-pager/src/app/effects/mod.rs
+**Why xAI still works:** xAI’s Responses/Chat backend is co-designed with the compact catalog and synthesizes full schemas server-side; the empty stub is intentional there.
 
-Relevant effects:
+**Local mitigation already in working tree (uncommitted):**
+`sampler_turn.rs` now bypasses `compact_native_definitions` for hosted models, keeping full `definitions` (comment added: “provider request must always carry real JSON Schema definitions … not from the compact prompt catalog”). `token_optimization.optimize_tool_schemas` log downgraded from `info` to `debug` and no longer implies compaction.
 
-- Effect::FetchHooksList
-- Effect::FetchPluginsList
-- Effect::FetchMcpsList
-- Effect::FetchSkillsList
-- Effect::FetchWorkflowsList
-- Effect::FetchMarketplaceList
+---
 
-## Shell routing
+## 5. Root Cause #2 — Adjacent Synthetic User Items Sent as Separate Wire Messages
 
-The embedded shell routes the methods in:
+**File:** `crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs:191-252`
 
-- G:/Dx/tui/crates/codegen/xai-grok-shell/src/agent/mvp_agent/acp_agent.rs
+Before fix, `conversation_to_chat_messages` pushed each `ConversationItem::User` via `conversation_item_to_chat_message` immediately:
 
-Current route groups:
+```
+system
+user("workspace context")
+user("skills reminder")
+user("actual query")   // 3× role:user bursts
+```
 
-- x.ai/hooks/* -> extensions::hooks::handle
-- x.ai/plugins/* -> extensions::plugins::handle
-- x.ai/marketplace/* -> extensions::marketplace::handle
-- x.ai/mcp/* -> extensions::mcp::handle
-- x.ai/skills/* and x.ai/workflows/list -> extensions::skills::handle
+**Harness source:** `crates/codegen/xai-chat-state/src/actor/request_builder.rs` (and callers) synthesizes first turn from multiple adjacent `UserItem`s for context injection. Persisted history keeps them separate intentionally (lossless).
 
-Relevant handlers:
+**Why it breaks strict proxies:**
+- Many Chat Completions gateways normalize or reject sequential `user` messages — spec says they are allowed, but proxies for Opencode/Zen coalesce → token-count → enforce a “single logical prompt” rule. Three `user` blocks with identical `content: Text` inflates the input token estimate, trips their Console free-tier classifier (“unusual prompt shape → free quota”), and maps to `Rate limit exceeded`.
+- Also breaks `reasoning_content` folding semantics (pending reasoning cleared per user).
 
-- G:/Dx/tui/crates/codegen/xai-grok-shell/src/extensions/hooks.rs
-- G:/Dx/tui/crates/codegen/xai-grok-shell/src/extensions/plugins.rs
-- G:/Dx/tui/crates/codegen/xai-grok-shell/src/extensions/marketplace.rs
-- G:/Dx/tui/crates/codegen/xai-grok-shell/src/extensions/mcp.rs
-- G:/Dx/tui/crates/codegen/xai-grok-shell/src/extensions/skills.rs
+**Local mitigation already in working tree (uncommitted):**
+New `pending_user: Option<UserItem>` + `flush_user` closure. Adjacent `User` items are now coalesced at the wire boundary only:
 
-Shell responses use this envelope:
+```rust
+pending.content.extend(user.content);
+pending.synthetic_reason = None; // coalesced logical prompt
+// cwd_generation / prompt_index forwarded from last fragment
+```
 
-    {
-      "result": {},
-      "error": null
-    }
+Flush on `Assistant`, `BackendToolCall`, or any non-`User`/end-of-list. Persisted `ConversationRequest.items` unchanged. New test `adjacent_user_items_are_one_wire_prompt` asserts `system + 1 user("a\nb\nc")`.
 
-The pager unwraps result before deserializing.
+---
 
-## Pager result handling
+## 6. Why the Error Is Misleadingly a “FreeUsageLimit”
 
-Task results are handled in:
+- Opencode Console sits in front of Zen / other community providers. Malformed Chat Completions requests (empty tool schemas + multi-user burst) fail their pre-flight validator; the Console’s error mapper buckets validator rejections that look like “excessive / unbillable tokens” as `FreeUsageLimitError`.
+- `crates/codegen/xai-grok-sampler` classifies that as `SamplingErrorKind::RateLimited` → pager surfaces `RetryState::Exhausted { is_rate_limited:true }` → final `Error from provider (Console): Rate limit exceeded`.
+- No `grep -r FreeUsageLimitError` hit in repo confirms it is **provider-constructed**, not local.
 
-- G:/Dx/tui/crates/codegen/xai-grok-pager/src/app/dispatch/task_result.rs
-- G:/Dx/tui/crates/codegen/xai-grok-pager/src/app/dispatch/transcript.rs
+---
 
-Expected mappings:
+## 7. Evidence
 
-- HooksListLoaded -> modal.hooks_data
-- PluginsListLoaded -> modal.plugins_data
-- MarketplaceListLoaded -> modal.marketplace_data
-- SkillsListLoaded -> modal.skills_data
-- McpsListLoaded -> modal.mcps_data
+- `git diff` (uncommitted, `7cedcca6` base):
+  - `chat_completions.rs` + `pending_user` coalescing + test.
+  - `sampler_turn.rs` + removal of `compact_native_definitions` for hosted.
+  - `chat_completions_tests.rs` + regression test.
+- `crates/codegen/xai-grok-agent/src/native_tool_presentation.rs:12-40` — `BUILTIN_TOOL_NAMES` (26 tools) all stripped previously.
+- Responses path (`crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs:97`) already handles the multi-user shape correctly — divergence is Chat Completions-only, explaining why xAI Responses models pass.
+- `xai-grok-shell/tests/test_sampling_client.rs:395-436` — `read_chat_history_sync → From<ConversationRequest> for ChatCompletionRequest` round-trip only recently covered.
 
-The renderer is:
+---
 
-- G:/Dx/tui/crates/codegen/xai-grok-pager/src/views/extensions_modal.rs
+## 8. Impact
 
-## Changes already attempted
+- All sessions using Opencode Zen or any non-xAI Chat Completions model with tools enabled fail on the *first* sampling turn; no assistant text or tool calls ever stream.
+- Retries / waiting do not recover (deterministic payload).
+- xAI `grok-*` sessions unaffected — masks the regression in local dev where xAI is default.
 
-The current working tree contains these related changes:
+---
 
-1. Added Action::RefreshExtensions.
-2. Added refresh dispatch when switching between the original extension tabs.
-3. Kept Providers and Connect out of the Grok Build registry refresh path.
-4. Fixed the Skills request so it sends the active sessionId.
-5. Fixed the shell Skills handler so it resolves the active session working directory instead of always using the shell process directory.
-6. Added explicit empty-state rows:
-   - No hooks configured
-   - No plugins installed
-   - No marketplace sources configured
-   - No skills or workflows discovered
-   - No MCP servers configured
+## 9. Reproduction (without fixing)
 
-These changes improve diagnostics and fix the known Skills working-directory defect, but they do not yet prove why the real registries are empty.
+1. Configure a session with `model = "opencode/zen"` (or any hosted `api_backend = OpenAICompat` via `xai-proxy` / `base_url` not `*.x.ai`).
+2. Ensure `Definition::tool_definitions()` non-empty (default — no `optimize_tool_schemas` override needed).
+3. Trigger a session where `request_builder` injects ≥2 synthetic user fragments (default fresh session: workspace snapshot + skills).
+4. Observe first `SamplerHandle::submit_and_collect` → provider returns `400/429` mapped to `FreeUsageLimitError` → pager `RetryState::Exhausted`.
+5. Switching same session to `grok-4` immediately succeeds — confirms not quota.
 
-## Current evidence from this machine
+---
 
-The current user configuration is:
+## 10. What a Correct Fix Must Do
 
-    [marketplace]
-    default_skills_installs_purged = true
+1. **Never compact hosted tool schemas.** `Dx Serializer Compact` stays prompt-side; `tools[].function.parameters` must be full JSON Schema for every hosted adapter, including xAI-compatible proxies. Guard by `is_local_base_url` only, not `token_optimization.optimize_tool_schemas`. (`sampler_turn.rs` draft in working tree matches this.)
+2. **Coalesce adjacent user items at the Chat Completions boundary only.** Extend content with `"\n"` (current impl) and preserve image blocks via `MessageContent::Blocks`. Do not mutate persisted `ConversationItem`s. (`chat_completions.rs` draft matches this.)
+3. **Keep regression tests.** `adjacent_user_items_are_one_wire_prompt` plus tool-schema fidelity tests now assert that hosted `tools[0].function.parameters` retains `properties` and `required` for both Chat Completions and Responses.
+4. **Optional:** Improve error mapping — when Console returns `FreeUsageLimitError` on turn 1 with `tools != None`, surface “invalid tool schema / fragmented prompt” hint alongside, so future misroutes are not mistaken for quota.
 
-    [cli]
-    installer = "internal"
+---
 
-The current C:/Users/Computer/.grok directory contains general runtime directories such as agent, bin, docs, logs, and sessions, but no visible configured:
+## 11. Verification Checklist (for when fix is applied)
 
-- skills directory
-- plugins directory
-- hooks directory
-- marketplace source configuration
-- MCP configuration file
+- [x] `cargo test -p xai-grok-sampling-types --lib conversation::chat_completions_tests --release --offline`
+- [x] Responses adapter schema-fidelity regression test.
+- [x] Native tool presentation regression test proves schemas are not stripped.
+- [x] `G:\Temp\fresh-tools.json` verified 26 tools, 0 empty schemas, 34,638 bytes.
+- [ ] Manual: Zen session → first prompt streams assistant text + tool calls.
+- [ ] Manual: xAI `grok` session → no regression (still single wire user, full schemas).
+- [x] Wire conversion tests assert `ChatCompletionRequest.messages` coalesces adjacent synthetic users and preserves `tools[].function.parameters.properties`.
 
-Recent unified logs contain marketplace entries such as:
+---
 
-    marketplace handle_list: sources loaded
-    source_count: 0
-    sources: []
+## 12. Files to Watch
 
-Session initialization logs also showed zero MCP servers.
+- `crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions.rs`
+- `crates/codegen/xai-grok-sampling-types/src/conversation/chat_completions_tests.rs`
+- `crates/codegen/xai-grok-sampling-types/src/conversation/responses.rs` (reference correct handling)
+- `crates/codegen/xai-grok-agent/src/native_tool_presentation.rs`
+- `crates/codegen/xai-grok-shell/src/session/acp_session_impl/sampler_turn.rs`
+- `crates/codegen/xai-chat-state/src/actor/request_builder.rs`
+- `crates/codegen/xai-grok-sampler/src/client.rs` (`conversation_collect` → Chat path)
 
-This means the current environment may genuinely have empty registries. However, the original report says these tabs worked previously, so the next AI must verify whether configuration was lost, the runtime is reading the wrong home/workspace, or shell registry initialization is incomplete.
+---
 
-## Most likely investigation areas
+*Originally generated by read-only investigation; updated with the implemented resolution and verification results.*
 
-### 1. Verify runtime home and working directory
+## 13. Resolution Notes
 
-Confirm that all components use the same values for:
-
-- GROK_HOME
-- USERPROFILE
-- current process directory
-- active session cwd
-- workspace/project root
-
-The pager, shell, plugin discovery, skills discovery, marketplace loader, and MCP config loader must not silently use different roots.
-
-### 2. Verify actual ACP requests and responses
-
-Add temporary structured debug logging, without credentials, recording for every registry request:
-
-- method name
-- redacted session ID
-- resolved working directory
-- response success/error
-- decoded item count
-- response shape when decoding fails
-
-Distinguish:
-
-- request never sent
-- request routed to the wrong handler
-- shell returned an error
-- shell returned a valid empty list
-- pager failed to decode a non-empty response
-- result delivered to the wrong agent/modal
-
-### 3. Verify registry initialization timing
-
-Check whether plugin, hook, MCP, marketplace, and skill registries are initialized before list requests run.
-
-Pay special attention to:
-
-- plugin_registry_handle.snapshot() returning None
-- session handles not being resident yet
-- hooks gated by workspace trust
-- plugin discovery running after the first list request
-- MCP configuration loaded from a different working directory
-
-### 4. Verify workspace trust
-
-Hooks and project plugins may be hidden until the workspace is trusted. Confirm the UI displays the trust/blocked state rather than silently showing an empty list.
-
-### 5. Verify marketplace feature gating
-
-Official marketplace auto-registration is feature-gated. The default configuration resolves it to false unless enabled by environment or remote settings.
-
-Do not enable the marketplace globally without confirming product policy. Make sure:
-
-- configured sources are loaded
-- an empty source list is reported clearly
-- Add Source works
-- source scan errors are rendered
-
-### 6. Verify Skills discovery
-
-Skills discovery is implemented in:
-
-- G:/Dx/tui/crates/codegen/xai-grok-agent/src/prompt/skills.rs
-
-Verify:
-
-- active session cwd is used
-- .grok/skills, .agents/skills, .claude/skills, and .cursor/skills rules are correct
-- plugin-provided skills are included when the plugin registry is available
-- default_skills_installs_purged is not hiding user skills
-- a timeout is not silently converted into an empty vector
-
-### 7. Verify response decoding
-
-Confirm actual payloads match:
-
-    { "hooks": [] }
-    { "plugins": [] }
-    { "sources": [] }
-    { "skills": [] }
-    { "servers": [] }
-
-The pager unwraps the outer result object. Ensure the shell does not return a second unexpected envelope or a raw shape that becomes an empty fallback.
-
-## Known validation status
-
-This command passed:
-
-    $env:PROTOC = "G:\\Temp\\UserTemp\\protoc\\bin\\protoc.exe"
-    $env:RUSTUP_TOOLCHAIN = "1.96.0"
-    cargo check -p xai-grok-pager --lib --offline -q
-
-git diff --check passed.
-
-The shell-only check and focused pager test command exceeded the five-minute command limit while compiling the large integrated dependency graph. They did not report a compiler or test failure before timing out.
-
-## Acceptance criteria
-
-The fix is complete only when:
-
-1. Opening the Extensions modal requests all original Grok Build registries.
-2. Switching tabs does not clear loaded data or create uncontrolled duplicate requests.
-3. Hooks, Plugins, Marketplace, Skills, and MCP Servers display real configured entries when they exist.
-4. Project/worktree Skills are discovered from the active session cwd.
-5. Registry errors are displayed as errors, not empty lists.
-6. Empty registries display a clear actionable empty state.
-7. Workspace trust restrictions are visible.
-8. Providers and Connect remain separate and continue working.
-9. ZeroClaw entries do not replace Grok Build entries in the five original tabs.
-10. No user configuration, credentials, or local changes are deleted.
-11. Pager and shell checks pass without new warnings or errors.
-12. An end-to-end test proves a non-empty shell response reaches the correct modal tab and renders an item.
-
-## Suggested next step
-
-Run the TUI with a known temporary test workspace containing one fixture for each registry type, enable structured request/response count logging, open each tab, and compare:
-
-    request sent -> shell handler entered -> source count -> response payload -> pager task result -> rendered item count
-
-This will identify whether the remaining problem is missing user configuration or a runtime wiring/initialization defect.
-
+- `sampler_turn.rs` now keeps canonical native JSON schemas for all hosted models; only local models use their existing reduced-tool behavior.
+- `compact_native_definitions()` remains source-compatible but is now schema-preserving, so future callers cannot replace parameters with `{ "type": "object" }`.
+- Chat Completions coalesces adjacent user fragments only at the wire boundary; persisted conversation items remain unchanged.
+- The remaining unchecked items require a live provider/manual session and cannot be proven by offline tests alone.

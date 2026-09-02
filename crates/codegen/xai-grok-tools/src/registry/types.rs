@@ -728,6 +728,7 @@ impl ToolRegistryBuilder {
         b.register::<crate::implementations::memory::search_tool::MemorySearchImpl>();
         b.register::<crate::implementations::memory::get_tool::MemoryGetImpl>();
         b.register::<crate::implementations::search_tool::SearchTool>();
+        b.register::<crate::implementations::get_tool_details::GetToolDetailsTool>();
         b.register_with_params::<
                 crate::implementations::use_tool::UseTool,
                 crate::implementations::use_tool::UseToolParams,
@@ -1197,6 +1198,17 @@ impl ToolRegistryBuilder {
         resources.insert(crate::types::resources::EnabledNativeToolNames(
             native_tool_names,
         ));
+        // Full canonical definitions for every enabled tool, keyed by both the
+        // client-facing name and the qualified registry id. Backs
+        // `get_tool_details` (full-schema lookup after 3 failed calls) without
+        // any hand-maintained schema copy that could drift.
+        let mut builtin_schemas: HashMap<String, crate::types::definition::ToolDefinition> =
+            HashMap::new();
+        for tool in &tools {
+            builtin_schemas.insert(tool.client_name.clone(), tool.definition.clone());
+            builtin_schemas.insert(tool.registry_id.clone(), tool.definition.clone());
+        }
+        resources.insert(crate::types::resources::BuiltinToolSchemas(builtin_schemas));
         let proposed: Vec<ProposedTool> = tools
             .iter()
             .map(|t| ProposedTool {

@@ -66,6 +66,7 @@ impl ToolKind {
             ToolKind::DeployApp => "Deploy App",
             ToolKind::SearchTool => "Search Tools",
             ToolKind::UseTool => "Use Tool",
+            ToolKind::GetToolDetails => "Tool Details",
             ToolKind::Monitor => "Monitor",
             ToolKind::GoalUpdate => "Update Goal",
             ToolKind::Workflow => "Workflow",
@@ -108,6 +109,7 @@ impl ToolKind {
             | ToolKind::DeployApp
             | ToolKind::SearchTool
             | ToolKind::UseTool
+            | ToolKind::GetToolDetails
             | ToolKind::Monitor
             | ToolKind::GoalUpdate
             | ToolKind::Workflow

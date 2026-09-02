@@ -21368,6 +21368,7 @@ dependencies = [
  "tdigests",
  "tempfile",
  "thiserror 2.0.19",
+ "tiktoken-rs 0.6.0",
  "tokio",
  "tokio-retry",
  "tokio-rustls",
@@ -22029,6 +22030,9 @@ dependencies = [
 [[package]]
 name = "xai-token-estimation"
 version = "0.1.0"
+dependencies = [
+ "tiktoken-rs 0.6.0",
+]
 
 [[package]]
 name = "xai-tool-protocol"

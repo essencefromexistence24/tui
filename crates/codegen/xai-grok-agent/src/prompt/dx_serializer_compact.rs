@@ -11,7 +11,7 @@ fn catalog_marker() -> &'static str {
         .next()
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .unwrap_or("You have 26 tools in Dx Serializer Compact Read each line Use listed keys and types only.")
+        .unwrap_or("You have 27 tools in Dx Serializer Compact Read each line Use listed keys and types only.")
 }
 
 /// Attach the compact tool contract to the canonical system prompt.
@@ -49,23 +49,31 @@ mod tests {
 
     #[test]
     fn catalog_is_present_and_complete() {
-        assert!(TOOL_CATALOG.contains("Dx Serializer Compact"));
+        assert!(TOOL_CATALOG.contains("You have 27 tools"));
         assert!(TOOL_CATALOG.contains(catalog_marker()));
         assert!(TOOL_CATALOG.contains("run_terminal_command"));
         assert!(TOOL_CATALOG.contains("reference_to_video"));
+        assert!(
+            TOOL_CATALOG.contains("get_tool_details"),
+            "the full-schema lookup tool must be advertised in the compact catalog"
+        );
     }
 
     #[test]
-    fn marker_is_template_header_not_a_hardcoded_period() {
+    fn marker_is_template_header_first_line_verbatim() {
         let header = TOOL_CATALOG.lines().next().expect("catalog header");
+        // `append_to_system_prompt` / `dedup_catalog` locate an already-appended
+        // catalog by the marker (the full first line). The marker must therefore
+        // be exactly that line (trimmed) and appear verbatim in the catalog so
+        // `contains(marker)` cannot miss and duplicate the block — with or
+        // without a trailing sentence period.
         assert_eq!(header.trim(), catalog_marker());
         assert!(
-            !catalog_marker().ends_with('.'),
-            "header is '26 tools Line …', not '26 tools.' — a trailing \
-             period made contains() miss and duplicated the catalog"
+            TOOL_CATALOG.contains(catalog_marker()),
+            "marker must appear verbatim in the catalog for dedup"
         );
         assert!(
-            catalog_marker().starts_with("Dx Serializer Compact 26 tools"),
+            catalog_marker().starts_with("You have 27 tools"),
             "unexpected catalog header: {}",
             catalog_marker()
         );

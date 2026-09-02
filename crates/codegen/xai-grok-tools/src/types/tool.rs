@@ -98,6 +98,7 @@ pub enum ToolKind {
     DeployApp,
     SearchTool,
     UseTool,
+    GetToolDetails,
     Monitor,
     GoalUpdate,
     Workflow,

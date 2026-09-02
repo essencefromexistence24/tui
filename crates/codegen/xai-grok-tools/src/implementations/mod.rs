@@ -1,6 +1,7 @@
 pub mod codex;
 pub mod cursor_rules_on_read;
 pub mod editor_infra;
+pub mod get_tool_details;
 pub mod grok_build;
 pub mod grok_build_concise;
 pub mod grok_build_hashline;
@@ -13,6 +14,7 @@ pub mod skills;
 pub mod task_output;
 pub mod use_tool;
 pub mod web_search;
+pub use get_tool_details::{GetToolDetailsInput, GetToolDetailsTool};
 pub use grok_build::bash::{BashError, BashToolInput};
 pub use grok_build::{
     AskUserQuestionTool, BashTool, EnterPlanModeTool, ExitPlanModeTool, GrepTool, KillTaskTool,

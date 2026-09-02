@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use strum::{AsRefStr, Display, EnumIter, EnumString, IntoStaticStr};
 use xai_grok_tools::implementations::codex;
+use xai_grok_tools::implementations::get_tool_details;
 use xai_grok_tools::implementations::grok_build;
 use xai_grok_tools::implementations::grok_build_concise;
 use xai_grok_tools::implementations::memory;
@@ -279,6 +280,7 @@ fn default_grok_build_toolset() -> ToolServerConfig {
             (&grok_build::MonitorTool).into(),
             (&search_tool::SearchTool).into(),
             (&use_tool::UseTool).into(),
+            (&get_tool_details::GetToolDetailsTool).into(),
             (&grok_build::UpdateGoalTool).into(),
             (&grok_build::WorkflowTool).into(),
         ],

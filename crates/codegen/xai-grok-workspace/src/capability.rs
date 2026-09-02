@@ -72,6 +72,7 @@ impl CapabilityMode {
 /// assertion below fires so it can't be silently omitted.
 pub(crate) const ALL_TOOL_KINDS: &[ToolKind] = &[
     ToolKind::Read,
+    ToolKind::GetToolDetails,
     ToolKind::Edit,
     ToolKind::Delete,
     ToolKind::ListDir,
@@ -131,7 +132,7 @@ pub(crate) fn kind_allowed(mode: CapabilityMode, kind: ToolKind) -> bool {
         Plan | EnterPlan | ExitPlan | AskUser | Skill | SearchTool | GoalUpdate => true,
 
         // Read class.
-        Read | MemoryGet | MemorySearch => {
+        Read | GetToolDetails | MemoryGet | MemorySearch => {
             matches!(mode, M::ReadOnly | M::ReadWrite | M::Execute)
         }
 

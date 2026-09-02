@@ -698,6 +698,40 @@ impl EnabledNativeToolNames {
         self.0.contains(name)
     }
 }
+/// Map of client-facing tool name → full canonical [`ToolDefinition`].
+///
+/// Populated once at `finalize()` from the finalized tool list (both the
+/// client-facing name and the qualified registry id key the same definition).
+/// Backs `get_tool_details`: the model can fetch the *complete* JSON schema of
+/// one tool after the compact catalog in the system prompt proves insufficient
+/// (3 failed attempts on the same tool), without shipping every full schema in
+/// the first prompt.
+#[derive(Debug, Clone, Default)]
+pub struct BuiltinToolSchemas(pub HashMap<String, crate::types::definition::ToolDefinition>);
+
+impl BuiltinToolSchemas {
+    /// Look up a tool definition by client name (`read_file`), qualified id
+    /// (`GrokBuild:read_file`), or any `<namespace>:<name>` spelling.
+    pub fn get(
+        &self,
+        name: &str,
+    ) -> Option<&crate::types::definition::ToolDefinition> {
+        if let Some(def) = self.0.get(name) {
+            return Some(def);
+        }
+        let suffix = format!(":{name}");
+        self.0
+            .iter()
+            .find(|(k, _)| k.ends_with(&suffix))
+            .map(|(_, def)| def)
+    }
+
+    /// Iterator over the distinct client-facing tool names.
+    pub fn client_names(&self) -> impl Iterator<Item = &String> {
+        self.0.keys().filter(|k| !k.contains(':'))
+    }
+}
+
 /// Map of canonical tool name → {canonical param name → model-facing param name}.
 #[derive(Debug, Clone, Default)]
 pub struct ParamNameMapping(pub HashMap<String, HashMap<String, String>>);

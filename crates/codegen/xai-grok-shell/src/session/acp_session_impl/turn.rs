@@ -2267,8 +2267,12 @@ impl SessionActor {
                     })
                     .unwrap_or_else(|| self.agent.borrow().system_prompt().to_owned());
                 let prompt_context = self.agent.borrow().prompt_context().clone();
-                let section_stats = |value: &str| {
-                    format!("{} bytes / {} chars", value.len(), value.chars().count())
+                let section_tokens = |value: &str| {
+                    // Use accurate cl100k_base (same as `dx-token --ai` / TUI's token_save.rs),
+                    // fallback to bytes/4 heuristic on error.
+                    tiktoken_rs::cl100k_base()
+                        .map(|bpe| bpe.encode_with_special_tokens(value).len() as u64)
+                        .unwrap_or_else(|_| xai_token_estimation::estimate_tokens(value))
                 };
                 // PromptContext contains full rule-file bodies for persistence
                 // and rebuilds. The first request does not send that JSON;
@@ -2292,6 +2296,8 @@ impl SessionActor {
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
                 let items_json = serde_json::to_string_pretty(&request.items)
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+                let items_json_compact = serde_json::to_string(&request.items)
+                    .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
                 let tools_json = serde_json::to_string(&request.tools)
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
                 let envelope_json = serde_json::json!({
@@ -2312,17 +2318,38 @@ impl SessionActor {
                 });
                 let envelope_json = serde_json::to_string_pretty(&envelope_json)
                     .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+                let total_tokens = section_tokens(&system_prompt)
+                    + section_tokens(&prompt_context_json)
+                    + section_tokens(&items_json)
+                    + section_tokens(&tools_json)
+                    + section_tokens(&envelope_json);
+                // Raw wire tokens actually sent to model: items (compact) + tools (compact).
+                // System prompt is inside items[0], so standalone System is diagnostic duplication.
+                // Dedup = prompt_context + items + tools + envelope (what TUI ~2k shows).
+                // Wire = items_compact + tools (exact payload, matches `dx-token --ai` on `p.dx`).
+                let wire_tokens =
+                    section_tokens(&items_json_compact) + section_tokens(&tools_json);
+                let dedup_tokens = section_tokens(&prompt_context_json)
+                    + section_tokens(&items_json)
+                    + section_tokens(&tools_json)
+                    + section_tokens(&envelope_json);
                 let markdown = format!(
                     "# First Prompt Diagnostic\n\n\
 > Generated only because `DX_DUMP_FIRST_PROMPT` was enabled. This file can contain\n\
 > workspace context, conversation text, tool schemas, and request identifiers.\n\n\
 ## Measured sections\n\n\
-| Section | Size |\n|---|---:|\n\
-| System prompt | {} |\n\
-| Prompt context JSON | {} |\n\
-| Conversation items JSON | {} |\n\
-| Tool definitions JSON | {} |\n\
-| Request envelope JSON | {} |\n\n\
+| Section | Tokens (raw `cl100k_base`) | Bytes | Chars |\n|---|---:|---:|---:|\n\
+| System prompt (diagnostic, duplicated inside Conversation items) | {} | {} | {} |\n\
+| Prompt context JSON (diagnostic) | {} | {} | {} |\n\
+| Conversation items JSON (pretty, includes system) | {} | {} | {} |\n\
+| Conversation items JSON (compact wire) | {} | {} | {} |\n\
+| Tool definitions JSON (compact wire) | {} | {} | {} |\n\
+| Request envelope JSON (diagnostic) | {} | {} | {} |\n\
+| **Total (naive sum, double-counts system)** | **{}** | | |\n\
+| **Dedup total (prompt_context + items + tools + envelope) — TUI ~2k** | **{}** | | |\n\
+| **Wire payload actually sent (items_compact + tools) — 1st prompt** | **{}** | | |\n\n\
+> Tokens are **raw `cl100k_base` via `tiktoken_rs`** (same as `dx-token --ai` / `xai_token_estimation::estimate_tokens` in `crates/codegen/xai-token-estimation`), \
+> **not** rounded `bytes/4`. Diagnostic pretty JSON differs from compact wire by <2%. System prompt is inside Conversation items, so naive sum double-counts.\n\n\
 ## System prompt\n\n\
 ```text\n{}\n```\n\n\
 ## Prompt context\n\n\
@@ -2333,11 +2360,27 @@ impl SessionActor {
 ```json\n{}\n```\n\n\
 ## Request envelope\n\n\
 ```json\n{}\n```\n",
-                    section_stats(&system_prompt),
-                    section_stats(&prompt_context_json),
-                    section_stats(&items_json),
-                    section_stats(&tools_json),
-                    section_stats(&envelope_json),
+                    section_tokens(&system_prompt),
+                    system_prompt.len(),
+                    system_prompt.chars().count(),
+                    section_tokens(&prompt_context_json),
+                    prompt_context_json.len(),
+                    prompt_context_json.chars().count(),
+                    section_tokens(&items_json),
+                    items_json.len(),
+                    items_json.chars().count(),
+                    section_tokens(&items_json_compact),
+                    items_json_compact.len(),
+                    items_json_compact.chars().count(),
+                    section_tokens(&tools_json),
+                    tools_json.len(),
+                    tools_json.chars().count(),
+                    section_tokens(&envelope_json),
+                    envelope_json.len(),
+                    envelope_json.chars().count(),
+                    total_tokens,
+                    dedup_tokens,
+                    wire_tokens,
                     system_prompt,
                     prompt_context_json,
                     items_json,
