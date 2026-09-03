@@ -88,13 +88,12 @@ When a skill is wrong or incomplete, patch it immediately."#
 }
 
 /// Compact index injected into Agent system stack.
+/// Returns `None` when there are no skills so the first prompt pays zero
+/// tokens for an empty index (the guidance already explains skill_manage).
 pub fn skills_index_prompt(max_entries: usize) -> Option<String> {
 	let list = list_skills();
 	if list.is_empty() {
-		return Some(
-			"<skills_index>\n(no user skills yet — create with skill_manage after successful work)\n</skills_index>"
-				.into(),
-		);
+		return None;
 	}
 	let mut lines = vec!["<skills_index>".to_string()];
 	for (i, s) in list.into_iter().take(max_entries).enumerate() {

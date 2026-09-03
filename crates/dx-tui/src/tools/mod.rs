@@ -73,6 +73,8 @@ pub enum ToolKind {
 	WebSearch,
 	/// Apply unified diff patches to files.
 	ApplyPatch,
+	/// On-demand full JSON schema for one tool (compact catalog fallback).
+	ToolDetails,
 }
 
 impl ToolKind {
@@ -104,6 +106,7 @@ impl ToolKind {
 			Self::WebFetch => "webfetch",
 			Self::WebSearch => "websearch",
 			Self::ApplyPatch => "apply_patch",
+			Self::ToolDetails => "tool_details",
 		}
 	}
 
@@ -136,6 +139,7 @@ impl ToolKind {
 			Self::WebFetch => "Web Fetch",
 			Self::WebSearch => "Web Search",
 			Self::ApplyPatch => "Patch",
+			Self::ToolDetails => "Tool Details",
 		}
 	}
 
@@ -169,6 +173,7 @@ impl ToolKind {
 			"webfetch" | "web_fetch" | "fetch" | "http" | "web" => Some(Self::WebFetch),
 			"websearch" | "web_search" | "search_web" => Some(Self::WebSearch),
 			"apply_patch" | "patch" | "diff" | "apply_diff" | "unified_diff" => Some(Self::ApplyPatch),
+			"tool_details" | "get_tool_details" | "tool_schema" => Some(Self::ToolDetails),
 			_ => None,
 		}
 	}
@@ -352,6 +357,10 @@ pub fn tools_for_mode(mode: AgentMode) -> Vec<ToolDef> {
 				kind: ToolKind::Memory,
 				description: "Manage session memory: add/replace/remove/list entries in MEMORY.md or USER.md. Args: action, target, entry, index.",
 			});
+			t.push(ToolDef {
+				kind: ToolKind::ToolDetails,
+				description: "Full JSON schema for ONE tool. Use only after ~3 failed calls of the same tool. Args: tool_name.",
+			});
 			t.extend(web_tools);
 			t.extend(crate::lsp_tool::lsp_tool_defs());
 			// Write has full tool access (web search, subagents, skills) like Agent/Goal.
@@ -404,6 +413,10 @@ fn core_tools_for_api(mode: AgentMode) -> Vec<ToolDef> {
 			kind: ToolKind::Question,
 			description: "Ask the user a multiple-choice question. Args: prompt, options.",
 		},
+		ToolDef {
+			kind: ToolKind::ToolDetails,
+			description: "Full JSON schema for ONE tool. Use only after ~3 failed calls of the same tool. Args: tool_name.",
+		},
 	];
 	if matches!(mode, AgentMode::Write | AgentMode::Goal | AgentMode::Agent | AgentMode::Automation) {
 		t.push(ToolDef {
@@ -447,6 +460,10 @@ pub fn openai_tool_schemas(mode: AgentMode) -> Vec<Value> {
 		}
 		if t.kind == ToolKind::SkillManage {
 			schemas.push(crate::skills::skill_manage_schema());
+			continue;
+		}
+		if t.kind == ToolKind::ToolDetails {
+			schemas.push(crate::tool_details::tool_details_schema());
 			continue;
 		}
 		if t.kind == ToolKind::McpTool {
@@ -611,6 +628,8 @@ pub fn openai_tool_schemas(mode: AgentMode) -> Vec<Value> {
 				},
 				"required": ["path", "patch"]
 			}),
+			// Unreachable: ToolDetails pushes its dedicated schema and `continue`s above.
+			ToolKind::ToolDetails => json!({ "type": "object", "properties": {} }),
 		};
 		schemas.push(json!({
 			"type": "function",
@@ -637,6 +656,7 @@ pub fn allowed_in_mode(kind: ToolKind, mode: AgentMode, plan_allow_shell: bool) 
 				| ToolKind::Shell
 				| ToolKind::Question
 				| ToolKind::TodoWrite
+				| ToolKind::ToolDetails
 				| ToolKind::Memory
 				| ToolKind::GoToDefinition
 				| ToolKind::FindReferences
@@ -657,6 +677,7 @@ pub fn allowed_in_mode(kind: ToolKind, mode: AgentMode, plan_allow_shell: bool) 
 			| ToolKind::List
 			| ToolKind::Question
 			| ToolKind::TodoWrite
+			| ToolKind::ToolDetails
 			| ToolKind::Memory
 			| ToolKind::GoToDefinition
 			| ToolKind::FindReferences
@@ -704,6 +725,7 @@ pub fn needs_permission(kind: ToolKind, args: &Value, mode: AgentMode) -> bool {
 			| ToolKind::Task
 			| ToolKind::SkillManage
 			| ToolKind::TodoWrite
+			| ToolKind::ToolDetails
 			| ToolKind::Memory
 			| ToolKind::GoToDefinition
 			| ToolKind::FindReferences
@@ -836,6 +858,7 @@ pub fn execute(call: &ToolCall, cwd: &Path, mode: AgentMode, plan_allow_shell: b
 			preview: "todos".into(),
 		},
 		ToolKind::Memory => crate::memory_tool::MemoryStore::execute_tool(call, &args),
+		ToolKind::ToolDetails => crate::tool_details::execute_tool_details(call, cwd, mode),
 		ToolKind::SkillManage => crate::skills::execute_skill_manage(call),
 		ToolKind::GoToDefinition
 		| ToolKind::FindReferences

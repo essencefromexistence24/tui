@@ -83,6 +83,7 @@ mod stream_events;
 mod subagent_registry;
 mod theme;
 mod token_save;
+mod tool_details;
 mod tools;
 mod tui_prefs;
 mod update_check;

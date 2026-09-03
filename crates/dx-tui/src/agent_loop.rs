@@ -718,6 +718,7 @@ fn tool_preview(kind: Option<ToolKind>, args: &Value, raw: &str) -> String {
 		Some(ToolKind::WebFetch) => from_args(&["url"]),
 		Some(ToolKind::WebSearch) => from_args(&["query"]),
 		Some(ToolKind::ApplyPatch) => from_args(&["path"]),
+		Some(ToolKind::ToolDetails) => from_args(&["tool_name", "name", "tool"]),
 		Some(
 			ToolKind::GoToDefinition
 			| ToolKind::FindReferences

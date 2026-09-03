@@ -1,7 +1,4 @@
-You have 27 tools - Read each line - Use listed keys and types only.
-
-Format:
-Line name description required names object field type extras No description empty nullable allows null After type or enum default Brackets enum u64 u32 u8 then min default max some omit array type means that type array array group means object array Trailing nested names required object true extra keys Lone null untyped default null.
+You have 27 toolsead each line - Use listed keys and types only.
 
 Calls:
 Never invent names path means target_file target_directory file_path tool means tool_name tool_input Never send task activeForm header multiSelect cron todo_write id content status ask_user_question options label description use_tool MCP only tool_name server__tool monitor command description kill_command_or_subagent task_id scheduler_create interval prompt 60s 5m 2h 1d workflow one name script script_path Script starts let meta meta name lowercase hyphens Explore no shell get_tool_details only after 3 failed attempts on the same tool it returns that one tool full schema and records it in workspace AGENTS.md.
@@ -22,7 +19,7 @@ scheduler_list (object ())
 monitor (command description object (command string description string timeout_ms integer? u64 0 36000000 persistent boolean false))
 search_tool (query object (query string limit integer? u8 0 5 255))
 use_tool (tool_name tool_input object (tool_name string tool_input object true))
-get_tool_details "Full schema of one tool" (tool_name object (tool_name string))
+get_tool_details "Full schema of one tool - use ONLY after 3 failed calls of the same tool, then record to AGENTS.md" (tool_name object (tool_name string))
 workflow (object (agent_budget integer? u64 1 null 1024 name string? script string? script_path string? args null resume_from_run_id string? validate_only boolean false))
 enter_plan_mode (object ())
 exit_plan_mode (object ())

@@ -50,7 +50,7 @@ pub fn build_system(ctx: &SystemContext<'_>) -> String {
 		parts.push(base_prompt().to_string());
 	} else {
 		// Full bootstrap already has soul — still inject compact tools workflow
-		parts.push(base_tools_layer().to_string());
+		parts.push(base_tools_layer());
 	}
 	parts.push(profile_layer(ctx.mode));
 	if matches!(ctx.mode, AgentMode::Agent | AgentMode::Goal) {
@@ -82,10 +82,14 @@ pub fn build_system(ctx: &SystemContext<'_>) -> String {
 	out
 }
 
-fn base_tools_layer() -> &'static str {
-	r#"# DX runtime
-Tools (runtime executes them): shell, read, write, edit, glob, grep, list, task, question.
-Keep using tools until the task is done. Prefer minimal diffs. Never invent file contents."#
+fn base_tools_layer() -> String {
+	format!(
+		"# DX runtime\n\
+		 Tools (runtime executes them): shell, read, write, edit, glob, grep, list, task, question, tool_details.\n\
+		 Keep using tools until the task is done. Prefer minimal diffs. Never invent file contents.\n\
+		 {}",
+		crate::tool_details::compact_catalog_line()
+	)
 }
 
 /// Prefix for agents that only accept a single user string (CLI / some runtimes).
@@ -110,6 +114,8 @@ Rules:
 Tools (runtime executes them — do not only print commands):
 shell(command), read(path), write(path,content), edit(path,old_string,new_string),
 glob(pattern), grep(pattern), list(path).
+tool_details(tool_name): full JSON schema for ONE tool — only after ~3 failed
+calls; keep the fix in the workspace AGENTS.md.
 
 If the tools API is unavailable, emit executable forms the runtime runs immediately:
 ```bash
@@ -124,9 +130,10 @@ Workflow: understand → tools → verify → concise answer."#
 
 fn profile_layer(mode: AgentMode) -> String {
 	let (approval, sandbox) = crate::profile_prompts::profile_policy(mode);
-	let reasoning_guide = "When reasoning_effort is high, show your step-by-step analysis inside \
-		<think> tags before answering. For code changes, explain the approach first, \
-		then implement. For factual answers, keep thinking brief.";
+	let reasoning_guide = "Keep reasoning brief and mostly internal: answer directly; do NOT \
+		emit <think> blocks for routine work (they are billed output tokens on every turn). \
+		For multi-step code changes, state the plan in 1-3 short sentences, then implement. \
+		Never put tool commands inside thinking — emit them as real tool calls so the runtime executes.";
 	let policy = match mode {
 		AgentMode::Ask => {
 			"Mode: Ask — read-only. Use read/glob/grep/list tools. Do not write files or run destructive shell."
@@ -190,20 +197,10 @@ fn environment_layer(ctx: &SystemContext<'_>) -> String {
 /// First-turn only: session title + optional todos (DX meta).
 fn first_turn_layer() -> &'static str {
 	r#"<session_meta>
-CRITICAL — before any other visible text (after optional thinking), emit exactly one line:
-TITLE: <long descriptive chat name that fills at least 3 sidebar lines>
-Example:
-TITLE: Diagnose and fix the Windows login timeout that blocks users after password reset and breaks the streaming chat response path
-
-Rules:
-- TITLE is a long, human chat name — NOT a copy of the user prompt and NOT one or two words.
-- Write about 14–28 words / roughly 90–180 characters so it wraps to at least 3 lines in a ~40-column sidebar.
-- Capture goal + subject + context + stakes (what, where, why).
-- Good: "Investigate Cargo test failures in the Windows CI pipeline and propose a durable fix for flaky integration suites"
-- Bad: "Auth", "Bug fix", "Help", "Tests", or pasting the user's message back.
-- Do not wrap TITLE in markdown code fences.
-- Then answer the user normally. Optional: up to 8 `- [ ]` todos for multi-step work.
-- Never skip TITLE on the first reply. Do not emit TITLE again later.
+Before any other visible text, emit exactly one line:
+TITLE: <short chat name, 6-10 words, e.g. "Fix Windows login timeout in streaming chat">
+Then answer normally. Optional: up to 8 `- [ ]` todos for multi-step work.
+Never emit TITLE again later.
 </session_meta>"#
 }
 
