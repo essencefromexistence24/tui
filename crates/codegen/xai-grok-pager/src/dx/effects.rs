@@ -1,4 +1,4 @@
-//! Visual effects ported directly from `crates/dx-tui/src/effects.rs`.
+//! Visual effects ported directly from `crates/common/dx/src/effects.rs`.
 
 use ratatui::style::Color;
 use std::time::{Duration, Instant};
@@ -200,3 +200,4 @@ mod tests {
         assert_eq!(TypingIndicator::new().text(false), "");
     }
 }
+

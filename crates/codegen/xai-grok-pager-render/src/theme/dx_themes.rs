@@ -1,5 +1,5 @@
 //! DX themes auto-generated from dx-tui themes.json (dark variant).
-//! Regenerate with: pwsh crates/dx-tui/scripts/generate-pager-dx-themes.ps1
+//! Regenerate with: pwsh crates/common/dx/scripts/generate-pager-dx-themes.ps1
 use super::tokyonight::Theme;
 use ratatui::style::{Color, Modifier};
 
@@ -2842,3 +2842,4 @@ impl Theme {
         }
     }
 }
+

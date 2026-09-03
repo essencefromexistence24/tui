@@ -1,1 +1,0 @@
-<context os="windows" shell="pwsh" cwd="G:\Dx\tui" Time:"2026-08-12, 8:14 AM" />

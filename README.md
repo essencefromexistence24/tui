@@ -120,6 +120,67 @@ and `${XDG_DATA_HOME:-~/.local/share}/dx/video` on Linux. Linux playback
 requires an active Wayland or X11 graphical session; remote/headless sessions
 receive an actionable error instead of a false playback notification.
 
+## DX binary variants (size)
+
+All variants below are the **same binary with the same default features** —
+only compiler/optimizer settings (and optional channel sets) differ. Verified
+2026-09-03: `doctor`, `models`, `--version`, and `--help` produce identical
+output on every variant.
+
+| Variant | Size | How | Notes |
+|---|---|---|---|
+| `release` (default) | ~292 MB | `just build` | Fastest startup; installed to `G:\dx\bin`, `G:\bin` |
+| `size-opt` | ~170 MB | `just build-tiny` | `opt-level="z"` + strip; same features, marginally slower hot loops |
+| `size-opt` + UPX | **~51.5 MB** | `just pack-tiny` (needs `upx` on `PATH` / `UPX_BIN`) | Self-extracting pack; ~1s slower cold start; some AV heuristics flag UPX-packed binaries, so it is a distribution option, not the default install |
+
+`--profile size-opt` is defined in the root `Cargo.toml` (`opt-level="z"`,
+thin LTO, `strip = true`). UPX is compression, not feature removal: the
+packed binary decompresses to the exact same code in memory at launch.
+
+### Optional heavyweight messaging channels
+
+The default build ships the full light channel set (Telegram, Discord, Slack,
+Email, WhatsApp Cloud, Matrix-ready basics, and the rest of `channels-full`).
+Four heavy channels are **compiled out by default** to save ~48 MB and are
+opt-in via cargo features (also wired as `just` recipes that rebuild and
+reinstall):
+
+| Channel set | Extra size | Install |
+|---|---|---|
+| `channels-matrix` | ~+30 MB (matrix-sdk, e2e-encryption, sqlite) | `just build-channels-matrix` |
+| `channels-wechat` | ~+5 MB (wechat crypto, qrcode) | `just build-channels-wechat` |
+| `channels-whatsapp-web` | ~+17 MB (wa-rs stack, prost) | `just build-channels-whatsapp-web` |
+| `channels-voice` (wake-word) | ~+5 MB (cpal audio) | `just build-channels-voice` |
+| `channels-heavy` (all four) | ~+48 MB total | `just build-channels-heavy` |
+
+Or raw cargo: `cargo build -p xai-grok-pager-bin --release
+--features channels-heavy` (individual flags work too). The Extensions →
+Connect tab lists only compiled-in channels. **A listed channel is not a
+connected channel**: each one needs its own credentials (bot token, QR
+pairing, …) in `channel.toml` before the supervisor can connect it — nothing
+connects out of the box.
+
+## Connects catalog (2,400+ nodes)
+
+`crates/common/connect` (`dx-connect`) is the source-aware node catalog and
+deterministic executor behind Extensions → Connects and `/connect`:
+
+- **4 native nodes** (`dx.set`, `dx.if`, `dx.merge`, `dx.noop`) run in-process.
+- **564 n8n nodes** (442 `n8n-nodes-base` + 122 `@n8n/nodes-langchain`),
+  generated from n8n's real `dist/known/nodes.json` inventories.
+- **1,845 flow-like nodes** across 11 catalog families, extracted with the
+  same `impl NodeLogic for X` scan the runtime discovery uses, from
+  Rheosoph/flow-like @ `1545749d`.
+- External nodes run through the `dx-connect/1` adapter subprocess boundary
+  (Node.js worker for n8n, isolated executor for flow-like). Calling one
+  without its runtime returns an explicit `AdapterUnavailable` error — a
+  catalog entry is never reported as executable unless its backend is present.
+- Live sources win at runtime: materialized `node.json` folders,
+  `DX_N8N_ROOT` / `DX_FLOW_LIKE_ROOT` checkouts. The checked-in
+  `src/static_nodes.rs` is the deterministic fallback; regenerate it with
+  `crates/common/connect/scripts/regen_static_catalog.py` (see
+  [`crates/common/connect/CATALOG.md`](crates/common/connect/CATALOG.md)).
+
 ## Documentation
 
 Full online documentation is available at
@@ -141,6 +202,9 @@ MCP servers, skills, plugins, hooks, headless mode, sandboxing, and more.
 | `crates/codegen/xai-grok-workspace` | Host filesystem, VCS, execution, checkpoints |
 | `crates/codegen/...` | The rest of the CLI crate closure (config, MCP, markdown, sandbox, ...) |
 | `crates/common/`, `crates/build/`, `prod/mc/` | Small shared leaf crates pulled in by the closure |
+| `crates/common/agent/` | Vendored ZeroClaw agent stack (channels, providers, runtime, config) wired into the workspace |
+| `crates/common/connect` | `dx-connect`: the 2,400+ node Connects catalog + executor (see above) |
+| `crates/common/dx` | Standalone DX side-project workspace (separate `[workspace]`; not part of the pager build) |
 | `third_party/` | Vendored upstream source (Mermaid diagram stack) — see below |
 
 > [!IMPORTANT]

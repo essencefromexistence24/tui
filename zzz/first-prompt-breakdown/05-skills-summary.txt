@@ -1,5 +1,0 @@
-<system-reminder>
-<skills>
-Available skills: build-with-ai, create-skill, create-workflow, ... 17 more.
-</skills>
-</system-reminder>

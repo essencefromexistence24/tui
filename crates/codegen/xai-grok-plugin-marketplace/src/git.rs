@@ -126,7 +126,7 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, Strin
     loop {
         match file.try_lock_exclusive() {
             Ok(()) => return Ok(file),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+            Err(e) if is_lock_contention(&e) => {
                 if Instant::now() >= deadline {
                     return Err(format!(
                         "cache lock timeout after {}s for {}",
@@ -139,6 +139,17 @@ fn acquire_cache_lock(lock_path: &Path, timeout: Duration) -> Result<File, Strin
             Err(e) => return Err(format!("failed to lock cache {}: {e}", lock_path.display())),
         }
     }
+}
+
+/// Whether a lock error means "someone else holds the lock, retry until the
+/// deadline" as opposed to a hard failure.
+///
+/// Unix reports contention as `WouldBlock`; Windows reports
+/// `ERROR_LOCK_VIOLATION` (os error 33), which Rust does not map to
+/// `WouldBlock`, so without the raw-code check every contended acquire on
+/// Windows fails immediately instead of waiting for the lease holder.
+fn is_lock_contention(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::WouldBlock || e.raw_os_error() == Some(33)
 }
 
 /// Check if the cache was fetched recently enough to skip fetching.
@@ -573,7 +584,7 @@ mod tests {
 
         let start = Instant::now();
         let err = acquire_cache_lock(&lock_path, Duration::from_millis(50)).unwrap_err();
-        assert!(err.contains("cache lock timeout"));
+        assert!(err.contains("cache lock timeout"), "{err}");
         assert!(start.elapsed() >= Duration::from_millis(50));
         drop(lease);
         let _lock = acquire_cache_lock(&lock_path, Duration::from_millis(1)).unwrap();

@@ -16,7 +16,7 @@ pub mod doctor_cmd;
 pub mod dx;
 pub use dx::effects;
 pub mod export_cmd;
-#[path = "../../../dx-tui/src/font.rs"]
+#[path = "../../../common/dx/src/font.rs"]
 pub mod font;
 pub(crate) mod fs_size;
 pub mod git_info;
@@ -84,3 +84,5 @@ pub mod worktree_cmd;
 
 #[cfg(test)]
 pub mod test_util;
+
+

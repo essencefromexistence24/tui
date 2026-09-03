@@ -78,8 +78,11 @@ const CHANNEL_COMPILE_SPECS: &[ChannelCompileSpec] = &[
         type_keys: &["nextcloud", "nextcloud-talk", "nextcloud_talk"],
         compiled: cfg!(feature = "channel-nextcloud"),
     },
+    // Notion is a singleton configured under top-level `[notion]` (see
+    // `notion.rs`: no `[channels.notion.<alias>]` map), so like ACP it
+    // participates in type readiness without appearing in `compiled_channels`.
     ChannelCompileSpec {
-        schema_name: Some("Notion"),
+        schema_name: None,
         type_keys: &["notion"],
         compiled: cfg!(feature = "channel-notion"),
     },

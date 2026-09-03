@@ -29,7 +29,7 @@ fn main() {
 
 fn embed_dx_figlet_fonts() -> io::Result<()> {
     let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
-    let figlet_dir = manifest.join("../../dx-tui/figlet");
+    let figlet_dir = manifest.join("../../common/dx/figlet");
     println!("cargo:rerun-if-changed={}", figlet_dir.display());
     let out_dir = PathBuf::from(
         std::env::var_os("OUT_DIR")
@@ -57,3 +57,5 @@ fn embed_dx_figlet_fonts() -> io::Result<()> {
     writeln!(output, "pub const FONTS_DATA: &[u8] = &{:?};", packed)?;
     Ok(())
 }
+
+

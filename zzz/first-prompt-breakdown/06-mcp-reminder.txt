@@ -1,6 +1,0 @@
-<system-reminder>
-MCP servers connected:
-- tasks (6 tools)
-- voice (1 tool)
- Before use_tool, call search_tool for exact schema; never guess params.
-</system-reminder>

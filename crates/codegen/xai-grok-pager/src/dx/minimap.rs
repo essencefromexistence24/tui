@@ -1,5 +1,5 @@
 //! DX left minimap transplanted from
-//! `crates/dx-tui/src/chat_render.rs::render_left_minimap`.
+//! `crates/common/dx/src/chat_render.rs::render_left_minimap`.
 
 use crate::theme::Theme;
 use ratatui::buffer::Buffer;
@@ -297,3 +297,4 @@ mod tests {
         assert_eq!(tall.y, host.y + (host.height - MAX_HEIGHT) / 2);
     }
 }
+

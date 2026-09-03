@@ -144,7 +144,7 @@ members = [
     "crates/common/xai-tool-protocol",
     "crates/common/xai-tool-runtime",
     "crates/common/xai-tool-types",
-    "crates/common/dx-connect",
+    "crates/common/connect",
     "crates/common/xai-tracing",
     "crates/common/agent/aardvark-sys",
     "crates/common/agent/zeroclaw-api",
@@ -195,7 +195,7 @@ zeroclaw-robot-kit = { path = "crates/common/agent/robot-kit", version = "0.1.0"
 aardvark-sys = { path = "crates/common/agent/aardvark-sys", version = "0.1.0" }
 sys-locale = "0.3"
 dx-core = { package = "dx-token-core", path = "crates/common/token/core" }
-dx-connect = { path = "crates/common/dx-connect" }
+dx-connect = { path = "crates/common/connect" }
 dx-route-core = { path = "crates/common/token/route/core" }
 dx-route-lite = { path = "crates/common/token/route/lite" }
 audio-compress = { path = "crates/common/token/audio-compress" }

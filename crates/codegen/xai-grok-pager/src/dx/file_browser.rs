@@ -4,24 +4,24 @@
 //! Crossterm events. Grok owns both. DX owns its browser `Core`, Lua layout,
 //! actions, and widgets, which render into Grok's current Ratatui buffer.
 
-#[path = "../../../../dx-tui/src/file_browser/cmp/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/cmp/mod.rs"]
 mod cmp;
-#[path = "../../../../dx-tui/src/file_browser/confirm/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/confirm/mod.rs"]
 mod confirm;
-#[path = "../../../../dx-tui/src/file_browser/help/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/help/mod.rs"]
 mod help;
-#[path = "../../../../dx-tui/src/file_browser/input/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/input/mod.rs"]
 mod input;
-#[path = "../../../../dx-tui/src/file_browser/mgr/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/mgr/mod.rs"]
 mod mgr;
-#[path = "../../../../dx-tui/src/file_browser/pick/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/pick/mod.rs"]
 mod pick;
-#[path = "../../../../dx-tui/src/file_browser/spot/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/spot/mod.rs"]
 mod spot;
-#[path = "../../../../dx-tui/src/file_browser/tasks/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/tasks/mod.rs"]
 #[allow(dead_code)]
 mod tasks;
-#[path = "../../../../dx-tui/src/file_browser/which/mod.rs"]
+#[path = "../../../../common/dx/src/file_browser/which/mod.rs"]
 mod which;
 
 use fb_binding::elements::render_once;
@@ -866,3 +866,5 @@ mod tests {
         );
     }
 }
+
+

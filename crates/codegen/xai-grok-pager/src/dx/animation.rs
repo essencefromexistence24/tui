@@ -1,7 +1,7 @@
 //! Presentation-only adapter for DX's train animation.
 //!
 //! The artwork, timing, motion, smoke frames, rainbow seeding, and track
-//! rendering are transplanted from `crates/dx-tui/src/animations.rs`. This
+//! rendering are transplanted from `crates/common/dx/src/animations.rs`. This
 //! adapter replaces only the original `ChatState` dependency so Grok remains
 //! the sole application-state owner.
 
@@ -773,3 +773,4 @@ mod tests {
         assert_eq!(surface.current(), AnimationKind::Train);
     }
 }
+

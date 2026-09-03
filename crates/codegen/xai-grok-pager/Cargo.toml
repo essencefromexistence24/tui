@@ -40,26 +40,26 @@ xai-grok-markdown = { workspace = true }
 xai-grok-mermaid = { workspace = true }
 syntect = { workspace = true }
 tachyonfx = { workspace = true }
-dx-editor = { path = "../../dx-tui/src/editor/editor", default-features = false, features = ["runtime"] }
+dx-editor = { path = "../../common/dx/src/editor/editor", default-features = false, features = ["runtime"] }
 # DX file browser engine. These are linked in-process; the pager remains the
 # sole terminal/event-loop owner and hosts their Core/widgets in its frame.
-fb-actor = { path = "../../dx-tui/src/file_browser/actor" }
-fb-adapter = { path = "../../dx-tui/src/file_browser/adapter" }
-fb-binding = { path = "../../dx-tui/src/file_browser/binding" }
-fb-boot = { path = "../../dx-tui/src/file_browser/boot" }
-fb-config = { path = "../../dx-tui/src/file_browser/config" }
-fb-core = { path = "../../dx-tui/src/file_browser/core" }
-fb-dds = { path = "../../dx-tui/src/file_browser/dds" }
-fb-emulator = { path = "../../dx-tui/src/file_browser/emulator" }
-fb-fs = { path = "../../dx-tui/src/file_browser/fs" }
-fb-macro = { path = "../../dx-tui/src/file_browser/macro" }
-fb-plugin = { path = "../../dx-tui/src/file_browser/plugin" }
-fb-shared = { path = "../../dx-tui/src/file_browser/shared" }
-fb-term = { path = "../../dx-tui/src/file_browser/term" }
-fb-tty = { path = "../../dx-tui/src/file_browser/tty" }
-fb-vfs = { path = "../../dx-tui/src/file_browser/vfs" }
-fb-watcher = { path = "../../dx-tui/src/file_browser/watcher" }
-fb-widgets = { path = "../../dx-tui/src/file_browser/widgets" }
+fb-actor = { path = "../../common/dx/src/file_browser/actor" }
+fb-adapter = { path = "../../common/dx/src/file_browser/adapter" }
+fb-binding = { path = "../../common/dx/src/file_browser/binding" }
+fb-boot = { path = "../../common/dx/src/file_browser/boot" }
+fb-config = { path = "../../common/dx/src/file_browser/config" }
+fb-core = { path = "../../common/dx/src/file_browser/core" }
+fb-dds = { path = "../../common/dx/src/file_browser/dds" }
+fb-emulator = { path = "../../common/dx/src/file_browser/emulator" }
+fb-fs = { path = "../../common/dx/src/file_browser/fs" }
+fb-macro = { path = "../../common/dx/src/file_browser/macro" }
+fb-plugin = { path = "../../common/dx/src/file_browser/plugin" }
+fb-shared = { path = "../../common/dx/src/file_browser/shared" }
+fb-term = { path = "../../common/dx/src/file_browser/term" }
+fb-tty = { path = "../../common/dx/src/file_browser/tty" }
+fb-vfs = { path = "../../common/dx/src/file_browser/vfs" }
+fb-watcher = { path = "../../common/dx/src/file_browser/watcher" }
+fb-widgets = { path = "../../common/dx/src/file_browser/widgets" }
 mlua = { version = "0.11.6", features = ["lua54", "serialize", "macros", "async", "anyhow", "vendored"] }
 paste = { workspace = true }
 
@@ -134,10 +134,6 @@ zeroclaw-api.workspace = true
 zeroclaw-channels = { workspace = true, features = [
   "default-channels",
   "channels-full",
-  "channel-matrix",
-  "channel-wechat",
-  "voice-wake",
-  "whatsapp-web",
 ] }
 reqwest.workspace = true
 xai-grok-workspace = { workspace = true }
@@ -338,6 +334,22 @@ zstd = { workspace = true }
 
 [features]
 default = ["jemalloc", "sandbox-enforce"]
+# Optional heavyweight messaging channels (each adds MBs of deps to the
+# binary: matrix-sdk, wechat crypto, wa-rs WhatsApp stack, cpal audio).
+# Default builds ship without them; the Extensions → Connect tab lists only
+# compiled channels. Install via e.g.:
+#   cargo build -p xai-grok-pager-bin --release --features xai-grok-pager/channels-heavy
+# or `just build-channels-heavy` (see root justfile).
+channels-matrix = ["zeroclaw-channels/channel-matrix"]
+channels-wechat = ["zeroclaw-channels/channel-wechat"]
+channels-whatsapp-web = ["zeroclaw-channels/whatsapp-web"]
+channels-voice = ["zeroclaw-channels/voice-wake"]
+channels-heavy = [
+  "channels-matrix",
+  "channels-wechat",
+  "channels-whatsapp-web",
+  "channels-voice",
+]
 default-bazel = [
     "jemalloc",
     "sandbox-enforce",
@@ -357,3 +369,5 @@ release-dist = []
 # `AgentSession::set_yolo_mode_for_test`) to sibling crates' test builds — used
 # by `xai-grok-pager-minimal`'s unit tests. Never enabled in production builds.
 test-support = ["xai-grok-pager-render/test-support"]
+
+

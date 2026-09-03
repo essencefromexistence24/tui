@@ -96,3 +96,10 @@ jemalloc = ["dep:tikv-jemallocator", "dep:tikv-jemalloc-sys", "dep:tikv-jemalloc
 sandbox-enforce = ["xai-grok-pager/sandbox-enforce"]
 local-workspace = ["xai-grok-pager/local-workspace"]
 release-dist = ["xai-grok-pager/release-dist"]
+# Optional heavyweight messaging channels, forwarded to the pager library.
+# Example: cargo build -p xai-grok-pager-bin --release --features channels-heavy
+channels-matrix = ["xai-grok-pager/channels-matrix"]
+channels-wechat = ["xai-grok-pager/channels-wechat"]
+channels-whatsapp-web = ["xai-grok-pager/channels-whatsapp-web"]
+channels-voice = ["xai-grok-pager/channels-voice"]
+channels-heavy = ["xai-grok-pager/channels-heavy"]

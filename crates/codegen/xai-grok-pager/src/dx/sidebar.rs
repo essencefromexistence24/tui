@@ -1,5 +1,5 @@
 //! DX right-sidebar renderer, transplanted from
-//! `crates/dx-tui/src/chat_render.rs::render_sidebar`.
+//! `crates/common/dx/src/chat_render.rs::render_sidebar`.
 //!
 //! The original accordion, styling, clipping, scrolling, and hit-area
 //! behavior is retained. Data is supplied as borrowed Grok view data so this
@@ -452,3 +452,4 @@ mod tests {
         assert_eq!(sidebar.expect("sidebar").width, PANEL_WIDTH);
     }
 }
+
