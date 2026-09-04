@@ -132,6 +132,14 @@ output on every variant.
 | `release` (default) | ~292 MB | `just build` | Fastest startup; installed to `G:\dx\bin`, `G:\bin` |
 | `size-opt` | ~170 MB | `just build-tiny` | `opt-level="z"` + strip; same features, marginally slower hot loops |
 | `size-opt` + UPX | **~51.5 MB** | `just pack-tiny` (needs `upx` on `PATH` / `UPX_BIN`) | Self-extracting pack; ~1s slower cold start; some AV heuristics flag UPX-packed binaries, so it is a distribution option, not the default install |
+| `linux-x86_64` (`size-opt`) | **~203 MB** | `just build-linux` (zig cross-compile from Windows) | glibc 2.34 baseline (RHEL9/Ubuntu 22.04+); system allocator instead of jemalloc (jemalloc's autotools can't cross-build from Windows; native CI keeps jemalloc); installed as `G:\dx\bin\dx-tui-linux-x86_64` |
+
+Shipped binaries in `G:\dx\bin` (measured 2026-09-04):
+
+| File | Bytes | Notes |
+|---|---|---|
+| `dx-tui.exe` | 306,243,072 (~292.1 MB) | Windows x86_64, `release` profile, lean default channel set |
+| `dx-tui-linux-x86_64` | 212,930,984 (~203.1 MB) | Linux x86_64, `size-opt`, ELF64 PIE, verified complete (`doctor`/`models` behavior identical to Windows build) |
 
 `--profile size-opt` is defined in the root `Cargo.toml` (`opt-level="z"`,
 thin LTO, `strip = true`). UPX is compression, not feature removal: the

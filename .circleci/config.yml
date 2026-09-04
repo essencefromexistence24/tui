@@ -1,59 +1,93 @@
-# CircleCI pipeline for xai-grok-pager (the Grok Build TUI).
+# CircleCI pipeline for xai-grok-pager (the Dx TUI binary).
 #
-# Builds the two non-Windows targets on native runners:
-#   - Linux   : x86_64-unknown-linux-gnu   (ubuntu container)
-#   - macOS   : aarch64-apple-darwin        (Apple Silicon mac)
+# Currently macOS-only: Windows and Linux are built locally
+# (`just build`, `just build-linux`) and already shipped.
+#   - macOS   : aarch64, m4pro.medium (6 vCPU / 28 GiB, free-plan eligible)
 #
-# Windows (x86_64-pc-windows-msvc) is built out-of-band; it needs the
-# PROTOC env workaround documented in AGENTS.md.
+# (The build-linux job definition is kept below for when cloud Linux builds
+# are needed again; it is just not in the workflow right now.)
+#
+# Free-plan budget (verified 2026-09-04): macOS M4 Pro Medium costs
+# 200 credits/min out of the 30,000/month pool, and Free jobs hard-cap at
+# 1 hour total. A cold mac build (~45-60 min + setup) barely fits, so never
+# break the restore/save cache steps: without a warm cache every build stays
+# cold and risks hitting the cap forever. Roughly two full mac builds/month.
+# Linux machine time costs an order of magnitude less per minute.
+# Keep the cargo cache warm (save/restore below) so rebuilds stay incremental.
+#
+# Runner pin: Xcode 26.4.1 is a supported image on m4pro.medium (newest is
+# 27.0; we stay on 26.4.1 because earlier macOS runs prove it). m4pro.medium
+# is the Free-plan default; M1/M2 classes are end-of-life since Feb 2026 and
+# must not be referenced (configs using them fail to parse).
 #
 # protoc: bin/protoc in this repo is a dotslash wrapper (no dotslash on CI),
 # so we download a real protoc 29.3 for the platform and set $PROTOC, which
 # crates/build/xai-proto-build/src/find_protoc.rs checks before bin/protoc.
 #
-# Build profile is a pipeline parameter (default "size-opt" -> ~131 MB binary).
-# Set it to "release" to use the default shipping profile instead.
+# Parameters (Trigger Pipeline UI or API):
+#   build_profile  - "size-opt" (default, ~170 MB) or "release" (~292 MB)
+#   pager_features - extra cargo features, e.g. "channels-heavy" for the
+#                    matrix/wechat/whatsapp-web/voice build (~340 MB).
+#                    Empty = lean default channel set.
 version: 2.1
 
 parameters:
   build_profile:
     type: string
     default: "size-opt"
-  # Optional extra cargo features for the pager binary, e.g. "channels-heavy"
-  # or "channels-matrix". Empty = default lean channel set.
   pager_features:
     type: string
     default: ""
 
 executors:
   linux-x86_64:
-    docker:
-      # rustup auto-installs the version pinned in rust-toolchain.toml (1.96.0)
-      # if this image's default differs.
-      - image: cimg/rust:1.94.1
-    resource_class: large # 4 vCPU / 8 GB (xlarge is paid-only; not on the Free plan)
+    machine:
+      image: ubuntu-2404:current
+    resource_class: xlarge.gen2 # 8 vCPU / 32 GiB - Gen2 Linux VM, free plan
     working_directory: ~/repo
     environment:
       BASH_ENV: /tmp/BASH_ENV
 
-  macos-arm64:
+  macos-aarch64:
     macos:
-      xcode: "16.4.0"
-    resource_class: m4pro.medium # Apple Silicon (M4 Pro)
+      xcode: "26.4.1"
+    resource_class: m4pro.medium # 6 vCPU / 28 GiB - free plan eligible
     working_directory: ~/repo
     environment:
       BASH_ENV: /tmp/BASH_ENV
 
 commands:
-  install-system-deps:
+  install-linux-deps:
     steps:
       - run:
           name: Install Linux build dependencies
           command: |
             set -euo pipefail
+            touch "$BASH_ENV"
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends \
-              cmake pkg-config build-essential unzip libasound2-dev
+              cmake pkg-config build-essential unzip \
+              libasound2-dev
+            # Machine executor does not ship Rust; install via rustup
+            # (rust-toolchain.toml pins the exact version).
+            if ! command -v rustup &>/dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+            fi
+            echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
+
+  install-macos-deps:
+    steps:
+      - run:
+          name: Install macOS build dependencies
+          command: |
+            set -euo pipefail
+            touch "$BASH_ENV"
+            # Install rustup if not already present
+            if ! command -v rustup &>/dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+            fi
+            echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
+            HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew install cmake pkgconf
 
   install-protoc:
     steps:
@@ -63,8 +97,9 @@ commands:
             set -euo pipefail
             touch "$BASH_ENV"
             case "$(uname -s)/$(uname -m)" in
-              Linux/x86_64) url="https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip" ;;
-              Darwin/arm64) url="https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-osx-aarch_64.zip" ;;
+              Linux/x86_64)  url="https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip" ;;
+              Darwin/arm64)  url="https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-osx-aarch_64.zip" ;;
+              Darwin/x86_64) url="https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-osx-x86_64.zip" ;;
               *) echo "unsupported platform: $(uname -s)/$(uname -m)" >&2; exit 1 ;;
             esac
             curl -fsSL "$url" -o /tmp/protoc.zip
@@ -96,7 +131,7 @@ jobs:
     executor: linux-x86_64
     steps:
       - checkout
-      - install-system-deps
+      - install-linux-deps
       - install-protoc
       - restore-cargo-cache
       - run:
@@ -109,7 +144,7 @@ jobs:
             FEATURES="<< pipeline.parameters.pager_features >>"
             EXTRA=""; if [ -n "$FEATURES" ]; then EXTRA="--features $FEATURES"; fi
             # shellcheck disable=SC2086
-            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> $EXTRA -j 2
+            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> $EXTRA -j 6
       - save_cache:
           # Keep compiled deps even on OOM so the next run resumes instead of restarting.
           key: cargo-{{ .Environment.CIRCLE_JOB }}-{{ checksum "Cargo.lock" }}-{{ .Branch }}
@@ -128,28 +163,11 @@ jobs:
       - save-cargo-cache
 
   build-macos:
-    executor: macos-arm64
+    executor: macos-aarch64
     steps:
       - checkout
-      - run:
-          name: Install Rust toolchain (rustup)
-          command: |
-            set -euo pipefail
-            touch "$BASH_ENV"
-            if ! command -v cargo >/dev/null 2>&1; then
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --profile minimal
-            fi
-            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$BASH_ENV"
+      - install-macos-deps
       - install-protoc
-      - run:
-          name: Install cmake if missing
-          command: |
-            set -euo pipefail
-            source "$BASH_ENV"
-            if ! command -v cmake >/dev/null 2>&1; then
-              HOMEBREW_NO_AUTO_UPDATE=1 brew install cmake
-            fi
-            cmake --version
       - restore-cargo-cache
       - run:
           name: Build xai-grok-pager (macOS arm64)
@@ -161,7 +179,15 @@ jobs:
             FEATURES="<< pipeline.parameters.pager_features >>"
             EXTRA=""; if [ -n "$FEATURES" ]; then EXTRA="--features $FEATURES"; fi
             # shellcheck disable=SC2086
-            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> $EXTRA -j 4
+            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> $EXTRA -j 6
+      - save_cache:
+          # Keep compiled deps even on OOM so the next run resumes instead of restarting.
+          key: cargo-{{ .Environment.CIRCLE_JOB }}-{{ checksum "Cargo.lock" }}-{{ .Branch }}
+          when: on_fail
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - ./target
       - run:
           name: Report binary size
           command: |
@@ -175,5 +201,4 @@ workflows:
   version: 2
   build:
     jobs:
-      - build-linux
       - build-macos

@@ -70,6 +70,35 @@ clippy:
 clean:
     $env:CARGO_INCREMENTAL = "1"; cargo clean -p xai-grok-pager-bin
 
+# Cross-compile the Linux x86_64 binary from Windows (no WSL needed).
+# Proven 2026-09-03; produces target/x86_64-unknown-linux-gnu/size-opt/dx-tui.
+# Why each knob exists (all learned the hard way):
+# - cargo-zigbuild: provides the linux-gnu C toolchain (zig cc) for the
+#   vendored C deps (libgit2, lua, sqlite, ring, ...). Install once:
+#   `cargo install cargo-zigbuild --locked`.
+# - scripts/linux-sysroot (Ubuntu ALSA .debs + extract.py): cpal/rodio need
+#   libasound at link time; pkg-config finds it via PKG_CONFIG_* below.
+# - RUST_MIN_STACK=16MB: rustc codegen recursion trips Windows' 1MB main
+#   thread stack on the huge crates; 64MB starves thread spawning when RAM
+#   is tight, 16MB is the sweet spot. Never use the default here.
+# - -j1: parallel opt-z LLVM partitions + thin-LTO link exceed a 24GB box
+#   with a small pagefile (see _release-prime note). Serial is slow (~1h)
+#   but finishes; higher -j dies with 0xc0000409 / OOM kills.
+# - --no-default-features --features sandbox-enforce: drops tikv-jemalloc,
+#   whose autotools configure cannot cross-build from Windows. System
+#   allocator instead; everything else identical. (Native CI keeps jemalloc.)
+# - .2.34 target suffix: zig links glibc 2.34 (RHEL9/Ubuntu22.04+ compat).
+#   The Jammy (1.2.6.1) libasound in the sysroot matches it; Noble's needs
+#   2.38+ symbols and fails the link.
+# - asound staging: pkg-config strips PKG_CONFIG_SYSROOT_DIR from -L, so the
+#   linker never sees the sysroot. Recipe copies libasound.so* into the ring
+#   build-out dir (already on the link search path) and re-runs to link.
+# Close RAM hogs first; needs ~8GB free on G:.
+# NOTE: PKG_CONFIG_* below must be absolute (justfile_directory()); relative
+# paths make alsa-sys rebuild and fail to find alsa.pc.
+build-linux:
+    if (-not (Test-Path "scripts/linux-sysroot/sysroot/usr/lib/x86_64-linux-gnu/libasound.so")) { python scripts/linux-sysroot/extract.py }; $env:PROTOC = "{{protoc}}"; $env:CARGO_INCREMENTAL = "0"; $env:RUST_MIN_STACK = "16777216"; $env:PKG_CONFIG_ALLOW_CROSS = "1"; $env:PKG_CONFIG_PATH = "{{justfile_directory()}}/scripts/linux-sysroot/sysroot/usr/lib/x86_64-linux-gnu/pkgconfig"; $env:PKG_CONFIG_SYSROOT_DIR = "{{justfile_directory()}}/scripts/linux-sysroot/sysroot"; cargo zigbuild -p xai-grok-pager-bin --profile size-opt --target x86_64-unknown-linux-gnu.2.34 -j 1 --no-default-features --features sandbox-enforce; Copy-Item scripts/linux-sysroot/sysroot/usr/lib/x86_64-linux-gnu/libasound.so* target/x86_64-unknown-linux-gnu/size-opt/build/ring-*/out/ -Force; cargo zigbuild -p xai-grok-pager-bin --profile size-opt --target x86_64-unknown-linux-gnu.2.34 -j 1 --no-default-features --features sandbox-enforce; if ($LASTEXITCODE -eq 0) { $f = Get-Item target/x86_64-unknown-linux-gnu/size-opt/dx-tui; Write-Output ("dx-tui (linux): {0:N0} bytes ({1:N1} MB)" -f $f.Length, ($f.Length / 1MB)) }
+
 # Size-optimized build (opt-level=z + strip). Same default channel set as
 # `build`, much smaller: ~170 MB vs ~292 MB (measured 2026-09-03).
 # Installs over the same G:\dx\bin + G:\bin targets.
