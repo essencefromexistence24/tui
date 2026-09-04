@@ -22,7 +22,7 @@ executors:
       # rustup auto-installs the version pinned in rust-toolchain.toml (1.94.0)
       # if this image's default differs.
       - image: cimg/rust:1.94.0
-    resource_class: xlarge # 8 vCPU / 16 GB - this dep tree needs the RAM
+    resource_class: xlarge.gen2 # 8 vCPU / 16 GB - gen2 available on free plan (gen1 xlarge is not)
     working_directory: ~/repo
     environment:
       BASH_ENV: /tmp/BASH_ENV
