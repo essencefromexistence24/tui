@@ -1,7 +1,7 @@
 # CircleCI pipeline for xai-grok-pager (the Grok Build TUI).
 #
-# Builds on Linux x86_64 (ubuntu container) and macOS aarch64 (m4pro.medium,
-# available on free CircleCI plans).
+# Builds on Linux x86_64 (ubuntu-2604 machine executor, xlarge.gen2 — free plan)
+# and macOS aarch64 (m4pro.medium, available on free CircleCI plans).
 #
 # protoc: bin/protoc in this repo is a dotslash wrapper (no dotslash on CI),
 # so we download a real protoc 29.3 for the platform and set $PROTOC, which
@@ -18,11 +18,9 @@ parameters:
 
 executors:
   linux-x86_64:
-    docker:
-      # rustup auto-installs the version pinned in rust-toolchain.toml (1.94.0)
-      # if this image's default differs.
-      - image: cimg/rust:1.94.0
-    resource_class: xlarge.gen2 # 8 vCPU / 16 GB - gen2 available on free plan (gen1 xlarge is not)
+    machine:
+      image: ubuntu-2604:current
+    resource_class: xlarge.gen2 # 8 vCPU / 32 GiB - Gen2 Linux VM, available on free plan
     working_directory: ~/repo
     environment:
       BASH_ENV: /tmp/BASH_ENV
@@ -42,10 +40,16 @@ commands:
           name: Install Linux build dependencies
           command: |
             set -euo pipefail
+            touch "$BASH_ENV"
             sudo apt-get update
             sudo apt-get install -y --no-install-recommends \
               cmake pkg-config build-essential unzip \
               libasound2-dev
+            # Machine executor does not ship Rust; install via rustup
+            if ! command -v rustup &>/dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+            fi
+            echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
 
   install-macos-deps:
     steps:
