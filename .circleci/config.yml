@@ -59,7 +59,7 @@ commands:
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
             fi
             echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
-            brew install cmake pkg-config
+            HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK=1 brew install cmake pkgconf
 
   install-protoc:
     steps:
