@@ -1,7 +1,7 @@
 # CircleCI pipeline for xai-grok-pager (the Grok Build TUI).
 #
-# Builds on Linux x86_64 (ubuntu container).
-# macOS builds require a paid CircleCI plan and are excluded.
+# Builds on Linux x86_64 (ubuntu container) and macOS aarch64 (m4pro.medium,
+# available on free CircleCI plans).
 #
 # protoc: bin/protoc in this repo is a dotslash wrapper (no dotslash on CI),
 # so we download a real protoc 29.3 for the platform and set $PROTOC, which
@@ -27,6 +27,14 @@ executors:
     environment:
       BASH_ENV: /tmp/BASH_ENV
 
+  macos-aarch64:
+    macos:
+      xcode: "26.4.1"
+    resource_class: m4pro.medium
+    working_directory: ~/repo
+    environment:
+      BASH_ENV: /tmp/BASH_ENV
+
 commands:
   install-linux-deps:
     steps:
@@ -38,6 +46,20 @@ commands:
             sudo apt-get install -y --no-install-recommends \
               cmake pkg-config build-essential unzip \
               libasound2-dev
+
+  install-macos-deps:
+    steps:
+      - run:
+          name: Install macOS build dependencies
+          command: |
+            set -euo pipefail
+            touch "$BASH_ENV"
+            # Install rustup if not already present
+            if ! command -v rustup &>/dev/null; then
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path
+            fi
+            echo 'source "$HOME/.cargo/env"' >> "$BASH_ENV"
+            brew install cmake pkg-config
 
   install-protoc:
     steps:
@@ -101,8 +123,33 @@ jobs:
           destination: xai-grok-pager-linux-x86_64
       - save-cargo-cache
 
+  build-macos:
+    executor: macos-aarch64
+    steps:
+      - checkout
+      - install-macos-deps
+      - install-protoc
+      - restore-cargo-cache
+      - run:
+          name: Build xai-grok-pager (macOS aarch64)
+          no_output_timeout: 60m
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            rustc --version && cargo --version
+            cargo build -p xai-grok-pager-bin --profile << pipeline.parameters.build_profile >> -j 6
+      - run:
+          name: Report binary size
+          command: |
+            ls -lh target/<< pipeline.parameters.build_profile >>/xai-grok-pager
+      - store_artifacts:
+          path: target/<< pipeline.parameters.build_profile >>/xai-grok-pager
+          destination: xai-grok-pager-macos-aarch64
+      - save-cargo-cache
+
 workflows:
   version: 2
   build:
     jobs:
       - build-linux
+      - build-macos
